@@ -1,0 +1,8 @@
+{
+  "abi": 1,
+  "name": "mock-agent",
+  "version": "0.1.0",
+  "kind": "agent",
+  "package": "agentix_closures.mock_agent",
+  "description": "Mock agent closure used in Agentix tests."
+}

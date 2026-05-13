@@ -91,6 +91,13 @@ class DockerDeployment(Deployment):
         # `.Id` is "sha256:<hex>" — keep the hex only.
         return raw.removeprefix("sha256:")[:16]
 
+    async def _mount_dir_for(self, image: str) -> str:
+        """Internal mount-dir name. Anything unique + short works; the
+        runtime indexes closures by manifest.package, not by mount dir.
+        """
+        digest = await self._image_digest(image)
+        return f"c{digest[:12]}"
+
     async def _ensure_populated(self, image: str) -> str:
         """Ensure the per-content volume `agentix-closure-<digest>` is
         populated from `image`'s /nix. Keyed by image digest (not ref), so:
@@ -121,20 +128,22 @@ class DockerDeployment(Deployment):
     # ── create ───────────────────────────────────────────────────
 
     async def create(self, config: SandboxConfig) -> Sandbox:
-        if "runtime" in config.closures:
-            raise ValueError("namespace 'runtime' is reserved for config.runtime")
-
         sandbox_id = f"agentix-{uuid4().hex[:8]}"
         port = self._allocate_port()
 
-        # Populate all closures in parallel (cached after first).
+        # Populate all closures in parallel (cached after first). Mount-dir
+        # names are internal — runtime indexes closures by manifest.package,
+        # not by directory. We use 'runtime' for the runtime itself (the
+        # entrypoint hardcodes /mnt/runtime/entry/bin/start) and short
+        # digest-derived names for the rest.
         pairs: list[tuple[str, str]] = [("runtime", config.runtime)]
-        pairs.extend(config.closures.items())
+        for img in config.closures:
+            pairs.append((await self._mount_dir_for(img), img))
         vols = await asyncio.gather(*(self._ensure_populated(img) for _, img in pairs))
 
         mount_args: list[str] = []
-        for (ns, _image), vol in zip(pairs, vols):
-            mount_args.extend(["-v", f"{vol}:/mnt/{ns}:ro"])
+        for (mdir, _image), vol in zip(pairs, vols):
+            mount_args.extend(["-v", f"{vol}:/mnt/{mdir}:ro"])
 
         env_args: list[str] = ["-e", f"AGENTIX_BIND_PORT={port}"]
         if config.env:

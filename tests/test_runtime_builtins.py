@@ -15,21 +15,9 @@ pytestmark = pytest.mark.asyncio
 
 
 @pytest.fixture
-def builtins_app(tmp_path: Path, tmp_socket_dir: Path, monkeypatch: pytest.MonkeyPatch):
-    """Point AGENTIX_UPLOAD_ROOT at a tmp dir and reload the runtime modules."""
-    upload_root = tmp_path / "workspace"
-    upload_root.mkdir()
-    monkeypatch.setenv("AGENTIX_UPLOAD_ROOT", str(upload_root))
-
-    import importlib
-    import sys
-
-    for mod in ("agentix.runtime.builtins", "agentix.runtime.loader", "agentix.runtime.server"):
-        if mod in sys.modules:
-            importlib.reload(sys.modules[mod])
-
-    from agentix.runtime import server
-
+def builtins_app(runtime_module):
+    """Alias kept for clarity in tests below: returns (server_module, upload_root)."""
+    server, _mnt, upload_root = runtime_module
     return server, upload_root
 
 
@@ -104,32 +92,34 @@ async def test_upload_download_round_trip(builtins_app):
 
 
 async def test_exec_paths_from_prepends_closure_bin(
-    builtins_app, echo_closure: Path, echo_manifest, mount_closure
+    runtime_module, mount_echo,
 ):
-    """`paths_from=[ns]` prepends /mnt/<ns>/entry/bin to PATH."""
-    server, _root = builtins_app
-
-    closure_bin = echo_closure / "bin"
-    marker = closure_bin / "my-marker"
+    """`paths_from=[<package>]` prepends `<mount>/entry/bin` to PATH."""
+    server, mount_root, _ = runtime_module
+    mount = mount_echo()
+    # Drop a marker script the test can probe via PATH
+    bin_dir = mount / "entry" / "bin"
+    bin_dir.mkdir(parents=True)
+    marker = bin_dir / "my-marker"
     marker.write_text("#!/bin/sh\necho closure-wins\n")
     marker.chmod(0o755)
+    await server._auto_load()
 
-    mount_closure(echo_closure, "echo")
-    loader = server.loader
-    await loader.load("echo", manifest=echo_manifest)
-    try:
-        transport = httpx.ASGITransport(app=server.app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
-            r = await http.post(
-                "/exec", json={"command": "my-marker", "paths_from": ["echo"]}
-            )
-            assert r.status_code == 200
-            assert r.json()["stdout"].strip() == "closure-wins"
+    transport = httpx.ASGITransport(app=server.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+        r = await http.post(
+            "/exec",
+            json={
+                "command": "my-marker",
+                "paths_from": ["agentix_closures.echo"],
+            },
+        )
+        assert r.status_code == 200
+        assert r.json()["stdout"].strip() == "closure-wins"
 
-            r = await http.post("/exec", json={"command": "my-marker"})
-            assert r.json()["exit_code"] != 0
-    finally:
-        await loader.unload("echo")
+        # Without paths_from, the marker is not on PATH.
+        r = await http.post("/exec", json={"command": "my-marker"})
+        assert r.json()["exit_code"] != 0
 
 
 async def test_upload_rejects_path_outside_root(builtins_app):

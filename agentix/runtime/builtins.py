@@ -68,13 +68,23 @@ def _clean_env(
 CLOSURE_MOUNT_ROOT = os.environ.get("AGENTIX_CLOSURE_MOUNT_ROOT", "/mnt")
 
 
-def _resolve_closure_bins(loader, namespaces: list[str]) -> list[str]:
-    """Turn closure namespaces into their `entry/bin` paths under /mnt.
-    `["*"]` expands to every currently-loaded closure.
+def _resolve_closure_bins(packages: list[str]) -> list[str]:
+    """Turn closure package paths into their `entry/bin` paths.
+    `["*"]` expands to every currently-registered closure.
+
+    Uses agentix.runtime.server._mount_paths as the package → mount map;
+    unknown packages are silently dropped.
     """
-    if namespaces == ["*"]:
-        return [f"{CLOSURE_MOUNT_ROOT}/{c.name}/entry/bin" for c in loader.list_closures()]
-    return [f"{CLOSURE_MOUNT_ROOT}/{ns}/entry/bin" for ns in namespaces]
+    from agentix.runtime.server import _mount_paths, registry
+
+    if packages == ["*"]:
+        return [str(_mount_paths[p] / "entry" / "bin") for p in registry.packages()]
+    out: list[str] = []
+    for pkg in packages:
+        mount = _mount_paths.get(pkg)
+        if mount is not None:
+            out.append(str(mount / "entry" / "bin"))
+    return out
 
 
 # ── exec ─────────────────────────────────────────────────────────
@@ -104,8 +114,7 @@ async def exec_endpoint(req: ExecRequest, request: Request):
     """Run a shell command. SSE when `Accept: text/event-stream`; else buffered JSON."""
     prepend = None
     if req.paths_from:
-        loader = request.app.state.loader
-        prepend = _resolve_closure_bins(loader, req.paths_from)
+        prepend = _resolve_closure_bins(req.paths_from)
     env = _clean_env(req.env, prepend_path=prepend)
     max_output = req.max_output or MAX_OUTPUT_BYTES
 

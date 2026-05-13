@@ -5,7 +5,7 @@
 v0.1.0 ships exactly three concerns:
 
 1. A **closure convention** — what a Docker image must contain to be consumable by Agentix.
-2. A **runtime server** — one process per sandbox that provides sandbox I/O and reverse-proxies to each closure.
+2. A **runtime server** — one Python process per sandbox that imports each mounted closure's Python package and exposes typed remote dispatch + sandbox I/O.
 3. A **Docker deployment** — packages closures into named volumes, assembles sandboxes, starts the runtime.
 
 See [`ROADMAP.md`](../ROADMAP.md) for what comes later.
@@ -16,43 +16,46 @@ See [`ROADMAP.md`](../ROADMAP.md) for what comes later.
 ┌─ Host (orchestrator) ─────────────────────────────────────────┐
 │  RuntimeClient                                                 │
 │    • run / upload / download           (runtime built-ins)     │
-│    • closures / logs                   (introspection)         │
-│    • call(namespace, endpoint, data)   (any mounted closure)   │
+│    • closures                           (introspection)        │
+│    • remote(fn, *args, **kwargs)        (typed dispatch)       │
 └──────────────────────────────┬─────────────────────────────────┘
-                               │ HTTP
+                               │ HTTP (POST /_remote)
 ┌─ Sandbox ──────────────────────▼───────────────────────────────┐
 │                                                                 │
-│  agentix-server                                                 │
+│  agentix-server (single Python process)                         │
 │    built-in I/O:                                                │
 │      GET  /health                                               │
 │      POST /exec     (SSE or JSON)                               │
 │      POST /upload                                               │
 │      GET  /download                                             │
-│    closure introspection:                                       │
-│      GET  /closures, /closures/{ns}/logs                        │
-│    streaming reverse proxy:                                     │
-│      ANY  /{namespace}/{path*}                                  │
+│      GET  /closures                                             │
+│    typed dispatch:                                              │
+│      POST /_remote   { package, method, args, kwargs }          │
 │                                                                 │
-│  Closures (Unix sockets at /tmp/agentix/{ns}.sock):             │
-│    forked by the runtime at startup from each                   │
-│    /mnt/<ns>/entry/bin/start                                    │
+│  Registry: package → Dispatcher (in-process, no subprocesses)   │
+│    populated at startup by importing each /mnt/<dir>/entry/     │
+│    python/<package>/ and calling <package>._register.register() │
 │                                                                 │
 │  /nix/store — tmpfs with a symlink forest merged from every     │
-│  /mnt/<ns>/store content-addressed directory                    │
+│  /mnt/<dir>/store content-addressed directory                   │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-The runtime's lifespan scans `/mnt` at startup and forks each closure it finds. Closures are fixed for the sandbox's lifetime; change the set by recreating the sandbox.
+The runtime's lifespan scans `/mnt` at startup and imports each closure's Python package. Closures are fixed for the sandbox's lifetime; change the set by recreating the sandbox.
 
 ## Closure convention
 
 A closure is a Docker image that declares `VOLUME /nix` and carries:
 
 - `/nix/store/<hash>-*/` — content-addressed Nix dependencies (the transitive closure)
-- `/nix/entry/bin/start` — executable entry point (no CLI args)
-- `/nix/entry/manifest.json` — `ClosureManifest` with `abi == AGENTIX_CLOSURE_ABI`; the marker that identifies the mount as a closure
+- `/nix/entry/python/agentix_closures/<name>/` — Python package the runtime imports
+  - `__init__.py` — typed stubs (caller imports)
+  - `_impl.py` — real implementation
+  - `_register.py` — `def register() -> Dispatcher`
+- `/nix/entry/manifest.json` — `ClosureManifest` with `abi == AGENTIX_CLOSURE_ABI` and `package = "agentix_closures.<name>"`
+- Optional: `/nix/entry/bin/...` — native binaries the impl shells out to
 
-The `start` binary reads `AGENTIX_SOCKET` from env and binds a local HTTP server on that Unix socket. It SHOULD expose `GET /` returning the same manifest JSON — the runtime probes it only as a readiness signal. Everything else — routes, request schemas, streaming semantics — is the closure's choice; the runtime just proxies bytes.
+Routing is by `manifest.package`; there are no caller-chosen namespaces. Two images shipping the same `package` collide — the second mount is skipped with a warning.
 
 See [`closure-protocol.md`](closure-protocol.md) for the full ABI.
 
@@ -65,10 +68,12 @@ See [`closure-protocol.md`](closure-protocol.md) for the full ABI.
 │   │   ├── store/<hash>-*/
 │   │   └── entry/
 │   │       └── bin/start   ← the agentix-server binary
-│   └── <ns>/          ← one mount per closure, ro
+│   └── c<digest>/     ← one mount per closure, ro; dir name is internal
 │       ├── store/<hash>-*/
 │       └── entry/
-│           └── bin/start
+│           ├── python/agentix_closures/<name>/
+│           ├── bin/<cli>           (optional)
+│           └── manifest.json
 │
 ├── nix/
 │   └── store/         ← --tmpfs /nix (writable),
@@ -91,15 +96,12 @@ Why the symlink forest: Nix binaries have `/nix/store/<hash>` hard-coded in sheb
 
 ## Environment & PATH policy
 
-The runtime is a Nix-built binary, so `os.environ` is loaded with Nix-runtime paths (`LD_LIBRARY_PATH`, `FONTCONFIG_FILE`, `NIX_*`, etc.). Leaking those into subprocesses causes glibc/ABI mismatches with task-image binaries.
-
-Rules at every `/exec` and closure fork:
+Rules at every `/exec` invocation:
 
 1. **Strip Nix-host-only env vars** — `LD_LIBRARY_PATH`, `LD_PRELOAD`, `PYTHONPATH`, `PYTHONHOME`, `LOCALE_ARCHIVE`, `FONTCONFIG_*`, `SSL_CERT_FILE`, anything prefixed `NIX_`.
 2. **PATH defaults to the task image's default** (`/usr/local/bin:/usr/bin:/bin`). Task-image tools take precedence over closure-bundled tools of the same name.
-3. **Closures invoke their own tools by absolute `/nix/store` path** — what well-formed Nix builds already produce via shebangs and wrappers.
-
-When a closure is forked, PATH is prepended with `/mnt/<ns>/entry/bin` so the closure's own shell-outs resolve to its bundled tools first.
+3. **Opt-in closure bins** — `paths_from=["agentix_closures.<name>"]` prepends that closure's `entry/bin`. `["*"]` includes all loaded.
+4. **Closure Python impls run in the runtime's interpreter** — they invoke native tools via `subprocess` with absolute `/nix/store` paths, which resolve via the symlink forest.
 
 ## Deployment (Docker)
 
@@ -118,7 +120,7 @@ docker run -d \
   --name <sandbox-id> \
   --network host \
   -v agentix-closure-<runtime-digest>:/mnt/runtime:ro \
-  -v agentix-closure-<ns-digest>:/mnt/<ns>:ro   (per closure) \
+  -v agentix-closure-<digest>:/mnt/c<digest>:ro   (per closure) \
   --tmpfs /nix:exec,mode=755 \
   -e AGENTIX_BIND_PORT=<port> \
   <task-image> sh -c '<entrypoint>'
@@ -126,13 +128,15 @@ docker run -d \
 
 ## Design decisions
 
-- **Unix sockets over HTTP** — every HTTP stack works out of the box; curl-debuggable; logs stay clean.
-- **Process per closure** — isolation, independent crashes, independent deps.
-- **Runtime forwards bytes verbatim** — closures own their wire schemas; streaming (SSE, chunked) works end-to-end.
+- **In-process dispatch** — closures are Python modules in the runtime's interpreter; no subprocess, no UDS, no reverse-proxy. Cheaper, simpler, fully typed.
+- **Module path = routing key** — `manifest.package` is the identity. No caller-chosen namespaces; no metadata to drift.
+- **Typed stubs are the API spec** — IDE and mypy enforce parameter types; no separate schema artifact.
 - **Static closure set per sandbox** — change the set by recreating the sandbox.
 - **Built-in sandbox I/O on the runtime** — run / upload / download always available.
+- **Closures share the runtime's Python interpreter** — Python wrappers stay thin (stdlib + pydantic, which the runtime already ships). Heavy deps belong in Nix-bundled native binaries.
 
 ## Out of scope (v0.1.0)
 
 - Bearer-token auth on the runtime (sandbox-level trust assumed).
+- Streaming returns from `remote(...)` (request/response only; reserved for v0.2).
 - Higher-level interfaces for agents / datasets / benchmarks — see [`ROADMAP.md`](../ROADMAP.md).

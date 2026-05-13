@@ -1,110 +1,154 @@
 """Agentix runtime server.
 
-The runtime server bundles:
-  - built-in operations (exec/upload/download) mounted at root
-  - a closure loader + streaming reverse proxy for closures already mounted
+In-process closure dispatch. The runtime is a single Python process serving:
 
-Closures are static per sandbox: the deployment has mounted each closure at
-`/mnt/<namespace>` before the runtime starts. On startup the runtime scans
-/mnt and forks every closure it finds with an entry/bin/start. There is
-no dynamic load/unload — sandbox contents are fixed at create time.
+- built-in operations (exec/upload/download) mounted at root
+- `POST /_remote` — direct dispatch to a bound impl, body specifies the
+  closure's Python package path + method name
+- `GET /closures` — inventory
+- `GET /health`
+
+There are no caller-chosen namespaces: each closure's Python import path
+(`manifest.package`) is its routing key. Two images shipping the same
+package collide; the second is skipped with a warning.
+
+Discovery: on startup, scan /mnt/* for `entry/manifest.json`, validate
+against ClosureManifest, prepend each closure's `entry/python` to sys.path,
+import its declared `package`, and call `<package>._register.register()`
+to obtain a Dispatcher. Closures with no/invalid/abi-mismatched manifest
+are skipped — non-closure mounts (task data, caches) can coexist under
+/mnt without tripping discovery.
 """
 
 from __future__ import annotations
 
+import importlib
 import logging
 import os
+import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-import httpx
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException
 from pydantic import ValidationError
 
 from agentix import __version__
+from agentix.dispatch import Dispatcher, Registry
 from agentix.models import (
     AGENTIX_CLOSURE_ABI,
+    ClosureInfo,
     ClosureManifest,
     HealthResponse,
-    LogsResponse,
+    RemoteRequest,
+    RemoteResponse,
 )
 from agentix.runtime.builtins import router as builtins_router
-from agentix.runtime.loader import CLOSURE_MOUNT_ROOT, ClosureLoader
-
-_HTTPX_UNREACHABLE = (
-    httpx.ConnectError,
-    httpx.ReadError,
-    httpx.RemoteProtocolError,
-    httpx.TransportError,
-)
 
 logger = logging.getLogger("agentix.runtime")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 
-loader = ClosureLoader()
+CLOSURE_MOUNT_ROOT = Path(os.environ.get("AGENTIX_CLOSURE_MOUNT_ROOT", "/mnt"))
+
+registry = Registry()
+_manifests: dict[str, ClosureManifest] = {}  # package -> manifest
+_mount_paths: dict[str, Path] = {}            # package -> /mnt/<dir>
 
 
 async def _auto_load() -> None:
-    """Scan /mnt for mounted closures and fork each one.
+    """Scan /mnt for closures and register each one's Dispatcher.
 
-    A `/mnt/<ns>` directory is a closure iff `entry/manifest.json` parses as a
-    ClosureManifest with `abi == AGENTIX_CLOSURE_ABI`. Missing/invalid/wrong-abi
-    manifests are skipped with a warning so non-closure mounts (caches, task
-    data) can coexist under /mnt without tripping discovery.
+    For each mount with a valid `entry/manifest.json`:
+      1. Prepend `<mount>/entry/python` to sys.path.
+      2. Import the package named in `manifest.package`.
+      3. Import `<package>._register` and call `register()` -> Dispatcher.
+      4. Add to the Registry keyed by `manifest.package`.
 
-    The runtime itself is mounted at /mnt/runtime; skip it.
+    Failures at any step skip that closure with an error log; runtime keeps
+    going. The mount named `runtime` is reserved (the server itself).
     """
     if not CLOSURE_MOUNT_ROOT.is_dir():
         return
-    for ns_dir in sorted(CLOSURE_MOUNT_ROOT.iterdir()):
-        if ns_dir.name == "runtime" or not ns_dir.is_dir():
+    for mount in sorted(CLOSURE_MOUNT_ROOT.iterdir()):
+        if mount.name == "runtime" or not mount.is_dir():
             continue
-        manifest = _read_manifest(ns_dir)
+        manifest = _read_manifest(mount)
         if manifest is None:
             continue
-        await loader.load(ns_dir.name, manifest=manifest)
-        logger.info("Auto-loaded closure '%s' (manifest=%s)", ns_dir.name, manifest.name)
+        if manifest.package in registry:
+            logger.error(
+                "skip mount %s: package %r already registered from %s",
+                mount, manifest.package, _mount_paths[manifest.package],
+            )
+            continue
+        try:
+            dispatcher = _load_dispatcher(mount, manifest)
+        except Exception as exc:
+            logger.exception("skip mount %s: failed to load package '%s': %s",
+                             mount, manifest.package, exc)
+            continue
+        registry.add(manifest.package, dispatcher)
+        _manifests[manifest.package] = manifest
+        _mount_paths[manifest.package] = mount
+        logger.info("registered closure '%s' from %s (methods=%s)",
+                    manifest.package, mount, dispatcher.methods())
 
 
-def _read_manifest(ns_dir) -> ClosureManifest | None:
-    """Read and validate /mnt/<ns>/entry/manifest.json. Returns None if the
-    directory is not a closure (or carries an incompatible one).
-    """
-    mf_path = ns_dir / "entry" / "manifest.json"
+def _read_manifest(mount: Path) -> ClosureManifest | None:
+    """Read and validate <mount>/entry/manifest.json."""
+    mf_path = mount / "entry" / "manifest.json"
     if not mf_path.is_file():
-        logger.warning("skip %s: missing entry/manifest.json", ns_dir.name)
+        logger.warning("skip mount %s: missing entry/manifest.json", mount)
         return None
     try:
         manifest = ClosureManifest.model_validate_json(mf_path.read_text())
     except ValidationError as exc:
-        logger.error("skip %s: invalid manifest.json: %s", ns_dir.name, exc)
+        logger.error("skip mount %s: invalid manifest.json: %s", mount, exc)
         return None
     if manifest.abi != AGENTIX_CLOSURE_ABI:
         logger.warning(
-            "skip %s: abi=%d, runtime supports %d",
-            ns_dir.name, manifest.abi, AGENTIX_CLOSURE_ABI,
+            "skip mount %s: abi=%d, runtime supports %d",
+            mount, manifest.abi, AGENTIX_CLOSURE_ABI,
         )
         return None
-    start = ns_dir / "entry" / "bin" / "start"
-    if not (start.exists() and os.access(start, os.X_OK)):
-        logger.error("skip %s: manifest valid but %s is not executable", ns_dir.name, start)
-        return None
     return manifest
+
+
+def _load_dispatcher(mount: Path, manifest: ClosureManifest) -> Dispatcher:
+    """Import the closure's package and obtain its Dispatcher.
+
+    Convention: `<package>._register.register() -> Dispatcher`. The closure
+    image arranges for the package to be importable by dropping it (and any
+    deps not provided by the runtime image) under `<mount>/entry/python/`.
+    """
+    py_root = mount / "entry" / "python"
+    if py_root.is_dir():
+        sys.path.insert(0, str(py_root))
+    pkg = importlib.import_module(manifest.package)
+    register_mod = importlib.import_module(f"{manifest.package}._register")
+    if not hasattr(register_mod, "register"):
+        raise AttributeError(f"{manifest.package}._register has no register()")
+    dispatcher = register_mod.register()
+    if not isinstance(dispatcher, Dispatcher):
+        raise TypeError(
+            f"{manifest.package}._register.register() returned "
+            f"{type(dispatcher).__name__}, expected Dispatcher"
+        )
+    _ = pkg  # imported for side effects (stub module must exist)
+    return dispatcher
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await _auto_load()
     yield
-    await loader.shutdown()
 
 
 app = FastAPI(title="agentix", version=__version__, lifespan=lifespan)
-app.state.loader = loader
+app.state.registry = registry
 app.include_router(builtins_router)
 
 
-# ── Health ───────────────────────────────────────────────────────
+# ── Health & inventory ──────────────────────────────────────────
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -112,69 +156,29 @@ async def health() -> HealthResponse:
     return HealthResponse(version=__version__)
 
 
-# ── Closure introspection ───────────────────────────────────────
-
-
 @app.get("/closures")
-async def list_closures():
-    return [c.model_dump() for c in loader.list_closures()]
+async def list_closures() -> list[ClosureInfo]:
+    return [
+        ClosureInfo(path=str(_mount_paths[pkg]), manifest=_manifests[pkg])
+        for pkg in registry.packages()
+    ]
 
 
-@app.get("/closures/{namespace}/logs", response_model=LogsResponse)
-async def closure_logs(namespace: str, tail: int | None = None) -> LogsResponse:
-    try:
-        stdout, stderr = loader.logs(namespace, tail=tail)
-    except KeyError:
-        raise HTTPException(status_code=404, detail=f"Closure '{namespace}' not loaded")
-    return LogsResponse(namespace=namespace, stdout=stdout, stderr=stderr)
+# ── Remote dispatch ─────────────────────────────────────────────
 
 
-# ── Reverse proxy (catch-all) ────────────────────────────────────
-
-
-@app.api_route(
-    "/{namespace}/{path:path}",
-    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
-)
-async def proxy_to_closure(namespace: str, path: str, request: Request):
-    """Streaming reverse proxy: /{namespace}/{path} → closure's Unix socket."""
-    try:
-        body = await request.body()
-        status, headers, iterator, closer = await loader.proxy_stream(
-            name=namespace,
-            method=request.method,
-            path=f"/{path}",
-            headers=dict(request.headers),
-            body=body if body else None,
-            query=request.url.query or None,
+@app.post("/_remote", response_model=RemoteResponse)
+async def remote_call(request: RemoteRequest) -> RemoteResponse:
+    dispatcher = registry.get(request.package)
+    if dispatcher is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"closure not loaded: package={request.package!r}",
         )
-    except KeyError:
-        return JSONResponse(
-            status_code=502,
-            content={"error": "closure not loaded", "namespace": namespace},
-        )
-    except _HTTPX_UNREACHABLE as exc:
-        return JSONResponse(
-            status_code=502,
-            content={"error": f"closure unreachable: {exc}", "namespace": namespace},
-        )
-
-    async def _stream():
-        try:
-            async for chunk in iterator:
-                yield chunk
-        finally:
-            await closer()
-
-    return StreamingResponse(
-        _stream(),
-        status_code=status,
-        headers=headers,
-        media_type=headers.get("content-type"),
-    )
+    return await dispatcher.dispatch(request)
 
 
-# ── Entry point (invoked as /mnt/runtime/entry/bin/start) ─────
+# ── Entry point (invoked as /mnt/runtime/entry/bin/start) ───────
 
 
 def main() -> None:

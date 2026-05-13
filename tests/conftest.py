@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
+import importlib
 import json
-import os
 import socket
-import stat
 import sys
 import textwrap
 from pathlib import Path
+from typing import Callable
 
 import pytest
 
-from agentix.models import AGENTIX_CLOSURE_ABI, ClosureManifest
+
+# ── network / runtime setup ──────────────────────────────────────
 
 
 @pytest.fixture
@@ -23,140 +24,160 @@ def free_port() -> int:
 
 
 @pytest.fixture
-def tmp_socket_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Isolate the loader's socket directory and /mnt root to per-test tmp paths."""
-    sock_dir = tmp_path / "sockets"
-    sock_dir.mkdir()
+def runtime_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Isolated runtime: tmp /mnt + tmp upload root + reloaded modules.
+
+    Returns (server_module, mount_root, upload_root).
+    """
     mount_root = tmp_path / "mnt"
     mount_root.mkdir()
-    monkeypatch.setenv("AGENTIX_SOCKET_DIR", str(sock_dir))
+    upload_root = tmp_path / "workspace"
+    upload_root.mkdir()
     monkeypatch.setenv("AGENTIX_CLOSURE_MOUNT_ROOT", str(mount_root))
-    # Force loader module to re-read env.
-    import importlib
+    monkeypatch.setenv("AGENTIX_UPLOAD_ROOT", str(upload_root))
 
-    if "agentix.runtime.loader" in sys.modules:
-        importlib.reload(sys.modules["agentix.runtime.loader"])
-    return sock_dir
+    for mod in ("agentix.runtime.builtins", "agentix.runtime.server"):
+        if mod in sys.modules:
+            importlib.reload(sys.modules[mod])
 
+    from agentix.runtime import server
 
-@pytest.fixture
-def mount_root(tmp_socket_dir: Path) -> Path:
-    """The per-test /mnt root (sibling of tmp_socket_dir)."""
-    return tmp_socket_dir.parent / "mnt"
+    return server, mount_root, upload_root
 
 
-@pytest.fixture
-def mount_closure(mount_root: Path):
-    """Callable helper: `mount_closure(closure_path, "foo")` creates
-    <mount_root>/foo/entry → closure_path, mimicking what the deployment
-    layer does by mounting the closure volume at /mnt/foo.
+# ── closure-on-disk builder ──────────────────────────────────────
 
-    The `closure_path` fixture (echo_closure) already has bin/start at its
-    root. We wrap it so /mnt/<ns>/entry/bin/start resolves correctly.
+
+def _write_pkg(py_root: Path, package: str, init_src: str, impl_src: str, register_src: str) -> None:
+    """Drop a Python package tree at `py_root/<package-path>/` with PEP 420
+    namespace-package treatment for parents (only the leaf has __init__.py).
     """
-    def _mount(closure_path: Path, namespace: str) -> Path:
-        ns_dir = mount_root / namespace
-        ns_dir.mkdir(exist_ok=True)
-        entry = ns_dir / "entry"
-        if entry.exists() or entry.is_symlink():
-            if entry.is_symlink() or entry.is_file():
-                entry.unlink()
-            else:
-                import shutil
+    parts = package.split(".")
+    parent = py_root
+    for p in parts[:-1]:
+        parent = parent / p
+        parent.mkdir(parents=True, exist_ok=True)
+    leaf = parent / parts[-1]
+    leaf.mkdir(parents=True, exist_ok=True)
+    (leaf / "__init__.py").write_text(init_src)
+    (leaf / "_impl.py").write_text(impl_src)
+    (leaf / "_register.py").write_text(register_src)
 
-                shutil.rmtree(entry)
-        entry.symlink_to(closure_path)
-        return ns_dir
+
+@pytest.fixture
+def mount_package(runtime_module) -> Callable[..., Path]:
+    """Lay out a closure mount: `<mount>/entry/{manifest.json, python/<pkg>/}`.
+
+    Usage:
+        mount = mount_package(
+            "echo",
+            package="agentix_closures.echo",
+            init_src="...",
+            impl_src="...",
+            register_src="...",
+        )
+    """
+    server, mount_root, _ = runtime_module
+
+    def _mount(
+        dirname: str,
+        *,
+        package: str,
+        init_src: str,
+        impl_src: str,
+        register_src: str,
+        abi: int = 1,
+        version: str = "0.1.0",
+        extra_manifest: dict | None = None,
+    ) -> Path:
+        mount = mount_root / dirname
+        entry = mount / "entry"
+        entry.mkdir(parents=True)
+        manifest = {
+            "abi": abi,
+            "name": package.rsplit(".", 1)[-1].replace("_", "-"),
+            "version": version,
+            "package": package,
+            **(extra_manifest or {}),
+        }
+        (entry / "manifest.json").write_text(json.dumps(manifest))
+        _write_pkg(
+            entry / "python",
+            package=package,
+            init_src=init_src,
+            impl_src=impl_src,
+            register_src=register_src,
+        )
+        return mount
+
     return _mount
 
 
-@pytest.fixture
-def echo_manifest() -> ClosureManifest:
-    """The ClosureManifest that echo_closure ships in its image-time manifest.json.
-    Tests pass this when calling loader.load(...) directly (auto-load reads it
-    from disk via _read_manifest()).
+# ── reusable closure sources ─────────────────────────────────────
+
+
+ECHO_INIT = textwrap.dedent(
+    """\
+    from dataclasses import dataclass
+
+    @dataclass
+    class EchoResult:
+        msg: str
+
+    def echo(msg: str) -> EchoResult:
+        raise NotImplementedError("call via RuntimeClient.remote(echo, ...)")
     """
-    return ClosureManifest(
-        abi=AGENTIX_CLOSURE_ABI,
-        name="echo",
-        version="0.0.1",
-        kind="tool",
-        endpoints=[
-            {"method": "GET", "path": "/", "description": "manifest"},
-            {"method": "POST", "path": "/echo"},
-        ],
-    )
+)
+
+ECHO_IMPL = textwrap.dedent(
+    """\
+    from . import EchoResult
+
+    def echo(msg: str) -> EchoResult:
+        return EchoResult(msg=f"echo:{msg}")
+    """
+)
+
+ECHO_REGISTER = textwrap.dedent(
+    """\
+    from agentix.dispatch import Dispatcher
+    from . import echo
+    from ._impl import echo as _echo_impl
+
+    def register() -> Dispatcher:
+        d = Dispatcher()
+        d.bind(echo, _echo_impl)
+        return d
+    """
+)
 
 
 @pytest.fixture
-def echo_closure(tmp_path: Path, echo_manifest: ClosureManifest) -> Path:
-    """Build an ephemeral Python closure directory that:
-    - ships manifest.json at the closure root (mounted as entry/manifest.json)
-    - exposes GET / serving the same manifest dict (readiness probe)
-    - exposes POST /echo returning request body
-    Entry point is `bin/start`, an in-tree Python script using stdlib http.server
-    (no FastAPI dep needed in the test env). Reads AGENTIX_SOCKET from env —
-    no CLI args — matching the Agentix closure convention.
+def mount_echo(mount_package) -> Callable[..., Path]:
+    """Mount the canonical 'echo' closure used across many tests.
+
+    Returns the mount dir. After this fixture runs and the runtime's
+    `_auto_load()` is called, `from agentix_closures.echo import echo`
+    becomes importable in the test process (because _auto_load prepends
+    the closure's `entry/python` to sys.path).
     """
-    closure = tmp_path / "echo-closure"
-    (closure / "bin").mkdir(parents=True)
-    (closure / "manifest.json").write_text(echo_manifest.model_dump_json())
-    script = closure / "bin" / "start"
-    script.write_text(
-        textwrap.dedent(
-            """\
-            #!/usr/bin/env python3
-            import json, os, socket, sys, threading
-            from http.server import BaseHTTPRequestHandler
-            from socketserver import UnixStreamServer
-
-            SOCKET_PATH = os.environ["AGENTIX_SOCKET"]
-
-            MANIFEST = {
-                "name": "echo",
-                "version": "0.0.1",
-                "kind": "tool",
-                "endpoints": [
-                    {"method": "GET", "path": "/", "description": "manifest"},
-                    {"method": "POST", "path": "/echo"},
-                ],
-            }
-
-            class H(BaseHTTPRequestHandler):
-                def log_message(self, *a, **k):
-                    pass
-                def _json(self, code, obj):
-                    body = json.dumps(obj).encode()
-                    self.send_response(code)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
-                def do_GET(self):
-                    if self.path == "/":
-                        print("got GET /", flush=True)
-                        return self._json(200, MANIFEST)
-                    self._json(404, {"error": "not found"})
-                def do_POST(self):
-                    length = int(self.headers.get("Content-Length") or 0)
-                    raw = self.rfile.read(length) if length else b""
-                    try:
-                        data = json.loads(raw.decode()) if raw else None
-                    except Exception:
-                        data = {"_raw": raw.decode(errors="replace")}
-                    print("handled POST", self.path, flush=True)
-                    self._json(200, {"path": self.path, "data": data})
-
-            class UDSHTTPServer(UnixStreamServer):
-                def get_request(self):
-                    request, _ = super().get_request()
-                    return request, ("unix", 0)
-
-            server = UDSHTTPServer(SOCKET_PATH, H)
-            print(f"listening on {SOCKET_PATH}", flush=True)
-            server.serve_forever()
-            """
+    def _mount(dirname: str = "echo", *, package: str = "agentix_closures.echo") -> Path:
+        return mount_package(
+            dirname,
+            package=package,
+            init_src=ECHO_INIT,
+            impl_src=ECHO_IMPL,
+            register_src=ECHO_REGISTER,
         )
-    )
-    os.chmod(script, os.stat(script).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    return closure
+    return _mount
+
+
+@pytest.fixture(autouse=True)
+def _purge_test_packages():
+    """Per-test cleanup: drop any agentix_closures.* modules imported by the
+    runtime's _auto_load so the next test's fresh sys.path takes effect.
+    """
+    yield
+    for mod in list(sys.modules):
+        if mod == "agentix_closures" or mod.startswith("agentix_closures."):
+            sys.modules.pop(mod, None)

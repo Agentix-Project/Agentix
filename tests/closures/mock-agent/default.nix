@@ -5,27 +5,20 @@ let
   pythonPkgs = python.pkgs;
 in
 pythonPkgs.buildPythonApplication {
-  pname = "mock-agent";
+  pname = "agentix-closure-mock-agent";
   version = "0.1.0";
   format = "pyproject";
 
   src = ./.;
 
   nativeBuildInputs = [ pythonPkgs.hatchling ];
-
-  propagatedBuildInputs = [
-    pythonPkgs.fastapi
-    pythonPkgs.uvicorn
-  ];
-
+  propagatedBuildInputs = [ pythonPkgs.pydantic ];
   doCheck = false;
 
-  # Agentix closure manifest — runtime reads this from
-  # /mnt/<ns>/entry/manifest.json to identify the mount as a closure.
+  # Drop the manifest into $out alongside the Python package, so the closure
+  # image's entry symlink resolves /nix/entry/manifest.json correctly.
   postInstall = ''
-    cat > $out/manifest.json <<'JSON'
-    {"abi":1,"name":"mock-agent","version":"0.1.0","kind":"agent","description":"Mock agent: returns the instruction as a fake patch.","endpoints":[{"method":"POST","path":"/run","description":"Run against an instruction. Body: {instruction, workdir?}"}]}
-    JSON
+    cp ${./manifest.json} $out/manifest.json
   '';
 
   meta.description = "Mock agent closure used in Agentix tests";

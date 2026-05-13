@@ -1,0 +1,8 @@
+{
+  "abi": 1,
+  "name": "mock-dataset",
+  "version": "0.1.0",
+  "kind": "dataset",
+  "package": "agentix_closures.mock_dataset",
+  "description": "Mock dataset closure used in Agentix tests."
+}

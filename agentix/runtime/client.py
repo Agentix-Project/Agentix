@@ -1,28 +1,49 @@
 """Async HTTP client for the agentix runtime server.
 
-Wraps the runtime's built-in endpoints (run/upload/download, /closures,
-/closures/{ns}/logs) as typed helpers, plus the generic
-`call(namespace, endpoint, ...)` for any closure in the sandbox.
-Closures are baked into the sandbox at create time — no /load/unload.
+Wraps:
+  - typed remote-call dispatch: `RuntimeClient.remote(fn, *args, **kwargs)`,
+    where `fn` is a stub function imported from a closure's Python package.
+    Routing key is `fn.__module__`; result is decoded into `fn`'s return type.
+  - built-in `/exec`, `/upload`, `/download`, plus `/closures` introspection.
+
+There is no longer a generic HTTP reverse-proxy to closures — `remote` is
+the single typed entry point.
 """
 
 from __future__ import annotations
 
+import inspect
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, ParamSpec, TypeVar
 
 import httpx
+from pydantic import TypeAdapter
 
 from agentix.models import (
     ClosureInfo,
     ExecRequest,
     ExecResponse,
     HealthResponse,
-    LogsResponse,
+    RemoteError,
+    RemoteRequest,
+    RemoteResponse,
     UploadResponse,
 )
+
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+class RemoteCallError(RuntimeError):
+    """Raised when a remote closure impl returns a non-ok RemoteResponse."""
+
+    def __init__(self, package: str, method: str, error: RemoteError):
+        super().__init__(f"{package}.{method}: {error.type}: {error.message}")
+        self.package = package
+        self.method = method
+        self.error = error
 
 
 class RuntimeClient:
@@ -54,52 +75,36 @@ class RuntimeClient:
         r.raise_for_status()
         return [ClosureInfo.model_validate(x) for x in r.json()]
 
-    async def logs(self, namespace: str, tail: int | None = None) -> LogsResponse:
-        params = {"tail": tail} if tail is not None else None
-        r = await self._client.get(f"/closures/{namespace}/logs", params=params)
-        r.raise_for_status()
-        return LogsResponse.model_validate(r.json())
+    # ── typed remote call ────────────────────────────────────────
 
-    # ── generic closure proxy ────────────────────────────────────
-
-    async def call(
+    async def remote(
         self,
-        namespace: str,
-        endpoint: str,
-        data: dict | None = None,
-        method: str = "POST",
-    ) -> Any:
-        """Call an endpoint on a mounted closure. Returns parsed JSON when the
-        closure responds with a JSON content-type; otherwise the raw text body.
+        fn: Callable[P, R],
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> R:
+        """Execute `fn` in the sandbox and return its typed result.
+
+        `fn` must be a stub function exported by a closure's Python package
+        (e.g. `from agentix_closures.claude_code import run`). Routing uses
+        `fn.__module__`; method name is `fn.__name__`; the return type is
+        decoded via `inspect.signature(fn).return_annotation`.
         """
-        url = f"/{namespace}/{endpoint.lstrip('/')}"
-        if method.upper() == "GET":
-            r = await self._client.get(url, params=data)
-        else:
-            r = await self._client.request(method.upper(), url, json=data)
+        package = fn.__module__
+        method = fn.__name__
+        body = RemoteRequest(package=package, method=method, args=list(args), kwargs=dict(kwargs))
+        r = await self._client.post("/_remote", json=body.model_dump())
         r.raise_for_status()
-        ctype = r.headers.get("content-type", "")
-        return r.json() if "json" in ctype else r.text
+        resp = RemoteResponse.model_validate(r.json())
+        if not resp.ok:
+            assert resp.error is not None
+            raise RemoteCallError(package=package, method=method, error=resp.error)
+        return_ann = inspect.signature(fn).return_annotation
+        if return_ann is inspect.Signature.empty:
+            return resp.value  # type: ignore[return-value]
+        return TypeAdapter(return_ann).validate_python(resp.value)
 
-    async def call_stream(
-        self,
-        namespace: str,
-        endpoint: str,
-        data: dict | None = None,
-        method: str = "POST",
-        accept: str = "text/event-stream",
-    ) -> AsyncIterator[bytes]:
-        """Stream raw bytes from a closure endpoint (e.g. SSE from `/exec`)."""
-        url = f"/{namespace}/{endpoint.lstrip('/')}"
-        headers = {"accept": accept}
-        async with self._client.stream(
-            method.upper(), url, json=data, headers=headers
-        ) as r:
-            r.raise_for_status()
-            async for chunk in r.aiter_bytes():
-                yield chunk
-
-    # ── runtime I/O primitives (exec / upload / download / ls) ──
+    # ── runtime I/O primitives (exec / upload / download) ───────
 
     @staticmethod
     def _exec_body(
@@ -130,8 +135,9 @@ class RuntimeClient:
     ) -> ExecResponse:
         """Buffered shell exec: run `command` and return the full captured output.
 
-        `paths_from` prepends the `bin/` of the listed closures to PATH for
-        this command only. Pass `["*"]` to include every mounted closure.
+        `paths_from` prepends the `bin/` of the listed closures (by Python
+        package path) to PATH for this command only. Pass `["*"]` to include
+        every mounted closure.
         """
         body = self._exec_body(command, cwd, env, timeout, max_output, paths_from)
         r = await self._client.post("/exec", json=body)
@@ -167,9 +173,7 @@ class RuntimeClient:
                         yield event
 
     async def upload(self, local_path: str | Path, dest: str) -> UploadResponse:
-        """Upload a local file to `dest` inside the sandbox. `dest` must be
-        under the server's AGENTIX_UPLOAD_ROOT (default `/workspace`).
-        """
+        """Upload a local file to `dest` inside the sandbox."""
         p = Path(local_path)
         with open(p, "rb") as f:
             r = await self._client.post(
@@ -181,9 +185,7 @@ class RuntimeClient:
         return UploadResponse.model_validate(r.json())
 
     async def download(self, path: str, local_path: str | Path) -> int:
-        """Stream a sandbox file down to `local_path`. Paths are resolved under
-        AGENTIX_UPLOAD_ROOT on the server.
-        """
+        """Stream a sandbox file down to `local_path`."""
         r = await self._client.get("/download", params={"path": path})
         r.raise_for_status()
         lp = Path(local_path)
