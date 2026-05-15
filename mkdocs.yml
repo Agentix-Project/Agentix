@@ -56,6 +56,7 @@ theme:
 nav:
   - Home: index.md
   - Quick start: quick-start.md
+  - The six plugin axes: axes.md
   - Plugin authors guide: plugins.md
   - Reference:
       - Architecture: architecture.md
