@@ -44,7 +44,7 @@ import socketio
 from pydantic import ValidationError
 
 from agentix.dispatch import Registry
-from agentix.models import RemoteError, RemoteRequest
+from agentix.runtime.models import RemoteError, RemoteRequest
 
 logger = logging.getLogger("agentix.runtime.sio")
 

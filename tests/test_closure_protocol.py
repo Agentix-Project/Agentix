@@ -15,7 +15,7 @@ import httpx
 import pytest
 
 from agentix import RemoteCallError, RuntimeClient
-from agentix.models import RemoteRequest
+from agentix.runtime.models import RemoteRequest
 
 pytestmark = pytest.mark.asyncio
 
@@ -411,7 +411,7 @@ _STREAM_REGISTER = textwrap.dedent("""
 
 async def test_dispatch_stream_yields_events(runtime_module, mount_package):
     """Dispatcher.dispatch_stream yields {item|end|error} dicts (transport-agnostic)."""
-    from agentix.models import RemoteRequest
+    from agentix.runtime.models import RemoteRequest
 
     server, _, _ = runtime_module
     mount_package(

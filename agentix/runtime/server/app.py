@@ -33,10 +33,9 @@ from pydantic import ValidationError
 
 from agentix import __version__
 from agentix.dispatch import Registry
-from agentix.models import (
-    AGENTIX_CLOSURE_ABI,
+from agentix.models import AGENTIX_CLOSURE_ABI, ClosureManifest
+from agentix.runtime.models import (
     ClosureInfo,
-    ClosureManifest,
     HealthResponse,
     RemoteRequest,
     RemoteResponse,
@@ -187,7 +186,7 @@ import asyncio as _asyncio  # noqa: E402
 import socketio as _socketio  # noqa: E402
 
 import agentix.trace as _trace  # noqa: E402
-from agentix.models import TraceEvent as _TraceEvent  # noqa: E402
+from agentix.runtime.models import TraceEvent as _TraceEvent  # noqa: E402
 
 _sio, _ = make_sio(registry)
 _fastapi_app = app  # the FastAPI instance built above

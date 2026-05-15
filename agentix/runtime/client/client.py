@@ -40,7 +40,7 @@ import socketio
 from pydantic import TypeAdapter
 
 from agentix.dispatch import STREAM_ORIGINS
-from agentix.models import (
+from agentix.runtime.models import (
     ClosureInfo,
     ExecRequest,
     ExecResponse,

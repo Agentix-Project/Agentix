@@ -15,7 +15,7 @@ import httpx
 import pytest
 
 from agentix import RuntimeClient
-from agentix.models import RemoteRequest, TraceEvent
+from agentix.runtime.models import RemoteRequest, TraceEvent
 
 pytestmark = pytest.mark.asyncio
 

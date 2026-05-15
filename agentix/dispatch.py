@@ -30,7 +30,8 @@ from typing import Any, Generic, ParamSpec, TypeVar, get_args, get_origin
 from pydantic import TypeAdapter, ValidationError
 
 import agentix.trace as trace
-from agentix.models import ClosureManifest, RemoteError, RemoteRequest, RemoteResponse
+from agentix.models import ClosureManifest
+from agentix.runtime.models import RemoteError, RemoteRequest, RemoteResponse
 
 #: Type origins that indicate a streaming param or return annotation
 #: (`AsyncIterator[T]` / `AsyncGenerator[T, ...]`). Shared between the

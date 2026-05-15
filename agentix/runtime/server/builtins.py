@@ -20,7 +20,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 import agentix.trace as _trace
-from agentix.models import ExecRequest, ExecResponse, UploadResponse
+from agentix.runtime.models import ExecRequest, ExecResponse, UploadResponse
 
 UPLOAD_ROOT = Path(os.environ.get("AGENTIX_UPLOAD_ROOT", "/workspace")).resolve()
 MAX_OUTPUT_BYTES = int(os.environ.get("AGENTIX_MAX_OUTPUT_BYTES", str(10 * 1024 * 1024)))

@@ -7,11 +7,9 @@ import pytest
 from agentix.models import (
     AGENTIX_CLOSURE_ABI,
     ClosureManifest,
-    RemoteError,
-    RemoteRequest,
-    RemoteResponse,
     SandboxConfig,
 )
+from agentix.runtime.models import RemoteError, RemoteRequest, RemoteResponse
 
 
 def test_closure_manifest_minimal():
