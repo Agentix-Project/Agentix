@@ -2,7 +2,7 @@
 
 # Agentix
 
-**A typed Python closure runtime for Docker sandboxes.**
+**Typed Python namespaces for sandbox-based agent workflows.**
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![GitHub Stars](https://img.shields.io/github/stars/Agentiix/Agentix)](https://github.com/Agentiix/Agentix)
@@ -10,93 +10,144 @@
 
 </div>
 
-## ✨ What it is
+## What it is
 
-A small framework for packaging any command as a **typed Python closure** — a Nix-built Docker image that ships a Python package the runtime imports in-process — and composing many closures into a single sandbox. Calls look like local Python (`await c.remote(claude_code.run, instruction="...")`) and execute inside the container with full IDE / mypy support.
+A small framework that lets you compose agent / dataset / primitive code into a sandbox and call it from your trainer or harness as if it were local typed Python:
 
-Scope for v0.1.0 is deliberately narrow: closure packaging, sandbox composition, runtime server, typed remote dispatch. Higher-level abstractions (agent adapters, dataset runners, benchmark orchestration) are **out of scope for this release** — they'll be layered on top once the substrate settles.
+```python
+from agentix import RuntimeClient
+from agentix.bash import Bash
+from agentix.claude_code import ClaudeCode      # pip install agentix-claude-code
+from agentix.swebench import SWEBench           # pip install agentix-swebench
 
-## 📦 Build & package
+async with RuntimeClient(sandbox_url) as c:
+    task   = await c.remote(SWEBench.get_task, idx=42)
+    patch  = await c.remote(ClaudeCode.run, instruction=task.problem)
+    reward = await c.remote(SWEBench.score, idx=42, patch=patch)
+```
 
-Only Docker is required on the host. Nix runs inside a `nixos/nix` builder stage of the closure Dockerfile.
+Every extension is a normal pip-installable distribution. There is no custom config file, no decorator at import time, no per-framework registry call: the user installs a wheel and the framework discovers it via Python entry points.
+
+Six extension axes — closures used to be the only one; this version adds five more on the same mechanism (see "Extending Agentix" below).
+
+## Install
+
+```bash
+pip install agentix
+# Plus whichever namespaces you actually need:
+pip install agentix-bash agentix-files
+pip install agentix-claude-code agentix-swebench   # examples — not yet on PyPI
+```
+
+For local development of the framework itself:
 
 ```bash
 git clone https://github.com/Agentiix/Agentix.git
 cd Agentix
 pip install -e '.[dev]'
-
-# Runtime + mock closures share tests/closure-docker/Dockerfile for the repo's own builds:
-docker build -t agentix/runtime:0.1.0      -f tests/closure-docker/Dockerfile .
-docker build -t agentix/mock-agent:0.1.0   -f tests/closure-docker/Dockerfile tests/closures/mock-agent
-docker build -t agentix/mock-dataset:0.1.0 -f tests/closure-docker/Dockerfile tests/closures/mock-dataset
+pip install -e primitives/bash -e primitives/files   # the bundled primitives
 ```
 
-### Writing your own closure
+## CLI
 
-A closure is a Python package shipped inside a Docker image:
+```bash
+agentix plugins                                # list every installed plugin across every axis
+agentix build  primitives/bash                 # build a single namespace image
+agentix install bash files claude-code -o my-agent:0.1.0   # bundle several namespaces
+agentix deploy local --image my-agent:0.1.0    # run a sandbox + connect
+agentix check                                  # smoke-import every installed namespace
+```
 
-1. Build a Python package at `agentix_closures/<name>/` with three files:
-   - `__init__.py` — typed stub signatures (body: `raise NotImplementedError`)
-   - `_impl.py` — actual implementation (only the sandbox runs this)
-   - `_register.py` — `def register() -> Dispatcher` that binds each stub to its impl
-2. Author a `default.nix` that emits the package contents under `entry/python/agentix_closures/<name>/` plus a `manifest.json` declaring `package = "agentix_closures.<name>"`.
-3. Author a Dockerfile that builds the derivation and produces a final image satisfying the closure convention: `VOLUME /nix`, `/nix/store/<hash>-*`, `/nix/entry/python/...`, `/nix/entry/manifest.json`.
+Every subcommand is itself an entry-point plugin under the `agentix.cli` group — `pip install your-extension` plus one TOML block makes `agentix <new-command>` work without patching the framework.
 
-See `tests/closure-docker/Dockerfile`, `tests/closures/mock-agent/` and `docs/closure-protocol.md` for the full ABI.
+## Writing a namespace
 
-## 🚀 Quick start
+A namespace is a class whose `@staticmethod` methods are the remote-callable surface. The class is a pure namespace — methods carry no `self`, no instance state.
 
 ```python
-import asyncio
-from agentix import DockerDeployment, RuntimeClient, SandboxConfig
-from agentix_closures import mock_agent  # typed stubs
+# src/agentix/myagent/__init__.py
+from agentix.namespace import Namespace
 
-
-async def main():
-    deployment = DockerDeployment()
-    config = SandboxConfig(
-        image="ubuntu:24.04",
-        runtime="agentix/runtime:0.1.0",
-        closures=[mock_agent],   # module with __image__ — or pass a docker ref string
-    )
-    async with deployment.session(config) as sandbox:
-        async with RuntimeClient(sandbox.runtime_url) as c:
-            print(await c.run("uname -a"))
-            result = await c.remote(mock_agent.run, instruction="hello")
-            print(result.patch)  # result: mock_agent.RunResult — fully typed
-
-asyncio.run(main())
+class MyAgent(Namespace):
+    @staticmethod
+    async def run(instruction: str) -> str:
+        ...
 ```
 
-Under the hood the deployment:
+Ship it with one entry-point declaration:
 
-1. For each closure image, populates a per-image named volume keyed by image digest (`docker run --rm -v vol:/nix <image> true` — Docker's own volume-init-from-image rule does the copy, idempotent).
-2. Starts the sandbox with `-v agentix-closure-<digest>:/mnt/c<digest>:ro` per closure + `--tmpfs /nix`.
-3. The sandbox's entrypoint builds a `/nix/store` symlink forest from each mounted closure's store contents, then execs `/mnt/runtime/entry/bin/start`.
-4. The runtime server's startup scans `/mnt/*`, imports each closure's Python package, and calls `<package>._register.register()` to obtain a `Dispatcher`. Contents are fixed for the sandbox's lifetime.
+```toml
+# pyproject.toml
+[project]
+name = "agentix-myagent"
+version = "0.1.0"
 
-## 🏗️ Architecture
+[project.entry-points."agentix.namespace"]
+myagent = "agentix.myagent:MyAgent"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentix"]
+```
+
+`pip install agentix-myagent` is the entire setup. Caller-side:
+
+```python
+from agentix.myagent import MyAgent
+result = await c.remote(MyAgent.run, instruction="...")
+```
+
+The framework's `agentix/__init__.py` extends `__path__` so `agentix.<your-namespace>` resolves natively; PEP 420 namespace packages mean multiple dists can install peer entries under `agentix/` without colliding. Reserved framework subpackages (`agentix.cli`, `agentix.dispatch`, `agentix.deployment`, …) are listed in [CLAUDE.md](CLAUDE.md).
+
+## Extending Agentix
+
+Six axes, all entry-point discovered with the same mechanism:
+
+| Axis | Entry-point group | Semantics | Built-ins |
+|---|---|---|---|
+| Namespaces | `agentix.namespace` | typed remote-callable surface | (third-party only) |
+| Deployments | `agentix.deployment` | sandbox lifecycle, select-one by name | `local` / `daytona` / `e2b` |
+| Trace sinks | `agentix.trace_sink` | fan-out trace event consumers | (third-party only) |
+| Spec resolvers | `agentix.spec_resolver` | CLI input → namespace spec, chain | `path` / `image` / `local_repo` / `pypi` |
+| Wire patterns | `agentix.wire_pattern` | call-shape extensions | `unary` / `stream` / `bidi` |
+| CLI subcommands | `agentix.cli` | `agentix <name>` discovery | `build` / `install` / `deploy` / `check` / `plugins` |
+
+Every axis looks the same to a plugin author:
+
+```toml
+[project.entry-points."agentix.<axis>"]
+my-thing = "module:Thing"
+```
+
+> The quotes around the group name are TOML syntax — `agentix.deployment` contains a dot, and TOML treats dots in `[a.b.c]` as table-key separators. Quoting forces it to be a single key. Every framework with a dotted group name does this (`flask.commands`, `mkdocs.plugins`, `sphinx.builders`, …).
+
+See [`docs/plugins.md`](docs/plugins.md) for the full plugin authors guide — one section per axis with working examples.
+
+## Architecture
 
 ```
-Orchestrator ──HTTP /_remote──► Runtime Server ──in-process call──► Closure impl
+Orchestrator ──HTTP /_remote──► Runtime Server ──in-process call──► Namespace impl
+                  (or)                            (Dispatcher)
+            Socket.IO /socket.io/  ◄─── streams, bidi, logs, traces ───►
 ```
 
 | Component | Role |
 |---|---|
-| Runtime server | `/health`, `/exec`, `/upload`, `/download`, `/closures`, and the single typed-dispatch endpoint `POST /_remote`. |
-| Closure | Nix-built Docker image shipping a Python package under `/nix/entry/python/agentix_closures/<name>/`. The runtime imports it. |
-| Deployment | Creates sandboxes, populates per-closure named volumes, bootstraps the runtime. |
+| Runtime server | `/health`, `/namespaces`, `/_remote` (unary), `/socket.io/` (streams/bidi/logs/traces), `/_llm/<provider>/<path>` (LLM-proxy fan-in) |
+| Namespace | Python class registered under `agentix.namespace` entry point; methods called via `c.remote(...)` |
+| Deployment | Sandbox CRUD plugin under `agentix.deployment`; `local` (Docker) is built in |
+| WirePattern | Pluggable call-shape strategy — built-ins are unary / stream / bidi |
+| Trace sink | Optional observability hook — receives every `trace.emit(...)` event |
 
-See `docs/architecture.md` and `docs/closure-protocol.md` for protocol details.
+Discovery is lazy: namespace `ep.load()` is deferred until the first `/_remote` call for that namespace; one broken namespace doesn't block sandbox boot. See [`docs/architecture.md`](docs/architecture.md) and [`docs/namespace-protocol.md`](docs/namespace-protocol.md) for protocol details.
 
-## 🗺️ Roadmap
+## Roadmap
 
 See [ROADMAP.md](ROADMAP.md).
 
-## 🤝 Contributing
+## Contributing
 
-See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). Project conventions in [CLAUDE.md](CLAUDE.md) — read the "组合优于继承 / Composition over inheritance" section.
 
-## 📄 License
+## License
 
 [MIT License](LICENSE)
