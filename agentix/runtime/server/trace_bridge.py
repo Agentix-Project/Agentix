@@ -36,4 +36,4 @@ def install(sio: socketio.AsyncServer) -> None:
         )
         loop.create_task(sio.emit(TRACE, event.model_dump(mode="json"), room=TRACES_ROOM))
 
-    trace._install_emitter(_emit)
+    trace.register_sink(_emit)

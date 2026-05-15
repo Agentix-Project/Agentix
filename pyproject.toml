@@ -41,6 +41,25 @@ local = "agentix.deployment.docker:DockerDeployment"
 daytona = "agentix.deployment.daytona:DaytonaDeployment"
 e2b = "agentix.deployment.e2b:E2BDeployment"
 
+# Builtin spec resolvers — chain-of-responsibility ordered by their
+# `priority` class attribute. Downstream resolvers register more
+# entries under the same group; higher priority wins.
+[project.entry-points."agentix.spec_resolver"]
+path = "agentix.cli._resolve:PathResolver"
+image = "agentix.cli._resolve:ImageRefResolver"
+local_repo = "agentix.cli._resolve:LocalRepoResolver"
+pypi = "agentix.cli._resolve:PyPIFallbackResolver"
+
+# Builtin CLI subcommands. Downstream packages add their own under the
+# same group — `pip install my-agentix-extension` plus a one-line
+# pyproject entry makes `agentix <new-command>` work.
+[project.entry-points."agentix.cli"]
+build = "agentix.cli.build:main"
+install = "agentix.cli.install:main"
+deploy = "agentix.cli.deploy:main"
+check = "agentix.cli.check:main"
+plugins = "agentix.cli.plugins:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

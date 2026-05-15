@@ -1,80 +1,110 @@
-"""`agentix` command-line interface.
+"""`agentix` command-line interface — dynamically discovered subcommands.
 
-A small argparse-based dispatcher for the developer-facing tools:
+Subcommands are entry-point plugins under the `agentix.cli` group. Each
+entry is a `module:main` callable that takes the post-subcommand argv
+and returns an exit code. The framework's builtins (`build`, `install`,
+`deploy`, `check`, `plugins`) ship via the framework's own pyproject;
+downstream packages add their own with one line:
 
-    agentix build   primitives/bash              # build one closure image
-    agentix install bash files -o my-agent:0.1.0 # bundle several closures
-    agentix deploy  local --image my-agent:0.1.0 # run a sandbox
-    agentix check   primitives/                  # stub ↔ impl signature drift
+```toml
+[project.entry-points."agentix.cli"]
+my-cmd = "my_pkg:main"
+```
 
-Subcommands live in sibling modules so they can also be invoked
-directly (`python -m agentix.cli.build …`). The CLI is intentionally
-thin — most logic lives in those subcommand modules.
+A `pip install` makes `agentix my-cmd` work with no framework changes.
 
-`tools/gen_manifest.py` is **not** exposed as a subcommand because it
-runs inside the closure's nix build environment, which doesn't have
-the `agentix` package available. Keep it standalone.
+The dispatcher deliberately doesn't use argparse subparsers — argparse
+intercepts `--help` greedily at the root level, so `agentix build --help`
+would never reach `build`'s parser. Manual dispatch keeps each
+subcommand's `--help` intact.
 """
 
 from __future__ import annotations
 
+import importlib.metadata
+import inspect
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
-# Subcommand registry. Each entry pairs the user-typed name with a
-# lazy resolver returning the subcommand's `main(argv)` callable. The
-# resolver imports on demand so `agentix --help` doesn't pay for docker
-# / pydantic schema generation it isn't going to use.
-_COMMANDS: dict[str, tuple[str, callable]] = {
-    "build":   ("build a single closure image",
-                lambda: _import("agentix.cli.build").main),
-    "install": ("bundle multiple closures into one image",
-                lambda: _import("agentix.cli.install").main),
-    "deploy":  ("deploy a bundle to a deployment backend",
-                lambda: _import("agentix.cli.deploy").main),
-    "check":   ("list installed closures + smoke-import each",
-                lambda: _import("agentix.cli.check").main),
-    "plugins": ("list installed plugins across every extension axis",
-                lambda: _import("agentix.cli.plugins").main),
-}
+_CLI_GROUP = "agentix.cli"
 
 
-def _import(name: str):
-    import importlib
-    return importlib.import_module(name)
+def _iter_entry_points():
+    eps = importlib.metadata.entry_points()
+    return (
+        list(eps.select(group=_CLI_GROUP))
+        if hasattr(eps, "select")
+        else list(eps.get(_CLI_GROUP, []))  # type: ignore[attr-defined]
+    )
 
 
-def _print_root_help() -> None:
+def _first_doc_line(obj: object) -> str:
+    """First non-empty line of an object's docstring, or empty."""
+    doc = inspect.getdoc(obj) or ""
+    return next((line.strip() for line in doc.splitlines() if line.strip()), "")
+
+
+def _discover_commands() -> dict[str, tuple[str, Callable[[list[str]], int]]]:
+    """Walk the `agentix.cli` group; return `{name: (description, main)}`.
+
+    Descriptions fall back through: the `main()`'s own docstring →
+    its module's docstring → empty. Import errors are logged but don't
+    crash the CLI — the broken subcommand is just absent. Use
+    `agentix plugins --verbose` to see why.
+    """
+    out: dict[str, tuple[str, Callable[[list[str]], int]]] = {}
+    for ep in _iter_entry_points():
+        try:
+            main = ep.load()
+        except Exception as exc:
+            print(
+                f"warning: `agentix {ep.name}` failed to load: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            continue
+        desc = _first_doc_line(main)
+        if not desc:
+            import importlib
+            mod_name = getattr(main, "__module__", None)
+            if mod_name:
+                try:
+                    mod = importlib.import_module(mod_name)
+                    desc = _first_doc_line(mod)
+                except Exception:
+                    pass
+        out[ep.name] = (desc, main)
+    return out
+
+
+def _print_root_help(commands: dict[str, tuple[str, Callable[[list[str]], int]]]) -> None:
     print("usage: agentix <command> [args...]\n")
     print("Agentix developer CLI\n")
+    if not commands:
+        print("(no `agentix.cli` entry points installed)")
+        return
     print("commands:")
-    width = max(len(c) for c in _COMMANDS) + 2
-    for cmd, (desc, _resolve) in _COMMANDS.items():
+    width = max(len(c) for c in commands) + 2
+    for cmd, (desc, _main) in sorted(commands.items()):
         print(f"  {cmd.ljust(width)}{desc}")
     print("\nRun `agentix <command> --help` for command-specific options.")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Dispatch to one of the subcommand `main(argv)` functions.
-
-    We deliberately *don't* use a single argparse subparser. argparse's
-    `--help` is greedy: with subparsers, `agentix install --help` would
-    be intercepted at the root level and never reach the install
-    parser. Manual dispatch keeps each subcommand's `--help` intact.
-    """
     if argv is None:
         argv = sys.argv[1:]
+    commands = _discover_commands()
     if not argv or argv[0] in ("-h", "--help"):
-        _print_root_help()
+        _print_root_help(commands)
         return 0
     cmd, *rest = argv
-    entry = _COMMANDS.get(cmd)
+    entry = commands.get(cmd)
     if entry is None:
         print(f"unknown command: {cmd!r}\n", file=sys.stderr)
-        _print_root_help()
+        _print_root_help(commands)
         return 2
-    _desc, resolve = entry
-    return resolve()(rest)
+    _desc, main_fn = entry
+    return main_fn(rest)
 
 
 if __name__ == "__main__":

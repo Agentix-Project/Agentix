@@ -28,6 +28,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 
 from agentix import __version__
+from agentix import trace
 from agentix.dispatch import Registry, discover_entry_points
 from agentix.models import ClosureManifest
 from agentix.runtime.models import (
@@ -74,6 +75,10 @@ async def _auto_load() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await _auto_load()
+    # Hook every third-party trace sink registered under
+    # `agentix.trace_sink`. Installer errors are logged + skipped so
+    # one broken sink doesn't block the runtime.
+    trace.install_entry_point_sinks()
     yield
 
 
