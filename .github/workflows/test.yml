@@ -23,7 +23,7 @@ jobs:
       - name: lint
         run: ruff check agentix/ tools/ tests/ primitives/
       - name: stub ↔ impl signature drift
-        run: python tools/check_stub_impl.py primitives/
+        run: agentix check primitives/
       - name: unit tests
         run: pytest tests/ -v
 

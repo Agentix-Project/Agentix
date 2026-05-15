@@ -31,9 +31,6 @@ from pydantic import Field
 
 from agentix.namespace import Namespace
 
-__version__ = "0.1.0"
-__image__ = "agentix/primitive-bash:0.1.0"
-
 
 @dataclass
 class BashResult:

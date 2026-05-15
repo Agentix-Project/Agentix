@@ -6,7 +6,7 @@ class** whose methods structurally match the stub — composition, not
 inheritance. `_register.py` glues them together via
 `Dispatcher.bind_namespace(StubCls, impl_instance)`.
 
-**组合优于继承 / Composition over inheritance.** Read this three times.
+**Composition over inheritance.** Read this three times.
 `BashImpl` provides the `Bash` interface; it isn't a kind of `Bash`.
 Keeping stub and impl independent makes the impl swappable for tests,
 for alternate backends, and removes nominal-typing constraints.

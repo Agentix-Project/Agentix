@@ -36,36 +36,46 @@ Every closure image satisfies exactly:
 - `/nix/entry/manifest.json` — `ClosureManifest` JSON with `abi == AGENTIX_CLOSURE_ABI` and `package = "agentix_closures.<name>"`. **Generated at build time** from the closure's `__init__.py` metadata (`__version__` + module docstring) by `tools/gen_manifest.py`; closure authors don't write this file.
 - Optional: `/nix/entry/bin/...` — native binaries the closure's impl shells out to (claude, git, …). `/exec paths_from=[<package>]` exposes them on PATH.
 
-### Closure Python package layout
+### Closure source layout
 
-The Python package the closure ships:
+A closure's source directory is the minimum-viable layout — three files:
 
 ```
-agentix_closures/
-└── <name>/
-    ├── __init__.py        # stub class: `class Foo(Namespace)` with `...`-bodied methods
-    ├── _impl.py           # impl class: `class FooImpl` — independent, no inheritance
-    └── _register.py       # optional — see below
+primitives/<name>/
+├── pyproject.toml                # all metadata: name, version, description
+└── agentix_closures/<name>/
+    ├── __init__.py               # stub class: `class Foo(Namespace)`
+    └── _impl.py                  # impl class: `class FooImpl`
 ```
 
-- **`__init__.py`** is what callers import. Stub methods have `...` bodies — the signature is the contract; there is no body to run on the caller side.
+- **`pyproject.toml`** is the single source of metadata truth. `name` follows the `agentix-<kind>-<short>` convention (e.g. `agentix-primitive-bash`); `version` and `description` flow into the generated manifest. Nothing else needs to know the name or version.
+- **`__init__.py`** is what callers import. Stub methods have `...` bodies — the signature is the contract; there is no body to run on the caller side. No metadata (`__version__` / `__image__`) goes here; the framework derives both from `pyproject.toml` via `importlib.metadata`.
 - **`_impl.py`** has the real bodies on an independent class. Composition over inheritance: `FooImpl` does NOT subclass `Foo`.
-- **`_register.py`** is **optional**. By default the runtime auto-discovers:
-  - exactly one `Namespace` subclass declared in `__init__.py` (call it `Foo`)
-  - a class named `FooImpl` in `_impl.py`
-  - binds them via `Dispatcher().bind_namespace(Foo, FooImpl())`
 
-  Add a `_register.py` only when convention is wrong for the closure — e.g. the package binds multiple namespaces or needs imperative wiring:
-  ```python
-  from agentix.dispatch import Dispatcher
-  from . import Foo, Bar
-  from ._impl import FooImpl, BarImpl
+Optional escape hatches:
 
-  def register() -> Dispatcher:
-      return Dispatcher().bind_namespace(Foo, FooImpl()).bind_namespace(Bar, BarImpl())
-  ```
+- **`_register.py`** — declare imperative binding when the convention (one `Namespace` subclass paired with `<Name>Impl`) isn't enough. Rare.
+- **`manifest.json`** — ship a pre-built manifest only if your closure intentionally diverges from what `pyproject.toml` would produce.
+
+Build infrastructure is shared, not per-closure:
+
+- `primitives/_template/Dockerfile` — same for every closure
+- `primitives/_template/default.nix` — same for every closure; pulls metadata from the closure's `pyproject.toml`
+- `tools/gen_manifest.py` — stdlib-only script that derives `manifest.json` from `pyproject.toml`; copied into the build context by `agentix build`
 
 The runtime imports each closure lazily on first call. No global mutable state in the closure.
+
+### CLI
+
+Developer commands ship as the `agentix` console script (`pip install -e .[dev]` registers it):
+
+```
+agentix build primitives/bash               # build the closure image
+agentix build primitives/bash --dry-run     # stage the build context to ./build/<name>/ for inspection
+agentix check primitives/                   # stub ↔ impl signature drift across all closures under primitives/
+```
+
+`agentix build` stages a self-contained docker build context (closure source + shared Dockerfile/nix/gen_manifest) into a temp dir, then runs `docker build`. The closure dir never carries Dockerfile/default.nix/manifest.json itself.
 
 ### Sandbox layout at runtime
 

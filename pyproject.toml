@@ -23,7 +23,11 @@ dev = [
 ]
 
 [project.scripts]
-# `start` is the entry point the closure convention expects at
+# Dev-side CLI: `agentix build`, `agentix check`. Subcommands live in
+# `agentix.cli`. The CLI is intentionally thin — most logic is in the
+# submodules so they can also be imported directly.
+agentix = "agentix.cli:main"
+# Runtime entrypoint the closure convention expects at
 # /mnt/<ns>/entry/bin/start; `agentix-server` is an alias for dev ergonomics.
 start = "agentix.runtime.server:main"
 agentix-server = "agentix.runtime.server:main"

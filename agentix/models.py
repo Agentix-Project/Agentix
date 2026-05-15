@@ -9,6 +9,8 @@ top-level sandbox/deployment config that orchestrators hand to a
 
 from __future__ import annotations
 
+import importlib.metadata
+import types
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
@@ -72,7 +74,20 @@ class SandboxConfig(BaseModel):
     @field_validator("closures", mode="before")
     @classmethod
     def _resolve_closure_specs(cls, v: Any) -> Any:
-        """Accept ``list[str | <obj with __image__>]`` and normalise to list[str]."""
+        """Normalize each closure spec to a docker image-ref string.
+
+        Three acceptable inputs:
+
+          * A raw string (passed through).
+          * An object exposing a string `__image__` attribute (typically a
+            closure's imported Python package — the override path).
+          * A `types.ModuleType` shaped like `agentix_closures.<name>`. We
+            derive the image from `importlib.metadata` using the convention
+            `agentix-primitive-<name> → agentix/primitive-<name>:<version>`,
+            falling back to `agent` and `dataset` prefixes for those closure
+            kinds. This is the common case — closure authors don't have to
+            redeclare metadata that already lives in `pyproject.toml`.
+        """
         if not isinstance(v, list):
             return v  # pydantic will reject below
         out: list[str] = []
@@ -84,12 +99,42 @@ class SandboxConfig(BaseModel):
             if isinstance(img, str) and img:
                 out.append(img)
                 continue
+            derived = _derive_image_from_module(item)
+            if derived is not None:
+                out.append(derived)
+                continue
             raise ValueError(
-                f"closure spec {item!r} must be a docker-image-ref string or "
-                f"an object with a non-empty string `__image__` attribute "
-                f"(e.g. a closure's Python package module)"
+                f"closure spec {item!r}: cannot resolve image. Pass a "
+                f"docker-image-ref string, set `__image__` on the module, "
+                f"or install the closure's wheel so importlib.metadata can "
+                f"auto-derive (`agentix-<kind>-<name>` convention)."
             )
         return out
+
+
+_CLOSURE_KINDS: tuple[str, ...] = ("primitive", "agent", "dataset")
+
+
+def _derive_image_from_module(item: Any) -> str | None:
+    """Best-effort: `agentix_closures.<name>` module → its image ref.
+
+    Tries each `agentix-<kind>-<name>` distribution in turn. Returns None
+    if the module isn't an `agentix_closures.*` package or no matching
+    distribution is installed — caller handles the ValueError.
+    """
+    if not isinstance(item, types.ModuleType):
+        return None
+    mod_name = getattr(item, "__name__", "")
+    if not mod_name.startswith("agentix_closures."):
+        return None
+    short = mod_name.rsplit(".", 1)[-1]
+    for kind in _CLOSURE_KINDS:
+        try:
+            version = importlib.metadata.version(f"agentix-{kind}-{short}")
+        except importlib.metadata.PackageNotFoundError:
+            continue
+        return f"agentix/{kind}-{short}:{version}"
+    return None
 
 
 class SandboxInfo(BaseModel):
