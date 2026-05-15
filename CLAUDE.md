@@ -33,7 +33,7 @@ Every closure image satisfies exactly:
 - `VOLUME /nix` — required by the docker deployment's volume-init-from-image populate step
 - `/nix/store/<hash>-*/` — content-addressed Nix deps (native binaries, libs, the closure's Python package wheel content)
 - `/nix/entry/python/<package-tree>/` — the closure's Python package. The runtime adds this to `sys.path` and imports the package named in the manifest.
-- `/nix/entry/manifest.json` — `ClosureManifest` JSON with `abi == AGENTIX_CLOSURE_ABI` and `package = "agentix_closures.<name>"`.
+- `/nix/entry/manifest.json` — `ClosureManifest` JSON with `abi == AGENTIX_CLOSURE_ABI` and `package = "agentix_closures.<name>"`. **Generated at build time** from the closure's `__init__.py` metadata (`__version__` + module docstring) by `tools/gen_manifest.py`; closure authors don't write this file.
 - Optional: `/nix/entry/bin/...` — native binaries the closure's impl shells out to (claude, git, …). `/exec paths_from=[<package>]` exposes them on PATH.
 
 ### Closure Python package layout

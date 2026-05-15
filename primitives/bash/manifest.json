@@ -1,8 +1,0 @@
-{
-  "abi": 1,
-  "name": "bash",
-  "version": "0.1.0",
-  "kind": "primitive",
-  "package": "agentix_closures.bash",
-  "description": "Shell command execution primitive. Exposes run / run_stream."
-}

@@ -15,10 +15,13 @@ pythonPkgs.buildPythonApplication {
   propagatedBuildInputs = [];
   doCheck = false;
 
-  # Drop the manifest into $out alongside the Python package, so the closure
-  # image's entry symlink resolves /nix/entry/manifest.json correctly.
+  # manifest.json is derived from the package's `__init__.py` at build time
+  # (see `tools/gen_manifest.py`). Keeping the source of truth in one place
+  # eliminates a per-closure boilerplate file.
   postInstall = ''
-    cp ${./manifest.json} $out/manifest.json
+    ${python}/bin/python ${../../tools/gen_manifest.py} \
+      --init "$out/${python.sitePackages}/agentix_closures/bash/__init__.py" \
+      --out  "$out/manifest.json"
   '';
 
   meta.description = "Bash command execution primitive — run / run_stream";

@@ -1,8 +1,0 @@
-{
-  "abi": 1,
-  "name": "files",
-  "version": "0.1.0",
-  "kind": "primitive",
-  "package": "agentix_closures.files",
-  "description": "Sandbox file I/O primitive. Exposes upload / download."
-}

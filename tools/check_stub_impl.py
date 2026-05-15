@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import argparse
 import inspect
-import json
 import sys
 import typing
 from collections.abc import Iterable, Iterator
@@ -43,6 +42,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from agentix.dispatch import Dispatcher, _import_and_register  # noqa: E402
 from agentix.models import AGENTIX_CLOSURE_ABI, ClosureManifest  # noqa: E402
+from tools.gen_manifest import generate as _gen_manifest  # noqa: E402
 
 
 @dataclass
@@ -64,21 +64,44 @@ class Mismatch:
 def _iter_closure_dirs(roots: Iterable[Path]) -> Iterator[Path]:
     """Yield every closure directory under each root.
 
-    A closure directory is one that contains a `manifest.json` at its
-    top level. We don't go deeper — closures don't nest.
+    A closure directory is one whose layout exposes
+    `agentix_closures/<name>/__init__.py`. `manifest.json` is no longer
+    required in source — it's generated at build time from `__init__.py`
+    metadata.
     """
+    def _has_closure(d: Path) -> bool:
+        return any(d.glob("agentix_closures/*/__init__.py"))
+
     for r in roots:
-        if (r / "manifest.json").is_file():
+        if _has_closure(r):
             yield r
             continue
         if r.is_dir():
             for child in sorted(r.iterdir()):
-                if child.is_dir() and (child / "manifest.json").is_file():
+                if child.is_dir() and _has_closure(child):
                     yield child
 
 
 def _load_manifest(closure_dir: Path) -> ClosureManifest:
-    raw = json.loads((closure_dir / "manifest.json").read_text())
+    """Build the manifest in memory from the closure's `__init__.py`.
+
+    Falls back to a pre-generated `manifest.json` if present — useful
+    for closures that live outside the convention or that ship a
+    customized manifest.
+    """
+    pre = closure_dir / "manifest.json"
+    if pre.is_file():
+        return ClosureManifest.model_validate_json(pre.read_text())
+    init_pys = sorted(closure_dir.glob("agentix_closures/*/__init__.py"))
+    if not init_pys:
+        raise SystemExit(f"{closure_dir}: no agentix_closures/<name>/__init__.py found")
+    if len(init_pys) > 1:
+        names = [str(p.relative_to(closure_dir)) for p in init_pys]
+        raise SystemExit(
+            f"{closure_dir}: multiple closure packages found ({names}); "
+            f"one closure per directory please"
+        )
+    raw = _gen_manifest(init_pys[0])
     return ClosureManifest.model_validate(raw)
 
 
