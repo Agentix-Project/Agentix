@@ -95,6 +95,31 @@ async def test_trace_filter_by_kind(runtime_module, register_namespace, live_ser
     assert received[0].kind == "reward"
 
 
+async def test_typed_client_call_context_sets_trace_call_id(
+    runtime_module, register_namespace, live_server,
+):
+    register_namespace(Tracer)
+    base_url = await live_server()
+
+    async with RuntimeClient(base_url) as c:
+        received: list[TraceEvent] = []
+
+        async def _collect():
+            async for ev in c.traces():
+                received.append(ev)
+                if len(received) >= 2:
+                    return
+
+        collector = asyncio.create_task(_collect())
+        await asyncio.sleep(0.2)
+        with c.call_context(call_id="typed-rollout-1"):
+            result = await c.remote(Tracer.step, label="typed")
+        assert result == 42
+        await asyncio.wait_for(collector, timeout=5)
+
+    assert all(e.call_id == "typed-rollout-1" for e in received)
+
+
 # ── LLM proxy ───────────────────────────────────────────────────
 
 
@@ -299,3 +324,41 @@ async def test_rollout_pool_surfaces_per_task_errors(
     assert sorted(ok) == [("a", "ok:a"), ("c", "ok:c")]
     assert len(errors) == 1
     assert errors[0][0] == "bad"
+
+
+async def test_rollout_pool_map_cancels_workers_when_iterator_closes():
+    """Breaking out of map() should not leave queued tasks running."""
+    from agentix import SandboxConfig
+    from agentix.rollout import RolloutPool
+
+    class _StubSandbox:
+        def __init__(self, sid, url):
+            self.sandbox_id = sid
+            self.runtime_url = url
+            self.status = "running"
+
+    class _StubDeployment:
+        async def create(self, _config):
+            return _StubSandbox("s", "http://127.0.0.1:9")
+        async def delete(self, _sid): pass
+        async def get(self, sid): return _StubSandbox(sid, "http://127.0.0.1:9")
+
+    started: list[int] = []
+
+    async def _run_one(_client, task: int):
+        started.append(task)
+        if task == 0:
+            return "first"
+        await asyncio.sleep(60)
+        return "late"
+
+    async with RolloutPool(
+        _StubDeployment(), SandboxConfig(image="x"), parallelism=2,
+    ) as pool:
+        ait = pool.map(_run_one, list(range(10)))
+        task, result = await anext(ait)
+        assert (task, result) == (0, "first")
+        await ait.aclose()
+        await asyncio.sleep(0.1)
+
+    assert len(started) <= 2

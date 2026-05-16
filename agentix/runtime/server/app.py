@@ -58,30 +58,30 @@ async def lifespan(app: FastAPI):
 # SIO server is attached (see bottom of file).
 _multiplexer = NamespaceMultiplexer()
 
-app = FastAPI(title="agentix", version=__version__, lifespan=lifespan)
-app.state.multiplexer = _multiplexer
-app.include_router(llm_proxy_router)
+_fastapi_app = FastAPI(title="agentix", version=__version__, lifespan=lifespan)
+_fastapi_app.state.multiplexer = _multiplexer
+_fastapi_app.include_router(llm_proxy_router)
 
 
 # ── Health & inventory ──────────────────────────────────────────
 
 
-@app.get("/health", response_model=HealthResponse)
+@_fastapi_app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     return HealthResponse(version=__version__)
 
 
-@app.get("/namespaces")
+@_fastapi_app.get("/namespaces")
 async def list_namespaces() -> list[NamespaceInfo]:
     """All discovered namespaces. Cheap — doesn't spawn workers."""
-    multiplexer: NamespaceMultiplexer = app.state.multiplexer
+    multiplexer: NamespaceMultiplexer = _fastapi_app.state.multiplexer
     return [NamespaceInfo(manifest=m) for m in multiplexer.manifests()]
 
 
 # ── Remote dispatch ─────────────────────────────────────────────
 
 
-@app.post("/_remote")
+@_fastapi_app.post("/_remote")
 async def remote_call(request: Request) -> Response:
     """Unary dispatch endpoint. Spawns the worker on first call.
 
@@ -98,7 +98,7 @@ async def remote_call(request: Request) -> Response:
     body = await request.body()
     raw = unpack(body)
     req = RemoteRequest.model_validate(raw)
-    multiplexer: NamespaceMultiplexer = app.state.multiplexer
+    multiplexer: NamespaceMultiplexer = _fastapi_app.state.multiplexer
     if not multiplexer.has(req.package):
         raise HTTPException(
             status_code=404,
@@ -118,7 +118,6 @@ async def remote_call(request: Request) -> Response:
 import socketio as _socketio  # noqa: E402
 
 _sio, _ = make_sio(_multiplexer)
-_fastapi_app = app
 app = _socketio.ASGIApp(_sio, _fastapi_app, socketio_path="/socket.io")
 app.fastapi = _fastapi_app  # type: ignore[attr-defined]
 app.state = _fastapi_app.state  # type: ignore[attr-defined]
@@ -159,7 +158,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.debug:
-        import debugpy
+        import debugpy  # type: ignore[reportMissingImports]
 
         debugpy.listen(("0.0.0.0", args.debug_port))
         print(f"debugpy listening on 0.0.0.0:{args.debug_port}")

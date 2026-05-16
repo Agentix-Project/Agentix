@@ -31,6 +31,7 @@ from typing import Any
 
 from agentix import trace
 from agentix.dispatch import Dispatcher
+from agentix.idents import CallId, PackageName
 from agentix.runtime import _pump
 from agentix.runtime import frames as F
 from agentix.runtime.models import RemoteError, RemoteRequest
@@ -181,6 +182,9 @@ class Worker:
 
     async def _handle(self, frame: dict[str, Any]) -> None:
         kind = frame.get("type")
+        if not isinstance(kind, str):
+            logger.warning("worker: missing frame type")
+            return
         handler_name = self._RUNTIME_FRAME_HANDLERS.get(kind)
         if handler_name is not None:
             await getattr(self, handler_name)(frame)
@@ -195,11 +199,11 @@ class Worker:
         call_id = frame.get("call_id", "")
         kind = frame.get("kind", F.KIND_UNARY)
         request = RemoteRequest(
-            package=self._package,
+            package=PackageName(self._package),
             method=frame["method"],
             args=frame.get("args") or [],
             kwargs=frame.get("kwargs") or {},
-            call_id=call_id,
+            call_id=CallId(call_id) if call_id else None,
         )
         if kind == F.KIND_UNARY:
             task = asyncio.create_task(self._run_unary(call_id, request))

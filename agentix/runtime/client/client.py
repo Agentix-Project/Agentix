@@ -22,10 +22,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import functools
 import inspect
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine, Iterator, Mapping
+from contextlib import contextmanager
 from typing import (
     Any,
     ParamSpec,
@@ -72,6 +74,11 @@ from agentix.runtime.models import (
 P = ParamSpec("P")
 R = TypeVar("R")
 T = TypeVar("T")
+
+_CLIENT_CALL_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "agentix_client_call_id",
+    default=None,
+)
 
 
 # ── Per-call hot-path caches ─────────────────────────────────────────
@@ -144,6 +151,20 @@ class RuntimeClient:
     async def __aexit__(self, *args):
         await self.close()
 
+    @contextmanager
+    def call_context(self, *, call_id: str | None = None) -> Iterator[None]:
+        """Temporarily attach call metadata to typed remote calls.
+
+        `call_id` is forwarded into `RemoteRequest.call_id`, so trace events
+        emitted by namespace code inherit it. The value is stored in a
+        contextvar, making it safe for concurrent asyncio tasks.
+        """
+        token = _CLIENT_CALL_ID.set(call_id)
+        try:
+            yield
+        finally:
+            _CLIENT_CALL_ID.reset(token)
+
     # ── runtime server endpoints ─────────────────────────────────
 
     async def health(self) -> HealthResponse:
@@ -195,15 +216,17 @@ class RuntimeClient:
             return Unary(self._remote_unary(fn, sig, args, kwargs))
         if shape == "stream":
             return Stream(self._remote_stream(fn, sig, args, kwargs))
-        chan_name, inbox, item_type = self._extract_channel(fn, sig, kwargs)
-        return Bidi(inbox, self._remote_bidi(fn, sig, chan_name, item_type, inbox, args, kwargs))
+        bound = sig.bind(*args, **kwargs)
+        bound.apply_defaults()
+        chan_name, inbox, item_type = self._extract_channel(fn, sig, bound.arguments)
+        return Bidi(inbox, self._remote_bidi(fn, sig, chan_name, item_type, inbox, bound.arguments))
 
     @staticmethod
     def _extract_channel(
-        fn, sig: inspect.Signature, kwargs: dict[str, Any],
+        fn, sig: inspect.Signature, arguments: Mapping[str, Any],
     ) -> tuple[str, Channel, Any]:
         """Locate the `Channel[T]` parameter, pull the user-passed Channel
-        instance from `kwargs`, and recover `T` for item validation.
+        instance from bound arguments, and recover `T` for item validation.
 
         Returns `(param_name, channel, item_type)`. Raises if the bidi
         method has no Channel-typed param, or the user didn't pass a
@@ -211,7 +234,7 @@ class RuntimeClient:
         for pname, param in sig.parameters.items():
             if not is_channel_annotation(param.annotation):
                 continue
-            ch = kwargs.get(pname)
+            ch = arguments.get(pname)
             if not isinstance(ch, Channel):
                 raise TypeError(
                     f"{fn.__module__}.{fn.__name__}: bidi parameter "
@@ -228,11 +251,15 @@ class RuntimeClient:
     async def _remote_unary(self, fn, sig, args, kwargs):
         package = fn.__module__
         method = fn.__name__
-        body = pack({
+        payload = {
             "package": package, "method": method,
             "args": _encode_args(sig, args),
             "kwargs": _encode_kwargs(sig, kwargs),
-        })
+        }
+        call_id = _CLIENT_CALL_ID.get()
+        if call_id is not None:
+            payload["call_id"] = call_id
+        body = pack(payload)
         r = await self._client.post(
             "/_remote", content=body,
             headers={"Content-Type": "application/msgpack"},
@@ -252,19 +279,23 @@ class RuntimeClient:
         method = fn.__name__
         sio = await self._ensure_sio()
         call_id = uuid.uuid4().hex
+        trace_call_id = _CLIENT_CALL_ID.get()
         q: asyncio.Queue = asyncio.Queue()
         self._pending[call_id] = q
 
         ret_args = get_args(sig.return_annotation)
         item_adapter = _adapter_for(ret_args[0] if ret_args else Any)
         try:
-            await sio.emit(STREAM, pack({
+            payload = {
                 "call_id": call_id,
                 "package": package,
                 "method": method,
                 "args": _encode_args(sig, args),
                 "kwargs": _encode_kwargs(sig, kwargs),
-            }))
+            }
+            if trace_call_id is not None:
+                payload["trace_call_id"] = trace_call_id
+            await sio.emit(STREAM, pack(payload))
             while True:
                 kind, data = await q.get()
                 if kind == "end":
@@ -281,7 +312,7 @@ class RuntimeClient:
 
     async def _remote_bidi(
         self, fn, sig, chan_name: str, in_item_type: Any,
-        inbox: Channel, args, kwargs,
+        inbox: Channel, bound_arguments: Mapping[str, Any],
     ):
         """Bidi over Socket.IO: client emits `bidi:start`, streams inputs as
         `bidi:in`, signals end-of-input with `bidi:end_in`. Server replies via
@@ -294,24 +325,26 @@ class RuntimeClient:
         package = fn.__module__
         method = fn.__name__
 
-        bound = sig.bind(*args, **kwargs)
-        bound.apply_defaults()
-        bound.arguments.pop(chan_name, None)
-
-        non_channel_kwargs = _encode_kwargs(sig, dict(bound.arguments))
+        non_channel_kwargs = dict(bound_arguments)
+        non_channel_kwargs.pop(chan_name, None)
+        non_channel_kwargs = _encode_kwargs(sig, non_channel_kwargs)
         out_args = get_args(sig.return_annotation)
         out_adapter = _adapter_for(out_args[0] if out_args else Any)
         in_adapter = _adapter_for(in_item_type)
 
         sio = await self._ensure_sio()
         call_id = uuid.uuid4().hex
+        trace_call_id = _CLIENT_CALL_ID.get()
         q: asyncio.Queue = asyncio.Queue()
         self._pending[call_id] = q
 
-        await sio.emit(BIDI_START, pack({
+        payload = {
             "call_id": call_id, "package": package, "method": method,
             "args": [], "kwargs": non_channel_kwargs,
-        }))
+        }
+        if trace_call_id is not None:
+            payload["trace_call_id"] = trace_call_id
+        await sio.emit(BIDI_START, pack(payload))
 
         async def _sender() -> None:
             try:
@@ -432,19 +465,19 @@ class RuntimeClient:
             return sio
 
     async def _dispatch_event(self, kind: str, raw: Any) -> None:
-        data = unpack(raw) if isinstance(raw, (bytes, bytearray, memoryview)) else raw
+        data = _decode_payload(raw)
         call_id = data.get("call_id")
         q = self._pending.get(call_id) if isinstance(call_id, str) else None
         if q is not None:
             await q.put((kind, data))
 
     async def _on_log(self, raw: Any) -> None:
-        data = unpack(raw) if isinstance(raw, (bytes, bytearray, memoryview)) else raw
+        data = _decode_payload(raw)
         for q in list(self._log_subscribers):
             q.put_nowait(data)
 
     async def _on_trace(self, raw: Any) -> None:
-        data = unpack(raw) if isinstance(raw, (bytes, bytearray, memoryview)) else raw
+        data = _decode_payload(raw)
         for q in list(self._trace_subscribers):
             q.put_nowait(data)
 
@@ -489,4 +522,13 @@ def _encode_kwargs(sig: inspect.Signature, kwargs: dict[str, Any]) -> dict[str, 
             out[k] = v
     return out
 
+
+def _decode_payload(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, memoryview):
+        raw = raw.tobytes()
+    elif isinstance(raw, bytearray):
+        raw = bytes(raw)
+    if isinstance(raw, bytes):
+        return unpack(raw)
+    return raw
 

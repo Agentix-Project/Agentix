@@ -113,11 +113,19 @@ class RolloutPool(Generic[T, R]):
         if self._slot_queue is None:
             raise RuntimeError("RolloutPool not entered (use `async with`)")
 
+        if not tasks:
+            return
+
+        task_iter = iter(tasks)
+        in_flight: set[asyncio.Task[tuple[T, R | BaseException]]] = set()
+
         async def _run_one(task: T) -> tuple[T, R | BaseException]:
             sb, client = await self._slot_queue.get()  # type: ignore[union-attr]
             try:
                 try:
                     result: R | BaseException = await fn(client, task)
+                except asyncio.CancelledError:
+                    raise
                 except BaseException as exc:  # noqa: BLE001 — surface to caller
                     logger.exception("rollout task failed")
                     result = exc
@@ -125,8 +133,25 @@ class RolloutPool(Generic[T, R]):
                 self._slot_queue.put_nowait((sb, client))  # type: ignore[union-attr]
             return task, result
 
-        if not tasks:
-            return
-        coros = [asyncio.create_task(_run_one(t)) for t in tasks]
-        for fut in asyncio.as_completed(coros):
-            yield await fut
+        def _start_next() -> bool:
+            try:
+                task = next(task_iter)
+            except StopIteration:
+                return False
+            in_flight.add(asyncio.create_task(_run_one(task)))
+            return True
+
+        for _ in range(min(self._parallelism, len(tasks))):
+            _start_next()
+
+        try:
+            while in_flight:
+                done, _ = await asyncio.wait(in_flight, return_when=asyncio.FIRST_COMPLETED)
+                for fut in done:
+                    in_flight.remove(fut)
+                    yield await fut
+                    _start_next()
+        finally:
+            for fut in in_flight:
+                fut.cancel()
+            await asyncio.gather(*in_flight, return_exceptions=True)

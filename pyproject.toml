@@ -62,7 +62,7 @@ select = ["E", "F", "I", "W", "UP"]
 # Strict mode is the goal; raise this gradually as the codebase converges
 # on the new Namespace/WirePattern shape. Today's basic mode catches the
 # obvious mistakes without drowning in advisory diagnostics.
-include = ["agentix", "primitives", "tools"]
+include = ["agentix", "primitives"]
 exclude = ["**/__pycache__", ".venv"]
 typeCheckingMode = "basic"
 pythonVersion = "3.11"

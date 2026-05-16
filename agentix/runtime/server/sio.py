@@ -33,12 +33,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 import socketio
 from pydantic import ValidationError
 
+from agentix.idents import CallId
 from agentix.runtime import _pump
 from agentix.runtime.codec import pack, unpack
 from agentix.runtime.events import (
@@ -116,6 +118,9 @@ def make_sio(
     sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
     sessions: dict[str, _SessionState] = {}
 
+    def _event(name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        return sio.on(name)  # type: ignore[reportReturnType]
+
     # ── connection lifecycle ─────────────────────────────────────
 
     @sio.event
@@ -141,7 +146,7 @@ def make_sio(
 
     # ── server-streaming ─────────────────────────────────────────
 
-    @sio.on(STREAM)
+    @_event(STREAM)
     async def on_stream(sid: str, data: Any) -> None:
         sess = sessions.get(sid)
         if sess is None:
@@ -160,7 +165,7 @@ def make_sio(
                     package=payload["package"], method=payload["method"],
                     args=payload.get("args") or [],
                     kwargs=payload.get("kwargs") or {},
-                    call_id=call_id,
+                    call_id=CallId(payload.get("trace_call_id") or call_id),
                 )
             except (KeyError, ValidationError) as exc:
                 await sio.emit(STREAM_ERROR, pack({
@@ -181,7 +186,7 @@ def make_sio(
 
     # ── bidi ─────────────────────────────────────────────────────
 
-    @sio.on(BIDI_START)
+    @_event(BIDI_START)
     async def on_bidi_start(sid: str, data: Any) -> None:
         sess = sessions.get(sid)
         if sess is None:
@@ -199,7 +204,7 @@ def make_sio(
                 package=payload["package"], method=payload["method"],
                 args=payload.get("args") or [],
                 kwargs=payload.get("kwargs") or {},
-                call_id=call_id,
+                call_id=CallId(payload.get("trace_call_id") or call_id),
             )
         except (KeyError, ValidationError) as exc:
             await sio.emit(BIDI_ERROR, pack({
@@ -239,7 +244,7 @@ def make_sio(
         )
         await _spawn_call(sess, call_id, _drive(), state=call_state)
 
-    @sio.on(BIDI_IN)
+    @_event(BIDI_IN)
     async def on_bidi_in(sid: str, data: Any) -> None:
         sess = sessions.get(sid)
         if sess is None:
@@ -254,7 +259,7 @@ def make_sio(
         # concurrent handler tasks under `async_handlers=True`.
         call.intake.put_nowait(payload.get("item"))
 
-    @sio.on(BIDI_END_IN)
+    @_event(BIDI_END_IN)
     async def on_bidi_end_in(sid: str, data: Any) -> None:
         sess = sessions.get(sid)
         if sess is None:
@@ -270,7 +275,7 @@ def make_sio(
 
     # ── cancel ───────────────────────────────────────────────────
 
-    @sio.on(CANCEL)
+    @_event(CANCEL)
     async def on_cancel(sid: str, data: Any) -> None:
         sess = sessions.get(sid)
         if sess is None:
@@ -284,7 +289,7 @@ def make_sio(
 
     # ── logs ─────────────────────────────────────────────────────
 
-    @sio.on(LOGS_SUBSCRIBE)
+    @_event(LOGS_SUBSCRIBE)
     async def on_logs_subscribe(sid: str, data: Any = None) -> None:
         sess = sessions.get(sid)
         if sess is None:
@@ -296,7 +301,7 @@ def make_sio(
         logging.getLogger(_ROOT_LOG_NAME).addHandler(handler)
         sess.log_handler = handler
 
-    @sio.on(LOGS_UNSUBSCRIBE)
+    @_event(LOGS_UNSUBSCRIBE)
     async def on_logs_unsubscribe(sid: str, _data: Any = None) -> None:
         sess = sessions.get(sid)
         if sess is None:
@@ -307,11 +312,11 @@ def make_sio(
 
     # ── traces ──────────────────────────────────────────────────
 
-    @sio.on(TRACES_SUBSCRIBE)
+    @_event(TRACES_SUBSCRIBE)
     async def on_traces_subscribe(sid: str, _data: Any = None) -> None:
         await sio.enter_room(sid, TRACES_ROOM)
 
-    @sio.on(TRACES_UNSUBSCRIBE)
+    @_event(TRACES_UNSUBSCRIBE)
     async def on_traces_unsubscribe(sid: str, _data: Any = None) -> None:
         await sio.leave_room(sid, TRACES_ROOM)
 

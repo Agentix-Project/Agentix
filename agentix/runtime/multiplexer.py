@@ -45,12 +45,15 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from agentix.dispatch import NAMESPACE_ENTRY_POINT_GROUP, Dispatcher
+from agentix.idents import PackageName
 from agentix.models import NamespaceManifest
 from agentix.runtime import frames as F
 from agentix.runtime.models import RemoteError, RemoteRequest, RemoteResponse
 from agentix.runtime.rpc import read_frame, write_frame
 
 logger = logging.getLogger("agentix.runtime.multiplexer")
+
+_WORKER_START_TIMEOUT = 15.0
 
 # ── trace forwarder ─────────────────────────────────────────────────
 
@@ -183,8 +186,37 @@ class _SubprocessWorker:
             env=env,
         )
         self._read_task = asyncio.create_task(self._read_loop())
-        await self._ready.wait()
+        ready_task = asyncio.create_task(self._ready.wait())
+        closed_task = asyncio.create_task(self._closed.wait())
+        assert self._proc is not None
+        proc_task = asyncio.create_task(self._proc.wait())
+        try:
+            done, pending = await asyncio.wait(
+                {ready_task, closed_task, proc_task},
+                timeout=_WORKER_START_TIMEOUT,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            if not done:
+                await self.shutdown()
+                raise TimeoutError(
+                    f"worker for {self._package!r} did not become ready "
+                    f"within {_WORKER_START_TIMEOUT:.0f}s"
+                )
+            if ready_task not in done:
+                rc = self._proc.returncode
+                await self.shutdown()
+                detail = f"exit code {rc}" if rc is not None else "stdout closed"
+                raise RuntimeError(
+                    f"worker for {self._package!r} exited before ready ({detail})"
+                )
+        finally:
+            for task in (ready_task, closed_task, proc_task):
+                if not task.done():
+                    task.cancel()
         if self._boot_error is not None:
+            await self.shutdown()
             raise RuntimeError(
                 f"worker for {self._package!r} failed to boot: "
                 f"{self._boot_error.get('type')}: {self._boot_error.get('message')}"
@@ -498,7 +530,7 @@ class NamespaceMultiplexer:
             out.append(NamespaceManifest(
                 name=entry.dist_name or entry.package.rsplit(".", 1)[-1],
                 version=entry.dist_version or "0.0.0",
-                package=entry.package,
+                package=PackageName(entry.package),
             ))
         return out
 

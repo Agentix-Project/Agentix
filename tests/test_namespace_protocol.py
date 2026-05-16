@@ -234,6 +234,25 @@ async def test_bidi_round_trip_via_socketio(
         assert [r.text for r in replies] == ["say:hi", "say:there"]
 
 
+async def test_bidi_accepts_positional_channel_arg(
+    runtime_module, register_namespace, live_server,
+):
+    register_namespace(Chat)
+    base_url = await live_server()
+
+    inbox: Channel[UserMsg] = Channel()
+
+    async def _push() -> None:
+        await inbox.send(UserMsg(text="positional"))
+        await inbox.close()
+
+    async with RuntimeClient(base_url) as c:
+        producer = asyncio.create_task(_push())
+        replies = [r async for r in c.remote(Chat.chat, inbox)]
+        await producer
+        assert [r.text for r in replies] == ["say:positional"]
+
+
 async def test_bidi_backpressure_no_drops_under_slow_consumer(
     runtime_module, register_namespace, live_server,
 ):

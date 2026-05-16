@@ -57,6 +57,24 @@ async def test_subprocess_worker_unary_round_trip(worker_env):
         await mp.shutdown()
 
 
+async def test_subprocess_worker_bad_target_fails_without_hanging(worker_env):
+    """A worker that exits before READY must surface an error, not hang startup."""
+    mp = NamespaceMultiplexer()
+    mp.register_subprocess(
+        "agentix.missing",
+        "agentix.definitely_missing:Nope",
+        sys.executable,
+        dist_name="missing-worker",
+    )
+    try:
+        with pytest.raises(RuntimeError, match="failed to boot|exited before ready"):
+            await asyncio.wait_for(mp.dispatch_unary(RemoteRequest(
+                package="agentix.missing", method="x",
+            )), timeout=5)
+    finally:
+        await mp.shutdown()
+
+
 async def test_subprocess_worker_streaming(worker_env):
     """Server-streaming method round-trip via subprocess."""
     mp = _make_multiplexer()

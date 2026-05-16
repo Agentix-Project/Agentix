@@ -29,7 +29,7 @@ import msgpack
 from pydantic import BaseModel
 
 try:
-    import numpy as np
+    import numpy as np  # type: ignore[reportMissingImports]
     _HAS_NUMPY = True
 except ImportError:
     _HAS_NUMPY = False

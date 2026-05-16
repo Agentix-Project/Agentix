@@ -64,22 +64,32 @@ def _clean_env(extra: dict[str, str] | None) -> dict[str, str]:
 
 
 async def _read_capped(stream: asyncio.StreamReader, limit: int) -> str:
-    """Read from a subprocess stream up to `limit` bytes, then truncate."""
+    """Drain a subprocess stream, retaining at most `limit` bytes.
+
+    The drain-to-EOF part matters: if one pipe stops being read after its cap
+    is reached, the child can block forever writing to that full pipe while the
+    parent waits on the process.
+    """
     chunks: list[bytes] = []
     total = 0
+    truncated = False
     while True:
         chunk = await stream.read(8192)
         if not chunk:
             break
         remaining = limit - total
         if remaining <= 0:
-            break
-        if len(chunk) > remaining:
+            truncated = True
+            continue
+        if len(chunk) >= remaining:
             chunks.append(chunk[:remaining])
-            chunks.append(b"\n[truncated at %d bytes]" % limit)
-            break
+            truncated = len(chunk) > remaining
+            total = limit
+            continue
         chunks.append(chunk)
         total += len(chunk)
+    if truncated:
+        chunks.append(b"\n[truncated at %d bytes]" % limit)
     return b"".join(chunks).decode(errors="replace")
 
 
@@ -155,20 +165,26 @@ async def run(
         cwd=cwd,
         env=sub_env,
     )
+    assert proc.stdout is not None and proc.stderr is not None
+    stdout_task = asyncio.create_task(_read_capped(proc.stdout, max_output))
+    stderr_task = asyncio.create_task(_read_capped(proc.stderr, max_output))
+    wait_task = asyncio.create_task(proc.wait())
     try:
-        async def _collect():
-            stdout = await _read_capped(proc.stdout, max_output)
-            stderr = await _read_capped(proc.stderr, max_output)
-            await proc.wait()
-            return stdout, stderr
-
-        stdout, stderr = await asyncio.wait_for(_collect(), timeout=timeout)
+        await asyncio.wait_for(
+            asyncio.gather(stdout_task, stderr_task, wait_task),
+            timeout=timeout,
+        )
     except TimeoutError:
         proc.kill()
-        await proc.communicate()
+        await proc.wait()
+        for task in (stdout_task, stderr_task):
+            task.cancel()
+        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
         return BashResult(
             exit_code=-1, stdout="", stderr=f"Command timed out after {timeout}s",
         )
+    stdout = stdout_task.result()
+    stderr = stderr_task.result()
     return BashResult(exit_code=proc.returncode or 0, stdout=stdout, stderr=stderr)
 
 

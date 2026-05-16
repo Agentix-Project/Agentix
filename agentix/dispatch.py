@@ -138,7 +138,7 @@ class Dispatcher:
         shape = detect_shape(stub, sig)
 
         param_adapters: dict[str, TypeAdapter[Any]] = {}
-        channel_params: list[tuple[str, type]] = []
+        channel_params: list[tuple[str, Any]] = []
         for pname, param in sig.parameters.items():
             ann = param.annotation if param.annotation is not inspect.Parameter.empty else Any
             if is_channel_annotation(ann):
