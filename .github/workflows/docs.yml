@@ -38,17 +38,18 @@ jobs:
           unzip -q export.zip -d _site
           touch _site/.nojekyll
 
-      - name: Shrink code-block font
+      - name: Match code-block font size to body text
         # docs.json has no `customCss` and `fonts` has no `code` sub-object
         # (verified against settings-appearance docs). Inject a tiny <style>
-        # block into every page's <head> so fenced code reads at 0.82em.
+        # block into every page's <head> so fenced code renders at the same
+        # size as surrounding prose instead of Mintlify's larger default.
         working-directory: docs
         run: |
           python3 - <<'PY'
           import pathlib
           snippet = (
-              '<style>pre,pre *{font-size:0.82em!important;'
-              'line-height:1.55!important}</style>'
+              '<style>pre,pre *{font-size:1em!important;'
+              'line-height:1.6!important}</style>'
           )
           for html in pathlib.Path('_site').rglob('*.html'):
               s = html.read_text()
