@@ -1,10 +1,13 @@
 """Shared fixtures for agentix tests.
 
-Namespaces are registered into the runtime via the entry-point mechanism
-in production. For tests we bypass `importlib.metadata.entry_points`
-(which is process-global and slow to mutate) and inject `Namespace`
-subclasses directly into the registry via the test-only
-`register_namespace()` fixture. Same effect, no filesystem ceremony.
+Namespaces are discovered via the entry-point mechanism in production
+(walked at multiplexer.discover_entry_points()). For tests we bypass
+`importlib.metadata.entry_points` and inject classes directly via
+`multiplexer.register_inprocess()`, which builds an in-process
+Dispatcher binding. The same multiplexer dispatches in-process classes
+and subprocess workers uniformly, so test coverage exercises the full
+transport (Socket.IO + /_remote) without forcing each test class into
+its own venv.
 """
 
 from __future__ import annotations
@@ -61,33 +64,20 @@ def runtime_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 @pytest.fixture
 def register_namespace(runtime_module) -> Callable[..., None]:
-    """Inject a namespace class into the runtime's registry.
+    """Inject a namespace class into the runtime's multiplexer in-process.
 
     Usage:
-        @register_namespace(package="agentix.echo")
-        class Echo(Namespace):
-            async def echo(self, msg: str) -> str:
-                return f"echo:{msg}"
-
-    Or imperatively:
         register_namespace(Echo)
-        register_namespace(Echo, package="agentix.echo")
 
-    Defaults: `package` derives from `cls.__module__`. The framework's
-    `Registry.register` adds the namespace as a pending lazy-load entry;
-    `get_or_load` builds the dispatcher on first call.
+    The class's `__module__` is the routing key. The multiplexer binds
+    it via Dispatcher and dispatches synchronously (no subprocess) —
+    same code path as a real subprocess worker would take, just skipping
+    the venv + stdio plumbing.
     """
     server, _, _ = runtime_module
 
-    def _register(cls: type, *, package: str | None = None,
-                  dist_name: str | None = None,
-                  dist_version: str = "0.1.0") -> None:
-        pkg = package or cls.__module__
-        server.registry.register(
-            pkg, loader=lambda: cls,
-            dist_name=dist_name or f"agentix-{pkg.rsplit('.', 1)[-1].replace('_', '-')}",
-            dist_version=dist_version,
-        )
+    def _register(cls: type) -> None:
+        server.multiplexer.register_inprocess(cls)
 
     return _register
 

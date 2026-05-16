@@ -99,7 +99,7 @@ async def test_register_namespace_makes_it_dispatchable(
     register_namespace(Echo)
     pkg = Echo.__module__
 
-    assert pkg in server.registry
+    assert server.multiplexer.has(pkg)
 
     transport = httpx.ASGITransport(app=server.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
