@@ -1,0 +1,201 @@
+---
+title: Integrate an agent
+description: Wrap an agent CLI (Claude Code, Aider, OpenHands, Codex …) as an Agentix namespace.
+---
+
+An **agent** in Agentix is just a namespace whose class wraps a CLI
+binary. The caller invokes `c.remote(YourAgent.run, instruction="…")`
+and the method body — running inside the sandbox — `exec`s the binary,
+collects its output, and returns a typed result.
+
+This guide ports `claude-code` as the worked example; the same pattern
+applies to any CLI agent.
+
+## 1. Source layout
+
+```text
+agentix-claude-code/
+├── pyproject.toml
+├── default.nix              # Nix derivation — pulls the claude CLI binary
+├── Dockerfile               # copies primitives/_template/Dockerfile
+└── src/agentix/
+    └── claude_code/
+        └── __init__.py      # class ClaudeCode(Namespace)
+```
+
+The Dockerfile and Nix derivation come from the
+[`primitives/_template/`](https://github.com/Agentiix/Agentix/tree/master/primitives/_template)
+copy — agent images are structurally identical to primitive images,
+they just bundle a different binary.
+
+## 2. Result type and method
+
+```python title="src/agentix/claude_code/__init__.py"
+from __future__ import annotations
+import asyncio
+import os
+from dataclasses import dataclass
+from typing import Literal
+
+from agentix.namespace import Namespace
+
+
+@dataclass
+class RunResult:
+    exit_code: int
+    stdout: str
+    stderr: str
+    patch: str          # extracted diff if the agent produced one
+
+
+class ClaudeCode(Namespace):
+    """Claude Code CLI wrapped as a namespace."""
+
+    __image__ = "agentix-hub/claude-code:0.1.0"
+
+    @staticmethod
+    async def run(
+        instruction: str,
+        *,
+        workdir: str = "/testbed",
+        timeout: float = 600,
+        model: str | None = None,
+        max_turns: int | None = None,
+        env: dict[str, str] | None = None,
+    ) -> RunResult:
+        cmd = ["claude", "-p", instruction, "--print"]
+        if model:
+            cmd += ["--model", model]
+        if max_turns is not None:
+            cmd += ["--max-turns", str(max_turns)]
+
+        sub_env = {**os.environ, **(env or {})}
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=workdir,
+            env=sub_env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            return RunResult(exit_code=-1, stdout="", stderr="timeout", patch="")
+
+        return RunResult(
+            exit_code=proc.returncode or 0,
+            stdout=stdout.decode(errors="replace"),
+            stderr=stderr.decode(errors="replace"),
+            patch=_extract_patch(stdout, workdir),
+        )
+```
+
+Method-body code runs **inside the sandbox**, alongside the runtime
+process. Anything you can do in a Python `asyncio.create_subprocess_exec`
+call is fair game — including reading from / writing to the sandbox
+filesystem, which is exactly what the agent needs.
+
+## 3. Entry point + packaging
+
+```toml title="pyproject.toml"
+[project]
+name = "agentix-claude-code"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[project.entry-points."agentix.namespace"]
+claude_code = "agentix.claude_code:ClaudeCode"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentix"]
+```
+
+`pip install agentix-claude-code` resolves `from agentix.claude_code import ClaudeCode`
+on the caller side. `agentix build ./agentix-claude-code` produces the
+image; the runtime loads the class on first dispatch.
+
+## 4. Streaming output
+
+Long-running agents benefit from a streaming variant. Add a method that
+returns `AsyncIterator[Event]` and the wire upgrades to Socket.IO
+automatically:
+
+```python
+from collections.abc import AsyncIterator
+
+class ClaudeCodeEvent: ...
+
+@dataclass
+class TokenChunk(ClaudeCodeEvent):
+    text: str
+    type: Literal["token"] = "token"
+
+@dataclass
+class ToolCall(ClaudeCodeEvent):
+    tool: str
+    args: dict
+    type: Literal["tool"] = "tool"
+
+@dataclass
+class RunDone(ClaudeCodeEvent):
+    result: RunResult
+    type: Literal["done"] = "done"
+
+
+class ClaudeCode(Namespace):
+    @staticmethod
+    async def run_stream(
+        instruction: str,
+        **kwargs,
+    ) -> AsyncIterator[ClaudeCodeEvent]:
+        proc = await asyncio.create_subprocess_exec(
+            "claude", "-p", instruction, "--output-format", "stream-json",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        async for raw in proc.stdout:
+            event = json.loads(raw)
+            match event["type"]:
+                case "token":   yield TokenChunk(text=event["text"])
+                case "tool":    yield ToolCall(tool=event["name"], args=event["args"])
+                case "done":    yield RunDone(result=_build_result(event))
+```
+
+Callers iterate without `await`:
+
+```python
+async for ev in c.remote(ClaudeCode.run_stream, instruction="…"):
+    match ev:
+        case TokenChunk(text=t):    print(t, end="")
+        case ToolCall(tool=name):   logger.info(f"tool: {name}")
+        case RunDone(result=r):     return r
+```
+
+## 5. The Nix derivation
+
+Agent CLIs are usually unpackaged outside of Nix. The simplest path:
+fetch the upstream tarball, copy the binary into a `symlinkJoin`, and
+expose it on `entry/bin`. Copy
+[`primitives/_template/default.nix`](https://github.com/Agentiix/Agentix/tree/master/primitives/_template)
+and replace the body with your fetch + assemble logic. See
+`Agentix-Agents-Hub/claude-code/default.nix` for a working reference.
+
+## Common patterns
+
+- **Pass secrets through `env=`.** Don't embed API keys in the image;
+  callers pass them per-call.
+- **Default `workdir=/testbed`.** Most benchmarks mount the repo there.
+- **Time out aggressively.** Long-running agents hang; the caller
+  expects bounded latency.
+- **Return a structured `patch` field.** Even if the agent doesn't
+  speak diffs natively, `git diff` against the workdir at the end is
+  cheap and benchmark-friendly.
+
+## When you write one
+
+Each new agent CLI gets its own namespace. Don't try to abstract over
+multiple agents in one class — agent-specific knobs (model, reasoning
+effort, max turns, budget caps) belong on the namespace surface, not
+hidden behind a generic interface.

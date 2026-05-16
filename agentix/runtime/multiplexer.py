@@ -353,14 +353,49 @@ class NamespaceMultiplexer:
     # ── discovery ───────────────────────────────────────────────────
 
     def discover_entry_points(self) -> None:
-        """Walk the current Python env's `agentix.namespace` entry points.
+        """Discover namespace entry points.
 
-        Each entry's distribution provides the venv interpreter that
-        installed it. We use that interpreter to spawn the worker so
-        every namespace runs with its own deps.
+        In bundle images (produced by `agentix build`), every namespace
+        lives in its own `/venvs/<short>/` venv; we walk those for
+        `agentix.namespace` entry points and record each venv's Python
+        interpreter so workers spawn in their own dep world.
 
-        Tests skip this and use `register_inprocess()` instead.
+        In dev / test (no `/venvs/` dir), fall back to walking the current
+        Python's installed entry points — every namespace pip-installed
+        in the same env is reachable via `sys.executable`.
+
+        Tests using `register_inprocess()` skip this entirely.
         """
+        venvs_root = Path("/venvs")
+        if venvs_root.is_dir():
+            self._discover_from_venvs(venvs_root)
+        else:
+            self._discover_from_current_env()
+
+    def _discover_from_venvs(self, venvs_root: Path) -> None:
+        for venv in sorted(venvs_root.iterdir()):
+            if not venv.is_dir() or venv.name == "runtime":
+                continue
+            python = venv / "bin" / "python"
+            if not python.exists():
+                continue
+            site_pkgs_candidates = list(venv.glob("lib/python*/site-packages"))
+            if not site_pkgs_candidates:
+                continue
+            site_pkgs = site_pkgs_candidates[0]
+            for dist in importlib.metadata.distributions(path=[str(site_pkgs)]):
+                for ep in dist.entry_points:
+                    if ep.group != NAMESPACE_ENTRY_POINT_GROUP:
+                        continue
+                    package = ep.value.split(":", 1)[0]
+                    self._entries[package] = _NamespaceEntry(
+                        package=package,
+                        dist_name=dist.metadata["Name"] or "",
+                        dist_version=dist.version or "",
+                        target=ep.value, python=str(python),
+                    )
+
+    def _discover_from_current_env(self) -> None:
         eps = importlib.metadata.entry_points()
         selected = (
             eps.select(group=NAMESPACE_ENTRY_POINT_GROUP)

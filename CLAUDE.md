@@ -122,43 +122,49 @@ Foreground by default: prints `runtime_url`, holds the sandbox alive until Ctrl-
 
 ### Build + deploy pipeline
 
-A namespace's Python deps are uniform: every namespace gets `pip install`ed into the runtime image's venv. System deps are optional — a namespace that needs native binaries (`claude` CLI, git, libffi, …) ships a `default.nix` next to its `pyproject.toml`. `agentix build` collapses the two-tier story:
+Every namespace gets its **own venv** for full dep isolation — two
+namespaces can pull incompatible versions of the same Python dep
+without conflict. System deps (claude CLI, git, libffi, …) live under
+optional per-namespace `default.nix`. `agentix build` produces a
+single deploy-ready bundle image:
 
-1. **Runtime image** (`agentix/runtime:<version>`): `FROM python:3.11-slim` + framework wheel + the `agentix-server` console script as ENTRYPOINT. Built once via `docker build -f primitives/_template/Dockerfile .` from the repo root.
-2. **Bundle image** (`agentix build a b c -o tag`): extends the runtime image. If any spec ships `default.nix`, a Nix builder stage runs first; the resulting `/nix/store` is COPY'd into the final image so its binaries resolve at their content-addressed paths. The final stage `pip install`s every spec's source dir. Bundles with no system deps anywhere skip Nix entirely.
+1. **Runtime image** (`agentix/runtime:<version>`): `FROM python:3.11-slim`, includes the framework wheel pre-installed into `/venvs/runtime/`, plus `uv` for fast per-namespace venv creation, plus the wheel stashed at `/agentix-wheel/` for bundle stages to reuse. Built once via `docker build -f primitives/_template/Dockerfile .` from the repo root.
+2. **Bundle image** (`agentix build a b c -o tag`): extends the runtime image. If any spec ships `default.nix`, a Nix builder stage runs first; its `/nix/store` is COPY'd into the final image so absolute store paths resolve. For each spec, `uv venv /venvs/<short>` + `pip install` the namespace into that venv (alongside the framework wheel). Bundles with no system deps anywhere skip Nix entirely.
 
-The bundle is deploy-ready — there are no per-namespace volume mounts, no `/mnt/*` symlink farms, no custom entrypoints. The deployment just `docker run`s the bundle image.
+The runtime process itself doesn't load namespace code — the multiplexer spawns one **worker subprocess per namespace** on first call, using that namespace's venv interpreter. Workers stay alive for the sandbox's lifetime; the runtime forwards RPC frames over stdin/stdout.
 
 ### Sandbox layout at runtime
 
 ```
 /                                — bundle image rootfs
-  usr/local/lib/python3.11/site-packages/
-    agentix/                     — framework
-    agentix/bash/                — namespace (pip-installed alongside)
-    agentix/files/               — namespace
-    agentix_bash-<v>.dist-info/  — entry_points.txt, picked up by importlib.metadata
-    …
-  nix/                           — optional, only present if a namespace shipped default.nix
+  venvs/
+    runtime/                     — framework venv (uv-managed)
+      bin/agentix-server         — Docker ENTRYPOINT; the multiplexer process
+      lib/python3.11/site-packages/agentix/...
+    bash/                        — one venv per namespace
+      bin/python                 — worker interpreter for `agentix.bash`
+      lib/python3.11/site-packages/agentix/bash/...
+    files/
+      bin/python
+      lib/python3.11/site-packages/agentix/files/...
+  agentix-wheel/                 — framework wheel; reused by bundle stages
+  nix/                           — only present if a namespace shipped default.nix
     store/<hash>-claude-*/bin/claude
     store/<hash>-git-*/bin/git
-    …
 ```
 
-The runtime ENTRYPOINT is `agentix-server`. It binds to `AGENTIX_BIND_PORT` (env, default 8000) and starts serving immediately — no mount-and-merge step.
+`agentix-server` (the runtime entrypoint) binds to `AGENTIX_BIND_PORT` and starts the multiplexer; namespace workers spawn on first dispatch.
 
 ### Runtime startup (lazy)
 
-On lifespan startup, the runtime:
+On lifespan startup the multiplexer:
 
-1. Walks `importlib.metadata.entry_points(group="agentix.namespace")`. Because every namespace's wheel was pip-installed into the same venv at bundle build time, every `dist-info/entry_points.txt` is visible.
-2. For each entry point, **registers a pending entry** in the global `Registry`. **No imports run.**
-3. The namespace's class is `ep.load()`ed on **first `/_remote` request** for that package (`Registry.get_or_load`), under a per-package async lock so concurrent first-calls share one import.
-4. Import failures are cached on the entry; every subsequent call returns the same error without retrying.
+1. Walks `/venvs/*/lib/python*/site-packages` for `agentix.namespace` entry points (dev/test mode walks the current Python env instead).
+2. For each entry point, records `package → (worker_target, venv_python)` — **no imports, no subprocess yet**.
+3. First `/_remote` for that namespace spawns `<venv_python> -m agentix.runtime.worker --target <module:Class>` and connects stdin/stdout. The worker binds the class via Dispatcher, sends a `ready` frame, then serves frames until shutdown.
+4. Subsequent calls reuse the same worker process.
 
-There is no on-disk `manifest.json` and no `/mnt/*` scan — discovery is purely the entry-point walk over the venv.
-
-Two dists registering the same entry-point name collide — `PluginConflictError` surfaces on first lookup. There are **no caller-chosen namespaces**; the Python import path is the identity.
+Two dists registering the same entry-point name raise `PluginConflictError` on first lookup. There are **no caller-chosen namespaces**; the Python import path is the identity.
 
 ### Wire
 
@@ -231,17 +237,17 @@ User subprocess default `PATH=/usr/local/bin:/usr/bin:/bin`. Namespaces that shi
 
 ### Deliberate non-choices
 
-- **No subprocess-per-namespace.** All namespace impls run in the runtime's Python event loop.
-- **No reverse proxy.** `POST /_remote` is direct dispatch; namespaces expose Python functions, not arbitrary HTTP routes.
-- **No caller-chosen namespaces.** `manifest.package` is the identity. Two images shipping the same package collide.
+- **Subprocess per namespace** (not in-process). Each namespace runs in its own venv's Python, isolated for dep conflicts. The multiplexer in the runtime process routes RPC frames over stdin/stdout. The pre-isolation in-process model was reversed when per-extension venv was introduced.
+- **No reverse proxy.** `POST /_remote` is direct dispatch into the multiplexer; namespaces don't expose arbitrary HTTP routes.
+- **No caller-chosen namespaces.** Entry-point's module path is the routing identity. Two dists registering the same name raise `PluginConflictError`.
 - **Streaming returns** via `AsyncIterator[T]` annotation on the stub: `async for x in c.remote(stream_fn, ...)`. Wire is Socket.IO `stream`/`stream:item`/`stream:end` events. Bidi (stub takes one `AsyncIterator[T]` parameter and returns `AsyncIterator[U]`) is supported via the `bidi:*` event family.
-- **No monolithic single-image runtime.** Each namespace is its own image; the runtime image only ships `agentix` + `pydantic` + `fastapi` + `uvicorn`.
+- **One bundle image per sandbox.** Not many namespace images mounted at deploy time — the bundle carries every namespace venv pre-built. Rebuilding the bundle is the way to change which namespaces a sandbox exposes.
 
 ## Implementation notes
 
 - **One image at deploy.** `SandboxConfig.image` is the deploy-ready bundle produced by `agentix build`. The deployment just runs it; there are no per-namespace mounts or volumes to coordinate.
-- **No local Nix required.** Namespace authors do `docker build`; Nix lives in the builder stage of their Dockerfile.
-- **Namespace Python deps stay thin.** Namespaces share the runtime's Python interpreter — Python wrappers should depend on stdlib + the `agentix` package itself (which already brings pydantic). Heavy deps belong in Nix-bundled native binaries, not in `pyproject.toml`.
+- **No local Nix required.** Namespace authors do `docker build`; Nix lives in the builder stage of the generated bundle Dockerfile only when at least one namespace ships `default.nix`.
+- **Per-namespace venv = per-namespace deps.** Namespaces declare Python deps in their own pyproject; each gets its own `/venvs/<short>/` so versions don't have to be unified across the bundle. uv keeps venv creation millisecond-scale during build.
 - **Sandbox starts fast.** Warm sandbox is `-v` mounts + tmpfs + symlink loop (shell-time, ~100 ms) + import of each namespace package (typically tens of ms each).
 - **Populate is lock-serialised** in-process to avoid concurrent `docker run -v` races on the same image's volume. Cross-process coordination is not currently provided; documented as a single-orchestrator assumption.
 

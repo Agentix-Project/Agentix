@@ -1,0 +1,180 @@
+---
+title: Integrate a dataset
+description: Wrap a benchmark or evaluation harness (SWE-bench, MLE-Bench, …) as an Agentix namespace.
+---
+
+A **dataset** in Agentix is a namespace that hands out instructions
+and scores submissions. The shape is two methods — one to fetch an
+instance, one to verify a patch — surfaced as a single class.
+
+```python
+from agentix.swebench import SWEBench
+
+task   = await c.remote(SWEBench.get_task, idx=42)
+patch  = await c.remote(ClaudeCode.run, instruction=task.problem)
+reward = await c.remote(SWEBench.score, idx=42, patch=patch)
+```
+
+This guide uses SWE-bench Verified as the worked example.
+
+## 1. Source layout
+
+Same shape as any namespace:
+
+```text
+agentix-swebench/
+├── pyproject.toml
+├── default.nix              # bakes the dataset records into the image
+├── Dockerfile
+└── src/agentix/
+    └── swebench/
+        └── __init__.py      # class SWEBench(Namespace)
+```
+
+Dataset records (instances, test patches, expected outputs) usually
+live in JSONL files that the Nix derivation copies into the image at a
+known path — e.g. `/nix/store/<hash>-swebench/data/instances.jsonl`.
+
+## 2. Result types and methods
+
+```python title="src/agentix/swebench/__init__.py"
+from __future__ import annotations
+import json
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+
+from agentix.namespace import Namespace
+
+
+@dataclass
+class Task:
+    instance_id: str
+    problem: str
+    workdir: str
+    test_command: str
+
+
+@dataclass
+class Score:
+    instance_id: str
+    passed: bool
+    fail_to_pass: list[str]
+    pass_to_pass: list[str]
+    logs: str
+
+
+# Resolved by Nix at build time → known absolute path inside the sandbox.
+_DATA = Path("/nix/store") / "swebench-verified/instances.jsonl"
+
+
+class SWEBench(Namespace):
+    """SWE-bench Verified: hand out instructions, score model patches."""
+
+    __image__ = "agentix-datasets/swebench:0.1.0"
+
+    @staticmethod
+    async def list(limit: int | None = None) -> list[str]:
+        """Return the instance_ids in this split."""
+        ids = [json.loads(line)["instance_id"] for line in _DATA.open()]
+        return ids[:limit] if limit else ids
+
+    @staticmethod
+    async def get_task(idx: int | str) -> Task:
+        """Fetch one instance and prepare its workdir."""
+        rec = _record_at(idx)
+        workdir = _checkout_repo(rec["repo"], rec["base_commit"])
+        return Task(
+            instance_id=rec["instance_id"],
+            problem=rec["problem_statement"],
+            workdir=str(workdir),
+            test_command=rec["test_cmd"],
+        )
+
+    @staticmethod
+    async def score(idx: int | str, patch: str) -> Score:
+        """Apply the model patch + the instance's test_patch, run tests."""
+        rec = _record_at(idx)
+        workdir = _checkout_repo(rec["repo"], rec["base_commit"])
+
+        _apply_patch(workdir, patch)
+        _apply_patch(workdir, rec["test_patch"])
+
+        result = subprocess.run(
+            rec["test_cmd"],
+            shell=True,
+            cwd=workdir,
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        logs = result.stdout + result.stderr
+        fail_to_pass = _tests_now_passing(rec["FAIL_TO_PASS"], logs)
+        pass_to_pass = _tests_still_passing(rec["PASS_TO_PASS"], logs)
+        return Score(
+            instance_id=rec["instance_id"],
+            passed=len(fail_to_pass) == len(rec["FAIL_TO_PASS"])
+                  and len(pass_to_pass) == len(rec["PASS_TO_PASS"]),
+            fail_to_pass=fail_to_pass,
+            pass_to_pass=pass_to_pass,
+            logs=logs,
+        )
+```
+
+`get_task` materialises the repo at the base commit so the agent has a
+real filesystem to work in. `score` re-materialises a clean copy
+(don't trust the agent left it pristine), applies the model patch +
+the held-out test patch, and runs the benchmark's test command.
+
+## 3. Entry point + packaging
+
+```toml title="pyproject.toml"
+[project]
+name = "agentix-swebench"
+version = "0.1.0"
+
+[project.entry-points."agentix.namespace"]
+swebench = "agentix.swebench:SWEBench"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentix"]
+```
+
+## 4. Where the data lives
+
+Three workable options, in order of operational simplicity:
+
+1. **Bake into the image.** The Nix derivation downloads the dataset
+   at build time and copies the JSONL into `/nix/store/.../data/`.
+   Self-contained; reproducible; the image is big.
+2. **Download lazily on first call.** Method body checks for a local
+   cache (`$AGENTIX_UPLOAD_ROOT/.cache/swebench/`) and downloads if
+   missing. Smaller image; first call is slow; needs network.
+3. **Mount externally.** Caller uploads the JSONL via
+   `c.upload(...)` before the first `get_task`. Most flexible; the
+   caller owns the dataset version.
+
+Pick option 1 for benchmarks where the dataset is fixed and bounded
+(SWE-bench is ~500 MB); option 2 for ones that update; option 3 for
+private or experiment-specific datasets.
+
+## 5. Verification patterns
+
+- **Always re-checkout in `score`.** The agent may have committed,
+  reset, or otherwise mangled the workdir. The score method is the
+  ground truth for "did the patch work."
+- **Run the held-out test patch separately.** SWE-bench's `test_patch`
+  contains the tests the agent should not have seen. Apply it after
+  the model patch.
+- **Return `logs`.** Callers debugging a low score want the test
+  runner's stdout — don't summarise away the evidence.
+- **Bound the test command timeout.** A buggy patch can hang the
+  test runner; the caller expects the score call to return.
+
+## When you write one
+
+A new benchmark (HumanEval, MLE-Bench, OSWorld, SWELancer), a custom
+evaluation built for a single experiment, or a private leaderboard.
+Each gets its own namespace; share types and helpers via
+`agentix.<vendor>.common` if you ship multiple related datasets from
+the same wheel.

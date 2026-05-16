@@ -12,23 +12,26 @@ Each spec is one of:
 
   1. **Path:** a directory containing `pyproject.toml` and the namespace's
      Python package under `src/agentix/<name>/`.
-  2. **Image ref:** a string with a `:` AND a `/` — pre-built (not yet wired).
+  2. **Image ref:** pre-built — `:` AND `/` (not yet wired).
   3. **Short name:** searched against `primitives/<name>/` in the repo,
      falling back to PyPI `agentix-<name>` (currently stubbed).
 
-Build shape:
+Build shape — every namespace gets its own venv:
 
-  Python deps are uniform: every namespace gets `pip install`ed into the
-  runtime image's venv. System deps are optional — a namespace that needs
-  native binaries (`claude` CLI, git, …) ships a `default.nix` next to its
-  `pyproject.toml`. If any spec ships one, a Nix builder stage runs first;
-  the resulting `/nix/store` is COPY'd into the final image so its binaries
-  resolve at their content-addressed paths. Bundles with no `default.nix`
-  files anywhere skip Nix entirely — `FROM python:slim` end to end.
+  Python deps **per namespace**: each namespace is pip-installed into its
+  own `/venvs/<short>/` (uv-managed) so two namespaces can pull
+  incompatible dep versions without conflict. The multiplexer spawns a
+  worker subprocess using each namespace's venv interpreter.
 
-  The output image extends `agentix/runtime:<framework-version>` (override
-  via `--runtime-image`). The runtime image is built once from
-  `primitives/_template/Dockerfile`; subsequent bundles reuse it.
+  System deps **per namespace**: a namespace that needs native binaries
+  (claude CLI, git, …) ships a `default.nix` next to its `pyproject.toml`.
+  If any spec ships one, a Nix builder stage runs first; its
+  `/nix/store` is COPY'd into the bundle so absolute store paths
+  resolve. Bundles with no `default.nix` anywhere skip Nix entirely.
+
+  The output image extends `agentix/runtime:<framework-version>`
+  (override via `--runtime-image`). The runtime image is built once
+  from `primitives/_template/Dockerfile`; subsequent bundles reuse it.
 """
 
 from __future__ import annotations
@@ -65,15 +68,13 @@ def _derive_tag_from_pyproject(pyproject: dict) -> str:
 
 
 def _resolve_path(spec: NamespaceSpec) -> Path:
-    """Return the on-disk source dir for a spec; raise on unsupported kinds."""
     if spec.kind == "path":
         assert spec.path is not None
         return spec.path
     if spec.kind == "pypi":
         raise NotImplementedError(
             f"`agentix build {spec.short}`: PyPI sourcing not wired yet. "
-            f"Needs a `pip download {spec.pypi_dist}` step before the source "
-            f"dir is ready. Use a local path instead."
+            f"Use a local path instead."
         )
     raise SystemExit(
         f"`agentix build {spec.short}`: image refs aren't a valid input — "
@@ -87,12 +88,7 @@ def _has_system_deps(src: Path) -> bool:
 
 
 def _stage(specs: list[tuple[NamespaceSpec, Path]], build_dir: Path) -> None:
-    """Stage each namespace's project tree into `build_dir/<short>/`.
-
-    The whole project dir is copied so pip can find pyproject.toml + src/,
-    and Nix can find default.nix when it's present. Common dev artifacts
-    (__pycache__, .venv, etc.) are skipped.
-    """
+    """Copy each namespace's project tree into `build_dir/<short>/`."""
     for spec, src in specs:
         dest = build_dir / spec.short
         dest.mkdir()
@@ -110,12 +106,15 @@ def _render_dockerfile(
     specs: list[tuple[NamespaceSpec, Path]],
     runtime_image: str,
 ) -> str:
-    """Multi-stage Dockerfile: optional Nix system-deps builder, then a
-    final stage that extends the runtime image and pip-installs each
-    staged namespace project.
+    """Multi-stage Dockerfile.
 
-    The Nix builder stage is omitted entirely when no namespace ships a
-    `default.nix` — Python-only bundles skip nixos/nix altogether.
+    Stage 1 (optional): Nix builder for any namespace that ships
+    `default.nix`. Skipped entirely if no spec does.
+
+    Stage 2: extends the runtime image. For each namespace, create
+    `/venvs/<short>/` via uv and `pip install` the namespace + the
+    bundled framework wheel into it. The result is one isolated venv
+    per namespace, all sharing the runtime image's base layers.
     """
     nix_specs = [(s, p) for s, p in specs if _has_system_deps(p)]
 
@@ -147,10 +146,18 @@ def _render_dockerfile(
     if nix_specs:
         parts.append("COPY --from=sys-builder /export/nix /nix")
 
+    # One venv per namespace via uv. `uv venv` is fast (millisecond-scale);
+    # each `pip install` runs in its own venv so cross-namespace dep
+    # versions don't merge. The framework wheel is the only shared dep —
+    # installed into every venv from /agentix-wheel/ stashed by the
+    # runtime image.
     for spec, _ in specs:
-        parts.append(f"COPY {spec.short}/ /src/{spec.short}/")
-    install_paths = " ".join(f"/src/{s.short}" for s, _ in specs)
-    parts.append(f"RUN pip install --no-cache-dir {install_paths}")
+        parts += [
+            f"COPY {spec.short}/ /src/{spec.short}/",
+            f"RUN uv venv /venvs/{spec.short} && \\",
+            f"    /venvs/{spec.short}/bin/pip install --no-cache-dir "
+            f"/agentix-wheel/agentix-*.whl /src/{spec.short}",
+        ]
 
     short_names = " ".join(s.short for s, _ in specs)
     parts.append(f'LABEL org.agentix.bundle.namespaces="{short_names}"')
@@ -164,10 +171,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument(
-        "specs", nargs="+",
-        help="one or more namespace short names, paths, or image refs",
-    )
+    parser.add_argument("specs", nargs="+",
+                        help="one or more namespace short names, paths, or image refs")
     parser.add_argument(
         "-o", "--output", "--tag", dest="output", default=None,
         help="output docker image tag. Required when building >1 namespace; "
@@ -178,10 +183,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="base runtime image the bundle extends (default: "
              f"agentix/runtime:{FRAMEWORK_VERSION})",
     )
-    parser.add_argument(
-        "--dry-run", action="store_true",
-        help="stage to ./build/<tag>/ and print path; do NOT invoke docker",
-    )
+    parser.add_argument("--dry-run", action="store_true",
+                        help="stage to ./build/<tag>/ and print path; do NOT invoke docker")
     args = parser.parse_args(argv)
 
     try:

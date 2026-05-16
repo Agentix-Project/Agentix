@@ -87,12 +87,14 @@ bundle image:
    `nixos/nix` builder stage runs first. Each spec's derivation is
    built; the full closure is copied to `/export/nix/store`. Bundles
    with no system deps anywhere skip this stage entirely.
-2. **Stage 2 (Python venv):** `FROM agentix/runtime:<version>` (which
-   is Python 3.11-slim + framework wheel installed). If stage 1 ran,
-   `COPY --from=sys-builder /export/nix /nix`. Then for each spec,
-   `pip install` its source dir into the runtime's venv.
-3. **Output:** a single image carrying runtime + every namespace +
-   any system deps. Sandbox runs it directly — no mount-and-merge.
+2. **Stage 2 (per-namespace venvs):** `FROM agentix/runtime:<version>`
+   (which is Python 3.11-slim + framework venv at `/venvs/runtime/` +
+   uv + the framework wheel stashed at `/agentix-wheel/`). If stage 1
+   ran, `COPY --from=sys-builder /export/nix /nix`. Then **for each
+   spec** create its own venv via `uv venv /venvs/<short>/` and
+   pip-install the namespace + the framework wheel into it.
+3. **Output:** one image carrying the framework + one venv per
+   namespace + any system deps. The sandbox runs it directly.
 
 The runtime image (`agentix/runtime:<version>`) is built once via
 `docker build -f primitives/_template/Dockerfile .` from the repo root.
@@ -101,22 +103,27 @@ The runtime image (`agentix/runtime:<version>`) is built once via
 
 ```text
 /                                  ← bundle image rootfs
-├── usr/local/lib/python3.11/site-packages/
-│   ├── agentix/                   ← framework
-│   ├── agentix/bash/              ← namespace (pip-installed alongside)
-│   ├── agentix/files/             ← namespace
-│   ├── agentix_bash-<v>.dist-info/  ← entry_points.txt — picked up by
-│   │                                  importlib.metadata
-│   └── …
-└── nix/                           ← optional, only present if a namespace
-    └── store/                       had default.nix
+├── venvs/
+│   ├── runtime/                   ← framework venv; ENTRYPOINT here
+│   │   ├── bin/agentix-server     ← the multiplexer process
+│   │   └── lib/python3.11/site-packages/agentix/...
+│   ├── bash/                      ← one venv per namespace
+│   │   ├── bin/python             ← worker interpreter for agentix.bash
+│   │   └── lib/python3.11/site-packages/agentix/bash/...
+│   └── files/
+│       ├── bin/python
+│       └── lib/python3.11/site-packages/agentix/files/...
+├── agentix-wheel/                 ← framework wheel; reused at build time
+└── nix/                           ← optional, only if a namespace had
+    └── store/                       default.nix
         ├── <hash>-claude-*/bin/claude
         └── <hash>-git-*/bin/git
 ```
 
-The sandbox container's `ENTRYPOINT` is `agentix-server`. It binds to
-`AGENTIX_BIND_PORT` (env, picked by the deployment at create time) and
-starts serving immediately.
+The sandbox container's `ENTRYPOINT` is `/venvs/runtime/bin/agentix-server`.
+It binds to `AGENTIX_BIND_PORT` and starts the multiplexer; namespace
+workers spawn lazily on first dispatch using each namespace's
+`/venvs/<short>/bin/python`.
 
 ## Environment & PATH policy
 
@@ -152,23 +159,22 @@ carries everything.
 
 ## Design decisions
 
-- **In-process dispatch** — namespaces are Python modules in the
-  runtime's interpreter; no subprocess, no UDS, no reverse-proxy.
-  Cheaper, simpler, fully typed.
-- **Entry-point discovery** — `importlib.metadata.entry_points` finds
-  every installed namespace. No `manifest.json` registration call, no
-  per-framework decorator.
+- **Subprocess per namespace.** Each namespace runs in its own venv's
+  Python interpreter, isolated from every other namespace's deps. The
+  runtime process is the multiplexer — it spawns workers lazily,
+  forwards RPC frames over stdin/stdout, and routes trace events back
+  to the Socket.IO channel.
+- **Entry-point discovery across venvs** — the multiplexer walks
+  `/venvs/*/lib/python*/site-packages` for `agentix.namespace` entry
+  points. No `manifest.json`, no per-framework decorator.
 - **The class is the API spec** — `@staticmethod` methods on a
   `Namespace` subclass carry both the type signature and the real
-  implementation. IDE and pyright enforce parameter types; no separate
-  schema artifact.
-- **Static namespace set per sandbox** — change the set by recreating
-  the sandbox.
+  implementation. The host imports the class for typing; the body
+  runs inside the worker subprocess.
+- **Static namespace set per sandbox** — change the set by rebuilding
+  the bundle and recreating the sandbox.
 - **Built-in sandbox I/O on the runtime** — run / upload / download
   always available, independent of any namespace.
-- **Namespaces share the runtime's Python interpreter** — Python
-  wrappers stay thin (stdlib + pydantic, which the runtime already
-  ships). Heavy native deps belong in `default.nix`, not Python deps.
 - **Nix is opt-in.** Pure-Python namespaces ship no `default.nix` and
   the build skips Nix entirely — `FROM python:slim` end-to-end, seconds
   to build instead of minutes.
