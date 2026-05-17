@@ -1,7 +1,7 @@
 [project]
-name = "agentix"
+name = "agentixx"
 version = "0.1.0"
-description = "Execution, tracing, and integration bridge for agent workflows"
+description = "Execution, tracing, and integration bridge for agent workflows (import as `agentix`)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
