@@ -565,13 +565,13 @@ class NamespaceMultiplexer:
         """Try to register `package` against any known venv.
 
         For dispatch to an unknown package, we check each discovered
-        interpreter (the runtime venv in dev mode; each `/nix/<short>/`
-        venv in bundle mode) for whether the module is importable.
-        First match wins.
+        interpreter for whether the module is importable. The bundle
+        carries one venv at `/nix/runtime/`; dev/test mode uses
+        `sys.executable`. First match wins.
 
         Fast path: the runtime's own Python tries `importlib.util.find_spec`
-        in-process (no subprocess). Slow path: for other venvs we
-        subprocess-probe with `python -c 'import <pkg>'`.
+        in-process (no subprocess). Slow path: any auxiliary venv we
+        know about gets a `python -c 'import <pkg>'` probe.
 
         Returns True iff the module was registered.
         """

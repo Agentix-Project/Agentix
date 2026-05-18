@@ -57,16 +57,20 @@ ABI.
 
 ## Build pipeline
 
-`agentix build <specs...> -o <tag>` produces one deploy-ready bundle:
+`agentix build [path]` packages one project root into a deploy-ready
+bundle. Plugins arrive transitively via pip from the project's
+`[project].dependencies`; the CLI never enumerates them.
 
-1. **Optional Nix stage:** if any spec ships `default.nix`, a
-   `nixos/nix` builder stage runs first; the closure is copied to
-   `/export/nix/store`. Bundles with no system deps skip this stage.
-2. **Per-namespace venvs:** `FROM agentix/runtime:<version>` (Python
-   3.11-slim + framework venv at `/nix/runtime/` + uv). For each spec
-   create `uv venv /nix/<short>/` and pip-install the namespace + the
-   framework wheel. Specs with `default.nix` get their derivation's
-   `bin/*` symlinked into `/nix/<short>/bin/`.
+1. **Optional Nix stage:** if the project ships `default.nix`, a
+   `nixos/nix` builder stage runs first; the derivation closure is
+   copied to `/export/nix/store`. Projects with no system deps skip
+   this stage.
+2. **One pip install:** `FROM agentix/runtime:<version>` (Python
+   3.11-slim + framework venv at `/nix/runtime/`). One
+   `pip install /src/project` resolves the user's project + every
+   declared `agentix-*` plugin into the same venv. If the project
+   shipped `default.nix`, its derivation's `bin/*` is symlinked into
+   `/nix/runtime/bin/`.
 
 The runtime image (`agentix/runtime:<version>`) is built once via
 `docker build -f ../Agentix-Runtime-Basic/runtime/Dockerfile .`.
@@ -76,21 +80,23 @@ The runtime image (`agentix/runtime:<version>`) is built once via
 ```text
 /                                  ← bundle image rootfs
 ├── nix/
-│   ├── runtime/                   ← framework venv; ENTRYPOINT here
-│   │   ├── bin/agentix-server     ← the multiplexer process
-│   │   └── lib/python3.11/site-packages/agentix/...
-│   ├── bash/                      ← one venv per namespace
-│   │   ├── bin/python             ← worker interpreter for agentix.bash
-│   │   └── lib/python3.11/site-packages/agentix/bash/...
-│   ├── .wheels/                   ← framework wheel; reused at build
-│   └── store/                     ← only if a namespace had default.nix
+│   ├── runtime/                   ← framework + every plugin + user code
+│   │   ├── bin/agentix-server     ← ENTRYPOINT; the multiplexer process
+│   │   ├── bin/python             ← every worker's interpreter
+│   │   ├── bin/claude             ← symlink → /nix/store/<hash>/bin/claude
+│   │   └── lib/python3.11/site-packages/
+│   │       ├── agentix/...        ← framework
+│   │       ├── agentix/bash/      ← from agentix-runtime-basic
+│   │       ├── agentix/claude_code/ ← from agentix-claude-code
+│   │       └── my_project/        ← user's project
+│   └── store/                     ← Nix store (only if default.nix shipped)
 │       ├── <hash>-claude-*/bin/claude
 │       └── <hash>-git-*/bin/git
 ```
 
 ENTRYPOINT is `/nix/runtime/bin/agentix-server`, binding
-`AGENTIX_BIND_PORT`. Namespace workers spawn lazily using each
-namespace's `/nix/<short>/bin/python`.
+`AGENTIX_BIND_PORT`. One worker subprocess per dispatched module
+spawns from `/nix/runtime/bin/python`.
 
 ## Environment & PATH policy
 
@@ -99,9 +105,9 @@ Subprocess invocations:
 1. **Strip Nix-host-only env vars** — `LD_LIBRARY_PATH`, `LD_PRELOAD`,
    `PYTHONPATH`, `PYTHONHOME`, `LOCALE_ARCHIVE`, `FONTCONFIG_*`,
    `SSL_CERT_FILE`, anything prefixed `NIX_`.
-2. **PATH defaults to** `/usr/local/bin:/usr/bin:/bin`. Namespace
-   bin/ dirs (e.g. `/nix/claude_code/bin/`) are prepended when that
-   namespace's worker runs subprocesses.
+2. **PATH defaults to** `/usr/local/bin:/usr/bin:/bin`, with
+   `/nix/runtime/bin/` prepended for every worker so symlinked Nix
+   binaries (`claude`, `git`, …) resolve by bare name.
 3. **Nix-store paths** (`/nix/store/<hash>/bin/<tool>`) are stable
    across the bundle's lifetime — content-addressed.
 

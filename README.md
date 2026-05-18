@@ -180,11 +180,14 @@ pip install -e ../Agentix-Runtime-Basic -e ../Agentix-Deployment-Docker
 ## CLI
 
 ```bash
-agentix build ./Agentix-Runtime-Basic                        # one integration image
-agentix build ./ns-a ./ns-b ./ns-c -o my-agent:0.1.0         # bundle several
+agentix build                                                # build current project
+agentix build path/to/project -o my-agent:0.1.0              # explicit path + tag
 agentix deploy local --image my-agent:0.1.0                  # run a rollout container
 agentix check                                                # smoke-test every installed integration
 ```
+
+Multi-plugin bundles are expressed by declaring the plugins as deps
+in your project's `pyproject.toml`; pip pulls them in transitively.
 
 ## Write an integration
 

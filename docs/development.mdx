@@ -1,6 +1,6 @@
 ---
 title: Development
-description: Local setup, daily workflow, and how to add a new namespace to the in-tree primitives.
+description: Local setup, daily workflow, and how to author a new namespace.
 ---
 
 ## Prerequisites
@@ -42,16 +42,18 @@ docker build -t agentix/runtime:0.1.0 -f ../Agentix-Runtime-Basic/runtime/Docker
 This produces the base image every namespace bundle extends. Rebuild
 whenever the framework version bumps.
 
-### Build a namespace bundle
+### Build a bundle from a project
 
 ```bash
-agentix build ../Agentix-Runtime-Basic                              # → agentix/bash:0.1.0
-agentix build ../Agentix-Runtime-Basic ../Agentix-Runtime-Basic -o my-sandbox:dev   # → bundle of both
+agentix build                                # build the current directory's pyproject
+agentix build path/to/project -o my:dev      # explicit path + tag
 ```
 
-A bundle image extends the runtime, pip-installs each namespace, and
-(optionally) layers in any system deps from per-namespace `default.nix`.
-It's deploy-ready — no further composition needed.
+The bundle image extends the runtime and pip-installs the project +
+every declared `agentix-*` dep into `/nix/runtime/`. If the project
+ships `default.nix`, system binaries from the derivation symlink into
+`/nix/runtime/bin/`. The build CLI never enumerates plugins — they
+arrive transitively via pip from your `[project].dependencies`.
 
 ### Smoke-test end-to-end in Docker
 

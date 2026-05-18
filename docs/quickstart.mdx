@@ -54,7 +54,7 @@ from agentix.deployment.docker import DockerDeployment
 
 async def main():
     deployment = DockerDeployment()
-    config = SandboxConfig(image="my-bash:0.1.0")   # `agentix build bash -o my-bash:0.1.0`
+    config = SandboxConfig(image="my-bash:0.1.0")   # produced by `agentix build path/to/my-project`
     async with session(deployment, config) as sandbox:
         async with RuntimeClient(sandbox.runtime_url) as c:
             r = await c.remote(bash.run, command="echo hi")
@@ -106,10 +106,13 @@ in ~100 ms.
 </Tabs>
 
 ```bash
-agentix build ./my-namespace                       # → agentix/myagent:0.1.0
-agentix build bash myagent -o my-bundle:0.1.0      # bundle several namespaces
-agentix deploy local --image my-bundle:0.1.0
+agentix build ./my-namespace                       # → myagent:0.1.0
+agentix deploy local --image myagent:0.1.0
 ```
+
+Bundling several plugins? Declare them in a project's `pyproject.toml`
+under `[project].dependencies` and `agentix build` that project — pip
+resolves transitively.
 
 `pip install agentix-myagent` is everything your users need. The
 framework discovers the entry point, and

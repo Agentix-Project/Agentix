@@ -9,29 +9,43 @@ agentix --help
 
 ## `agentix build`
 
-Build one namespace image, or bundle several into a single image.
+Package one project root into a deploy-ready sandbox image. Plugins
+arrive transitively via the project's `[project].dependencies` — the
+CLI never enumerates them.
 
 ```bash
-# One namespace — tag auto-derived from pyproject.toml
-agentix build ../Agentix-Runtime-Basic
-agentix build ../Agentix-Runtime-Basic --dry-run
-agentix build ../Agentix-Runtime-Basic -o my-bundle:dev
-
-# Many namespaces — explicit -o required
-agentix build ../Agentix-Runtime-Basic ../claude-code -o my-agent:0.1.0
-agentix build ../Agentix-Runtime-Basic ./my-experimental-namespace -o demo:dev
-agentix build ../Agentix-Runtime-Basic ../claude-code --dry-run -o sandbox:dev
+agentix build                                # current directory's pyproject
+agentix build path/to/project                # explicit project root
+agentix build . -o my-agent:0.1.0            # explicit image tag
+agentix build . --dry-run                    # stage Dockerfile, no docker invoke
+agentix build . --runtime-image agentix/runtime:0.2.0   # different base
 ```
 
-Each spec accepts:
+The positional arg is a path to a directory containing `pyproject.toml`.
+Whatever that project's `[project].dependencies` resolves to via pip
+ends up in the bundle's `/nix/runtime/` venv; at runtime the framework
+walks site-packages for `agentix.namespace` entry points and registers
+each one. Multi-plugin bundles are expressed by declaring multiple
+`agentix-*` dists as deps:
 
-- **Path:** `../Agentix-Runtime-Basic` or any directory with a `pyproject.toml`.
-- **PyPI dist:** `agentix-runtime-basic` (currently raises `NotImplementedError`).
+```toml
+# my-agent/pyproject.toml
+[project]
+name = "my-agent"
+version = "0.1.0"
+dependencies = [
+    "agentixx>=0.1.0",
+    "agentix-runtime-basic>=0.1.0",  # bash + files
+    "agentix-claude-code>=0.1.0",    # claude CLI
+    "agentix-swebench>=0.1.0",       # scoring
+]
+```
 
-`-o / --output / --tag` is the output image tag. With one spec it's
-optional (auto-derived as `agentix/<short>:<version>`). With multiple
-specs it's required. `--dry-run` stages the docker build context to
-`./build/<name>/` and prints the path instead of invoking docker.
+Then `agentix build` from the project dir builds the multi-plugin image.
+
+`-o / --output / --tag` overrides the default `<name>:<version>` image
+tag from the pyproject. `--dry-run` stages the Dockerfile to
+`./build/<short>/` and exits without invoking docker.
 
 ## `agentix deploy`
 

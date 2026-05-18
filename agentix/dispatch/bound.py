@@ -86,4 +86,5 @@ def source_for(impl: Callable[..., Any]) -> PackageName | None:
     return PackageName(mod)
 
 
-__all__ = ["_BoundMethod", "coerce_args", "source_for"]
+# Internal — nothing here is part of the public dispatch API.
+# `Dispatcher` (in dispatcher.py) is the only consumer.
