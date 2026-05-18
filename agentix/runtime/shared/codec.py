@@ -45,7 +45,7 @@ def _numpy() -> Any:
     """Lazy numpy import. Cached on the module."""
     global _np
     if _np is None:
-        import numpy  # noqa: PLC0415 — intentional lazy import
+        import numpy  # type: ignore[reportMissingImports]  # noqa: PLC0415
         _np = numpy
     return _np
 
