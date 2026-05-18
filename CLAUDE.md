@@ -58,7 +58,8 @@ agentix/
 │   ├── client/              — RuntimeClient
 │   └── server/              — FastAPI + Socket.IO + worker package
 ├── deployment/          — Deployment Protocol + backend plugin loader
-└── cli/                 — agentix build
+├── cli/                 — agentix build
+└── nix/                 — shipped Nix builder (flake + uv2nix wrapper)
 ```
 
 One line per system:
@@ -73,6 +74,9 @@ One line per system:
   correlates events by `call_id`.
 - **deployment** — host-side `Deployment` Protocol and backend lookup.
 - **cli** — `agentix build [path]`.
+- **nix** — `flake.nix`, `builder.nix`, `wrapper.nix.tmpl` shipped as
+  wheel data; `agentix build` stages them per invocation and drives
+  `nix build` to produce the runtime image.
 
 ## Remote Call Implementation
 
@@ -124,31 +128,61 @@ result is awaitable. Streams and bidi require async generators.
 
 ## Bundle Implementation
 
-`agentix build [path]` packages one project root into a deploy-ready
-image. The CLI does not enumerate runtime integrations; they arrive
-through pip from `[project].dependencies`.
+`agentix build [path]` produces a self-contained, distro-portable
+runtime image from one project root. No base image, no `FROM`, no `pip
+install` inside the build. Everything goes through Nix:
 
 ```toml
 [project]
 name = "my-agent"
 version = "0.1.0"
 dependencies = [
-    "agentixx>=0.1.0",
-    "agentix-runtime-basic>=0.1.0",
-    "agentix-deployment-docker>=0.1.0",
+    "agentixx>=0.1.2",
+    "agentix-runtime-basic>=0.1.2",
+    "agentix-deployment-docker>=0.1.3",
 ]
 ```
 
-Build stages:
+The user must also have a `uv.lock` (run `uv lock`). uv2nix consumes
+that lock and produces Nix derivations for every Python dep — the
+interpreter, agentixx, plugins, the user's project, and transitive
+deps all land in `/nix/store/...` with rpath-resolved closures, so the
+resulting image runs against any Linux task image (Alpine, RHEL, etc.)
+when overlaid via `SandboxConfig.runtime_image`.
 
-1. Optional Nix stage if the project has `default.nix`; system binaries
-   are copied into the final image and linked under `/nix/runtime/bin`.
-2. Final image from `agentix/runtime:<version>`; copy the project and
-   run one `pip install /src/project` into `/nix/runtime`.
+Two inputs to the build:
 
-The result is one shared `/nix/runtime` venv. User code, runtime
-integrations, direct dependencies, and transitive dependencies are all
-importable by the worker.
+1. **Python side — `pyproject.toml` + `uv.lock`.** uv2nix reads the
+   lock; `mkVirtualEnv` materializes a venv with the full closure;
+   `/bin/agentix-server` becomes the entry point.
+
+2. **System side — plugin `default.nix` files.** Each plugin may ship
+   a `default.nix` next to its Python module (e.g.
+   `agentix/bash/default.nix`). `agentix build` discovers them via
+   `importlib.resources.files('agentix.<short>') / 'default.nix'`,
+   imports each with the shared `pkgs`, and `symlinkJoin`s the results
+   into the bundle's `/bin/`. Plugins that need no system binaries can
+   skip the file entirely. The user's project may add a `default.nix`
+   at its root to declare extra system deps (git, ffmpeg, ...).
+
+Plugin nix expressions follow one convention: `{ pkgs }: drv`. The
+builder hands every plugin the same Nixpkgs revision (pinned in
+`agentix/nix/flake.lock`), so no per-plugin version drift.
+
+Build flow:
+
+1. Stage a temp dir with `_builder/` (shipped flake), `project/` (user
+   source), `plugins/<short>.nix` (discovered plugin nix files), and
+   a generated `flake.nix` wrapper.
+2. `nix build .#bundle` → uv2nix overlay → `mkVirtualEnv` → joined
+   tree → `streamLayeredImage` script.
+3. `<result> | docker load` produces a local docker image tagged
+   `<name>:<tag>`.
+
+The two-image runtime: deployments overlay `SandboxConfig.runtime_image`
+(the bundle from `agentix build`) onto `SandboxConfig.image` (a
+task-specific base) via Docker 25's `--mount type=image,source=…,
+target=/nix,subpath=nix,readonly` at sandbox-create time. No rebuild.
 
 ## Wire Protocol
 

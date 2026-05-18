@@ -1,0 +1,20 @@
+{
+  description = "Generated per-build flake — wraps the shipped Agentix builder around one user project.";
+
+  inputs.agentix.url = "path:./_builder";
+
+  outputs = { self, agentix }:
+    let
+      system = "@SYSTEM@";
+      pkgs = agentix.inputs.nixpkgs.legacyPackages.${system};
+    in {
+      packages.${system}.bundle = agentix.lib.mkBundle {
+        inherit pkgs;
+        name = "@NAME@";
+        tag = "@TAG@";
+        workspaceRoot = ./project;
+        pluginNixFiles = [ @PLUGIN_NIX_LIST@ ];
+        pythonVersion = "@PYTHON_VERSION@";
+      };
+    };
+}

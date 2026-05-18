@@ -50,6 +50,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["agentix"]
+# `agentix build` ships Nix builder templates under `agentix/nix/`;
+# hatchling includes non-.py files in packages automatically.
 
 [tool.ruff]
 line-length = 120
