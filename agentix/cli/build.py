@@ -40,8 +40,6 @@ is a Nix closure first, then a docker tarball.
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import shutil
 import subprocess
 import sys
@@ -50,7 +48,6 @@ from importlib import resources
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from agentix import __version__ as FRAMEWORK_VERSION
 from agentix.cli._resolve import REPO_ROOT, read_pyproject, short_name
 
 _SOURCE_SKIP = {
