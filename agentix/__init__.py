@@ -24,7 +24,7 @@ from agentix.runtime.client import RemoteCallError, RuntimeClient
 from agentix.runtime.client._sio_facade import AsyncClientNamespace
 from agentix.sio import Namespace, RemoteSioError, register_namespace
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
 __all__ = [
     "AsyncClientNamespace",
