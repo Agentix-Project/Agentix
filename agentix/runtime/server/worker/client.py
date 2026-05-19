@@ -26,6 +26,11 @@ logger = logging.getLogger("agentix.runtime.server.worker.client")
 
 _WORKER_START_TIMEOUT = 15.0
 _DEFAULT_WORKER_PATH = "/usr/local/bin:/usr/bin:/bin"
+# Plugin `default.nix` derivations are symlink-joined into this path
+# inside the bundle image (see `agentix/nix/builder.nix`). Worker code
+# (`subprocess.run("claude", ...)`, `c.remote(cc.run, ...)`, ...) must
+# be able to find those binaries by bare name.
+_RUNTIME_BIN_PATH = "/nix/runtime/bin"
 _STRIPPED_ENV = {
     "LD_LIBRARY_PATH",
     "LD_PRELOAD",
@@ -43,7 +48,17 @@ def _clean_worker_env(runtime_bin_dir: Path | None) -> dict[str, str]:
         for key, value in os.environ.items()
         if key not in _STRIPPED_ENV and not any(key.startswith(prefix) for prefix in _STRIPPED_ENV_PREFIXES)
     }
-    env["PATH"] = f"{runtime_bin_dir}:{_DEFAULT_WORKER_PATH}" if runtime_bin_dir is not None else _DEFAULT_WORKER_PATH
+    # Build PATH from: the venv's bin (`runtime_bin_dir`), the bundle's
+    # symlink-join (`/nix/runtime/bin`), then a minimal system fallback.
+    # Inside the bundle image the first two are siblings and both must
+    # be searchable; outside the bundle, only the first one exists.
+    parts: list[str] = []
+    if runtime_bin_dir is not None:
+        parts.append(str(runtime_bin_dir))
+    if _RUNTIME_BIN_PATH not in parts:
+        parts.append(_RUNTIME_BIN_PATH)
+    parts.append(_DEFAULT_WORKER_PATH)
+    env["PATH"] = ":".join(parts)
     return env
 
 
