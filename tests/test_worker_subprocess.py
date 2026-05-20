@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import pickle
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -58,6 +59,25 @@ async def test_subprocess_worker_bad_callable_fails_fast():
         await mp.shutdown()
     assert not resp.ok
     assert resp.error is not None
+
+
+async def test_subprocess_worker_ignores_cwd_agentix_package(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = tmp_path / "agentix"
+    fake.mkdir()
+    (fake / "__init__.py").write_text("raise RuntimeError('cwd agentix package imported')\n")
+    monkeypatch.chdir(tmp_path)
+
+    mp = _make_worker()
+    try:
+        resp = await mp.call(request_for(target.echo, kwargs={"msg": "shadow"}))
+        assert resp.ok, resp.error
+        result = pickle.loads(resp.value)
+        assert result.msg == "echo:shadow"
+    finally:
+        await mp.shutdown()
 
 
 async def test_subprocess_worker_death_fails_in_flight_call():

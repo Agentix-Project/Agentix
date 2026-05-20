@@ -25,6 +25,20 @@ from agentix.runtime.shared.models import RemoteError, RemoteRequest, RemoteResp
 logger = logging.getLogger("agentix.runtime.server.worker.client")
 
 _WORKER_START_TIMEOUT = 15.0
+_WORKER_BOOTSTRAP = """
+import os
+import sys
+
+_cwd = os.getcwd()
+sys.path = [p for p in sys.path if p not in ("", ".", _cwd)]
+_import_root = os.environ.pop("AGENTIX_WORKER_IMPORT_ROOT", "")
+if _import_root and _import_root not in sys.path:
+    sys.path.insert(0, _import_root)
+from agentix.runtime.server.worker.process import main
+
+main()
+"""
+_WORKER_IMPORT_ROOT = Path(__file__).resolve().parents[4]
 # Plugin `default.nix` derivations are symlink-joined into this path
 # inside the bundle image (see `agentix/nix/builder.nix`). Worker code
 # (`subprocess.run("claude", ...)`, `c.remote(cc.run, ...)`, ...) must
@@ -138,10 +152,11 @@ class _SubprocessWorker:
 
     async def start(self) -> None:
         env = _clean_worker_env(self._runtime_bin_dir)
+        env["AGENTIX_WORKER_IMPORT_ROOT"] = str(_WORKER_IMPORT_ROOT)
         self._proc = await asyncio.create_subprocess_exec(
             self._python,
-            "-m",
-            "agentix.runtime.server.worker",
+            "-c",
+            _WORKER_BOOTSTRAP,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=sys.stderr,
