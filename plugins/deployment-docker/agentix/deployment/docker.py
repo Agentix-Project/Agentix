@@ -22,8 +22,8 @@ Design:
   release. Switch when available.)
 
   Sandbox create:
-      docker create --name <carrier> <runtime_image>   # once, per runtime_image
-      docker run -d --name <sid> --network host \\
+      docker create [--platform <platform>] --name <carrier> <runtime_image>
+      docker run [--platform <platform>] -d --name <sid> --network host \\
          -e AGENTIX_BIND_PORT=<port> \\
          --volumes-from <carrier>:ro \\
          --entrypoint /nix/runtime/bin/agentix-server \\
@@ -63,9 +63,10 @@ async def _docker(*args: str, check: bool = True) -> tuple[int, bytes, bytes]:
     return rc, stdout, stderr
 
 
-def _carrier_name(runtime_image: str) -> str:
+def _carrier_name(runtime_image: str, platform: str | None = None) -> str:
     """Stable name for the stopped container that holds a runtime's /nix volume."""
-    slug = hashlib.sha1(runtime_image.encode()).hexdigest()[:12]
+    key = f"{runtime_image}@{platform}" if platform else runtime_image
+    slug = hashlib.sha1(key.encode()).hexdigest()[:12]
     return f"agentix-runtime-{slug}"
 
 
@@ -84,17 +85,18 @@ class DockerDeployment(Deployment):
             s.bind(("127.0.0.1", 0))
             return s.getsockname()[1]
 
-    async def _ensure_carrier(self, runtime_image: str) -> str:
+    async def _ensure_carrier(self, runtime_image: str, platform: str | None) -> str:
         """Create (if missing) a stopped container exposing runtime_image's /nix.
 
         Stopped containers cost only metadata; one per distinct
-        runtime_image is enough regardless of how many sandboxes share it.
+        runtime_image/platform is enough regardless of how many sandboxes share it.
         """
-        carrier = _carrier_name(runtime_image)
+        carrier = _carrier_name(runtime_image, platform)
         rc, _, _ = await _docker("inspect", carrier, check=False)
         if rc == 0:
             return carrier
-        await _docker("create", "--name", carrier, runtime_image)
+        platform_args = ["--platform", platform] if platform else []
+        await _docker("create", *platform_args, "--name", carrier, runtime_image)
         return carrier
 
     async def create(self, config: SandboxConfig) -> Sandbox:
@@ -106,9 +108,12 @@ class DockerDeployment(Deployment):
             for k, v in config.env.items():
                 env_args.extend(["-e", f"{k}={v}"])
 
-        carrier = await self._ensure_carrier(config.runtime_image)
+        carrier = await self._ensure_carrier(config.runtime_image, config.platform)
+        platform_args = ["--platform", config.platform] if config.platform else []
         await _docker(
-            "run", "-d",
+            "run",
+            *platform_args,
+            "-d",
             "--name", sandbox_id,
             "--network", "host",
             *env_args,

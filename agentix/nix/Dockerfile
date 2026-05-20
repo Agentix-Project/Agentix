@@ -13,8 +13,11 @@
 FROM nixos/nix:latest
 
 # Flakes + the modern CLI; accept flake `nixConfig` for substituters.
+# Syscall filtering can fail under Docker buildx emulation; the Docker
+# build sandbox is already the outer isolation boundary here.
 RUN echo "experimental-features = nix-command flakes" >> /etc/nix/nix.conf \
- && echo "accept-flake-config = true" >> /etc/nix/nix.conf
+ && echo "accept-flake-config = true" >> /etc/nix/nix.conf \
+ && echo "filter-syscalls = false" >> /etc/nix/nix.conf
 
 # Where the project sits inside the copied repo (a uv-workspace member
 # or cookbook example lives in a subdirectory). Passed by `agentix build`.

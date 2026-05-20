@@ -20,21 +20,26 @@ Package one project root into a bundle image.
 ```bash
 agentix build
 agentix build path/to/project
-agentix build . -o my-rollout:0.1.0
+agentix build . --name my-rollout:0.1.0
+agentix build . --platform linux/amd64
 agentix build . --dry-run
-agentix build . --runtime-image agentix/runtime:0.2.0
 ```
 
 The project root must contain `pyproject.toml`. The default image tag is
-derived from `[project].name` and `[project].version`; `-o`, `--output`,
-or `--tag` overrides it.
+derived from `[project].name` and `[project].version`; `-n` / `--name`
+overrides it.
 
 | Option | Meaning |
 | --- | --- |
 | `path` | Project root, default `.` |
-| `-o`, `--output`, `--tag` | Output image tag, must include `:<version>` |
-| `--runtime-image` | Base runtime image to extend |
+| `-n`, `--name` | Image `NAME` or `NAME:TAG`; bare names use `[project].version` |
+| `--platform` | Sandbox runtime platform, `linux/amd64` or `linux/arm64`; defaults to local CPU |
 | `--dry-run` | Stage the Dockerfile and build context without running Docker |
+
+`--platform` describes the Linux container platform where the sandbox
+will run, not the machine that invokes the build. For example, use
+`--platform linux/amd64` when building on an Apple Silicon Mac for a
+remote x86 sandbox.
 
 ### Dependency Model
 

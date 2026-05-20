@@ -179,6 +179,58 @@ class TestParseName:
             build.parse_name(bad, {"project": {"name": "demo", "version": "1.0"}})
 
 
+# ── build: platform resolution ─────────────────────────────────────
+
+
+class TestPlatform:
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("linux/amd64", "linux/amd64"),
+            ("amd64", "linux/amd64"),
+            ("x86_64", "linux/amd64"),
+            ("linux/x86_64", "linux/amd64"),
+            ("linux/arm64", "linux/arm64"),
+            ("linux/arm64/v8", "linux/arm64"),
+            ("arm64", "linux/arm64"),
+            ("aarch64", "linux/arm64"),
+            ("linux/aarch64", "linux/arm64"),
+        ],
+    )
+    def test_normalize_platform(self, value: str, expected: str) -> None:
+        assert build.normalize_platform(value) == expected
+
+    def test_normalize_platform_rejects_unknown(self) -> None:
+        with pytest.raises(SystemExit):
+            build.normalize_platform("darwin/arm64")
+
+    @pytest.mark.parametrize(
+        ("machine", "expected"),
+        [
+            ("x86_64", "linux/amd64"),
+            ("amd64", "linux/amd64"),
+            ("arm64", "linux/arm64"),
+            ("aarch64", "linux/arm64"),
+        ],
+    )
+    def test_detect_default_platform(self, machine: str, expected: str) -> None:
+        assert build.detect_default_platform(machine) == expected
+
+    def test_detect_default_platform_rejects_unknown(self) -> None:
+        with pytest.raises(SystemExit):
+            build.detect_default_platform("sparc")
+
+    @pytest.mark.parametrize(
+        ("platform", "expected"),
+        [
+            ("linux/amd64", "x86_64-linux"),
+            ("linux/arm64", "aarch64-linux"),
+        ],
+    )
+    def test_nix_system_for_platform(self, platform: str, expected: str) -> None:
+        assert build.nix_system_for_platform(platform) == expected
+
+
 # ── build: git context resolution ──────────────────────────────────
 
 
@@ -214,7 +266,7 @@ class TestResolveContext:
 
 
 class TestStageContext:
-    def _staged(self, tmp_path: Path, python_version: str = "311") -> Path:
+    def _staged(self, tmp_path: Path, python_version: str = "311", platform: str = "linux/amd64") -> Path:
         repo = _make_project(tmp_path / "repo")
         _git_init(repo)  # creates .git/ — must be skip-listed
         (repo / ".venv").mkdir()
@@ -222,7 +274,7 @@ class TestStageContext:
         (repo / "__pycache__").mkdir()
         (repo / "__pycache__" / "c.pyc").write_text("x")
         stage = tmp_path / "stage"
-        build.stage_context(stage, context_root=repo, python_version=python_version)
+        build.stage_context(stage, context_root=repo, python_version=python_version, platform=platform)
         return stage
 
     def test_repo_copied(self, tmp_path: Path) -> None:
@@ -245,6 +297,10 @@ class TestStageContext:
         stage = self._staged(tmp_path, python_version="312")
         assert (stage / "python-version").read_text() == "312\n"
 
+    def test_nix_system_file(self, tmp_path: Path) -> None:
+        stage = self._staged(tmp_path, platform="linux/arm64")
+        assert (stage / "nix-system").read_text() == "aarch64-linux\n"
+
     def test_closures_dir_created(self, tmp_path: Path) -> None:
         stage = self._staged(tmp_path)
         assert (stage / "closures").is_dir()
@@ -256,9 +312,38 @@ class TestStageContext:
         flake = (stage / "flake.nix").read_text()
         assert "toolchain" in flake
         assert "runtime" in flake
+        assert "builtins.readFile ./nix-system" in flake
         # Python is uv's job — no uv2nix machinery in the flake.
         assert "uv2nix.lib" not in flake
         assert "mkPyprojectOverlay" not in flake
+
+
+# ── build: docker command ──────────────────────────────────────────
+
+
+class TestDockerBuild:
+    def test_docker_build_passes_platform(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[list[str]] = []
+
+        def _fake_run(cmd: list[str], *, cwd: Path | None = None, capture: bool = False) -> subprocess.CompletedProcess:
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0)
+
+        monkeypatch.setattr(build, "_run", _fake_run)
+
+        ref = build._docker_build(
+            tmp_path,
+            name="demo",
+            tag="1.0.0",
+            project_subpath=Path("."),
+            platform="linux/amd64",
+        )
+
+        assert ref == "demo:1.0.0"
+        cmd = calls[0]
+        assert cmd[:4] == ["docker", "buildx", "build", "--platform"]
+        assert cmd[4] == "linux/amd64"
+        assert "--load" in cmd
 
 
 # ── build: main / --dry-run ────────────────────────────────────────
@@ -280,15 +365,17 @@ class TestMainDryRun:
         staged = out / "build" / "demo-agent"
         assert (staged / "repo" / "examples" / "demo" / "pyproject.toml").is_file()
         assert (staged / "python-version").read_text() == "312\n"
+        assert (staged / "nix-system").read_text()
         assert (staged / "Dockerfile").is_file()
 
     def test_dry_run_custom_name(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         proj = _make_project(tmp_path / "proj")
         out = tmp_path / "out"
         monkeypatch.setattr("agentix.cli.build.REPO_ROOT", out)
-        rc = build.main([str(proj), "--name", "myimg:dev", "--dry-run"])
+        rc = build.main([str(proj), "--name", "myimg:dev", "--platform", "linux/arm64", "--dry-run"])
         assert rc == 0
         assert (out / "build" / "myimg").is_dir()
+        assert (out / "build" / "myimg" / "nix-system").read_text() == "aarch64-linux\n"
 
     def test_dry_run_does_not_invoke_docker(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         proj = _make_project(tmp_path / "proj")

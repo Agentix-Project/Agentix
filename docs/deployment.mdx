@@ -27,7 +27,10 @@ from agentix.deployment.base import SandboxConfig, session
 from agentix.deployment.docker import DockerDeployment
 
 deployment = DockerDeployment()
-config = SandboxConfig(image="my-rollout:0.1.0")
+config = SandboxConfig(
+    image="python:3.13-slim",
+    runtime_image="my-rollout:0.1.0",
+)
 
 async with session(deployment, config) as sandbox:
     async with RuntimeClient(sandbox.runtime_url) as client:
@@ -35,6 +38,17 @@ async with session(deployment, config) as sandbox:
 ```
 
 `session(...)` creates the sandbox on entry and deletes it on exit.
+
+If the bundle was built for a non-default architecture, pass the same
+Docker/OCI platform so the task image and runtime overlay match:
+
+```python
+config = SandboxConfig(
+    image="python:3.13-slim",
+    runtime_image="my-rollout:0.1.0",
+    platform="linux/amd64",
+)
+```
 
 ## Backend Plugins
 

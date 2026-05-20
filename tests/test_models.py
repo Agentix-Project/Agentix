@@ -58,6 +58,15 @@ def test_sandbox_config_with_env():
     assert cfg.env == {"FOO": "bar"}
 
 
+def test_sandbox_config_with_platform():
+    cfg = SandboxConfig(
+        image="ubuntu:24.04",
+        runtime_image="my-agent:0.1.0",
+        platform="linux/amd64",
+    )
+    assert cfg.platform == "linux/amd64"
+
+
 def test_sandbox_config_requires_both_images():
     with pytest.raises(Exception):
         SandboxConfig()  # type: ignore[call-arg]

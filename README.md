@@ -90,6 +90,10 @@ uv run agentix build . --name hello-agentix  # builds hello-agentix:0.1.0
 uv run python run.py
 ```
 
+When the sandbox runs on a different CPU architecture than your build
+host, build for the sandbox platform explicitly, for example
+`uv run agentix build . --name hello-agentix --platform linux/amd64`.
+
 The demo builds `hello-agentix:0.1.0`, overlays it onto
 `python:3.13-slim`, then calls `agentix.bash.run` inside the sandbox:
 

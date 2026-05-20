@@ -6,6 +6,7 @@ Usage:
     agentix build path/to/project         # explicit project root
     agentix build . --name hello-agentix  # NAME (auto-appends :<version>)
     agentix build . --name hello:dev      # NAME:TAG (used verbatim)
+    agentix build . --platform linux/amd64
     agentix build . --dry-run             # stage the build context only
 
 The argument is a project root — a directory with `pyproject.toml` +
@@ -25,6 +26,10 @@ Every heavy step — `uv venv`, `uv sync`, `nix build` — happens inside
 the container. The host needs only `agentixx`, `docker`, and `git`;
 no project venv, no uv, no nix.
 
+The platform is the sandbox runtime platform, not the host platform.
+On macOS, for example, `--platform linux/amd64` builds a Linux x86_64
+bundle for a remote x86 sandbox.
+
 A project that path-depends on siblings (a uv workspace, a cookbook
 example) needs those siblings in the build context — so the context is
 the whole git repository, with the project addressed by its subpath.
@@ -39,6 +44,7 @@ Result image layout (mounted into a task container at `/nix`):
 from __future__ import annotations
 
 import argparse
+import platform as host_platform
 import shutil
 import subprocess
 import sys
@@ -70,6 +76,23 @@ _SOURCE_SKIP = frozenset({
 # Files staged verbatim from `agentix/nix/` into the build context.
 _BUILDER_FILES = ("flake.nix", "flake.lock", "Dockerfile", "bundle-build.sh")
 
+_DOCKER_TO_NIX_SYSTEM = {
+    "linux/amd64": "x86_64-linux",
+    "linux/arm64": "aarch64-linux",
+}
+
+_PLATFORM_ALIASES = {
+    "linux/amd64": "linux/amd64",
+    "linux/x86-64": "linux/amd64",
+    "amd64": "linux/amd64",
+    "x86-64": "linux/amd64",
+    "linux/arm64": "linux/arm64",
+    "linux/arm64/v8": "linux/arm64",
+    "linux/aarch64": "linux/arm64",
+    "arm64": "linux/arm64",
+    "aarch64": "linux/arm64",
+}
+
 
 def _run(cmd: list[str], *, cwd: Path | None = None, capture: bool = False) -> subprocess.CompletedProcess:
     """Run a subprocess, echoing the command; raise SystemExit on failure."""
@@ -80,6 +103,36 @@ def _run(cmd: list[str], *, cwd: Path | None = None, capture: bool = False) -> s
             sys.stderr.write(proc.stderr or "")
         raise SystemExit(proc.returncode)
     return proc
+
+
+def normalize_platform(value: str) -> str:
+    """Normalize a user platform into Docker's OS/arch form."""
+    key = value.strip().lower().replace("_", "-")
+    platform = _PLATFORM_ALIASES.get(key)
+    if platform is None:
+        supported = ", ".join(sorted(_DOCKER_TO_NIX_SYSTEM))
+        raise SystemExit(f"--platform {value!r}: supported values are {supported}")
+    return platform
+
+
+def detect_default_platform(machine: str | None = None) -> str:
+    """Best-effort default Docker platform for the current build host.
+
+    Agentix builds Linux container images even when invoked from macOS,
+    so only the CPU architecture is inherited from the host.
+    """
+    raw = (machine or host_platform.machine()).strip().lower().replace("_", "-")
+    if raw in {"amd64", "x86-64"}:
+        return "linux/amd64"
+    if raw in {"arm64", "aarch64"}:
+        return "linux/arm64"
+    raise SystemExit(f"cannot auto-detect Docker platform from machine {raw!r}; pass --platform")
+
+
+def nix_system_for_platform(platform: str) -> str:
+    """Return the Nix system matching a normalized Docker platform."""
+    platform = normalize_platform(platform)
+    return _DOCKER_TO_NIX_SYSTEM[platform]
 
 
 def git_toplevel(path: Path) -> Path | None:
@@ -129,6 +182,7 @@ def stage_context(
     *,
     context_root: Path,
     python_version: str,
+    platform: str,
 ) -> None:
     """Lay out the Docker build context under `stage`.
 
@@ -138,8 +192,10 @@ def stage_context(
         stage/Dockerfile       build container (verbatim)
         stage/bundle-build.sh  in-container orchestration (verbatim)
         stage/python-version   interpreter minor, read by flake.nix
+        stage/nix-system       target Nix system, read by flake.nix
         stage/closures/        empty — filled in-container by `_assemble`
     """
+    platform = normalize_platform(platform)
     stage.mkdir(parents=True, exist_ok=True)
 
     repo_dest = stage / "repo"
@@ -154,17 +210,19 @@ def stage_context(
         (stage / name).write_bytes(_shipped(name))
 
     (stage / "python-version").write_text(f"{python_version}\n")
+    (stage / "nix-system").write_text(f"{nix_system_for_platform(platform)}\n")
     (stage / "closures").mkdir(exist_ok=True)
     # git won't track an empty dir; the flake guards on pathExists, but
     # a marker keeps the dir present in the context tarball.
     (stage / "closures" / ".keep").write_text("")
 
 
-def _docker_build(stage: Path, *, name: str, tag: str, project_subpath: Path) -> str:
+def _docker_build(stage: Path, *, name: str, tag: str, project_subpath: Path, platform: str) -> str:
     """`docker buildx build` the staged context; return the image ref.
 
     A bare `NAME` is also tagged `NAME:latest` for convenience.
     """
+    platform = normalize_platform(platform)
     ref = f"{name}:{tag}"
     tags = ["-t", ref]
     if tag != "latest":
@@ -173,6 +231,8 @@ def _docker_build(stage: Path, *, name: str, tag: str, project_subpath: Path) ->
         "docker",
         "buildx",
         "build",
+        "--platform",
+        platform,
         "--load",
         *tags,
         "--build-arg",
@@ -228,6 +288,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="stage the build context to ./build/<name>/ and stop",
     )
+    parser.add_argument(
+        "--platform",
+        default=None,
+        help="target Linux container platform for the sandbox runtime "
+        "(linux/amd64 or linux/arm64; default: auto-detect local CPU)",
+    )
     args = parser.parse_args(argv)
 
     src = Path(args.path).resolve()
@@ -240,15 +306,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     name, tag = parse_name(args.name, pyproject)
     python_version = detect_python_version(pyproject)
+    platform = normalize_platform(args.platform) if args.platform else detect_default_platform()
     context_root, project_subpath = resolve_context(src)
 
     if args.dry_run:
         out = REPO_ROOT / "build" / name
         if out.exists():
             shutil.rmtree(out)
-        stage_context(out, context_root=context_root, python_version=python_version)
+        stage_context(out, context_root=context_root, python_version=python_version, platform=platform)
         print(f"staged build context → {out}")
         print(f"  image            → {name}:{tag}")
+        print(f"  platform         → {platform}")
+        print(f"  nix system       → {nix_system_for_platform(platform)}")
         print(f"  python           → 3.{python_version[1:]}")
         print(f"  context root     → {context_root}")
         print(f"  project subpath  → {project_subpath}")
@@ -256,8 +325,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     with TemporaryDirectory(prefix="agentix-build-") as tmp:
         stage = Path(tmp) / "ctx"
-        stage_context(stage, context_root=context_root, python_version=python_version)
-        ref = _docker_build(stage, name=name, tag=tag, project_subpath=project_subpath)
+        stage_context(stage, context_root=context_root, python_version=python_version, platform=platform)
+        ref = _docker_build(stage, name=name, tag=tag, project_subpath=project_subpath, platform=platform)
         print(f"\nimage ready → {ref}", file=sys.stderr)
         if tag != "latest":
             print(f"            → {name}:latest", file=sys.stderr)

@@ -66,6 +66,11 @@ class SandboxConfig(BaseModel):
         "`agentix build`, e.g. `my-agent:0.1.0`. Mounted at "
         "`/nix` in the sandbox via `--mount type=image`.",
     )
+    platform: str | None = Field(
+        default=None,
+        description="Optional Docker/OCI platform for both the task image "
+        "and runtime image, e.g. `linux/amd64` or `linux/arm64`.",
+    )
     env: dict[str, str] | None = Field(
         default=None,
         description="Optional env vars passed to the sandbox container.",
