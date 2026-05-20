@@ -1,6 +1,6 @@
 [project]
 name = "agentixx"
-version = "0.2.5"
+version = "0.2.6"
 description = "Sandboxed rollouts you call like typed Python (import as `agentix`)"
 readme = "README.md"
 requires-python = ">=3.11"

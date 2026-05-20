@@ -50,14 +50,32 @@ class Worker:
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
+
+        # The server↔worker frame pipe arrives on fd 0 (stdin) / fd 1
+        # (stdout). User code inside a remote call routinely spawns
+        # subprocesses (claude, git, ...) that INHERIT fd 0/1 — and a
+        # child reading stdin (claude does) would steal frame bytes,
+        # desyncing the protocol and hanging every later call.
+        #
+        # Move the framing onto private fds and point 0/1 at /dev/null,
+        # so any inherited stdio is harmless. `sys.stdout` still wraps
+        # the old fd-1 buffer, so stray `print()`s now land in
+        # /dev/null instead of corrupting frames.
+        frame_in_fd = os.dup(0)
+        frame_out_fd = os.dup(1)
+        devnull = os.open(os.devnull, os.O_RDWR)
+        os.dup2(devnull, 0)
+        os.dup2(devnull, 1)
+        os.close(devnull)
+
         reader = asyncio.StreamReader()
         await loop.connect_read_pipe(
             lambda: asyncio.StreamReaderProtocol(reader),
-            sys.stdin.buffer,
+            os.fdopen(frame_in_fd, "rb", buffering=0),
         )
         transport, protocol = await loop.connect_write_pipe(
             asyncio.streams.FlowControlMixin,
-            sys.stdout.buffer,
+            os.fdopen(frame_out_fd, "wb", buffering=0),
         )
         writer = asyncio.StreamWriter(transport, protocol, None, loop)
         self._reader, self._writer = reader, writer
