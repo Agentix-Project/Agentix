@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hello-bundle"
+version = "0.1.0"
+description = "Minimal agentix bundle — the `agentix build` end-to-end fixture"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "agentixx",
+    # Pulls a sandbox-side plugin that ships a `default.nix` — exercises
+    # plugin closure discovery in the bundle build.
+    "agentix-runtime-basic",
+]
+
+# Standalone project (see [tool.uv.workspace].exclude in the repo root)
+# — path-depends on the monorepo, editable, no release step.
+[tool.uv.sources]
+agentixx = { path = "../..", editable = true }
+agentix-runtime-basic = { path = "../../plugins/runtime-basic", editable = true }
+
+[tool.hatch.build.targets.wheel]
+only-include = ["hello_bundle.py"]

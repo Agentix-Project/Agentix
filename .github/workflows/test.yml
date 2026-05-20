@@ -15,14 +15,34 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v5
         with:
-          python-version: "3.11"
-          cache: pip
-      - run: pip install -e '.[dev]'
+          enable-cache: true
+      # The whole uv workspace — core + every plugin member. Plugin
+      # tests (e.g. agentix.nix discovery) need the members installed.
+      - name: sync workspace
+        run: uv sync --all-packages --all-extras
       - name: lint
-        run: ruff check agentix/ tests/
+        run: uv run ruff check .
       - name: types
-        run: pyright agentix
+        run: uv run pyright
+      # `addopts = -m "not e2e"` (pyproject) keeps the bundle build out
+      # of this job — it runs in `e2e` below.
       - name: unit tests
-        run: pytest tests/ -v
+        run: uv run pytest tests/ -v
+
+  e2e:
+    name: build e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: sync workspace
+        run: uv sync --all-packages
+      # `agentix build` drives `docker buildx`; Nix runs inside the
+      # build container, so the runner needs only Docker (preinstalled
+      # on ubuntu-latest). `-m e2e` overrides the default exclusion.
+      - name: build a real bundle
+        run: uv run pytest tests/test_build_e2e.py -v -m e2e

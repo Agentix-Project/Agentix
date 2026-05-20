@@ -69,6 +69,10 @@ packages = ["agentix"]
 # sees core edits live without a release step.
 [tool.uv.workspace]
 members = ["plugins/*"]
+# `examples/*` are standalone projects, not members — each has its own
+# lock and path-depends on the workspace. Excluding them lets `uv lock`
+# run inside an example without uv claiming it as a stray member.
+exclude = ["examples/*"]
 
 [tool.ruff]
 line-length = 120
@@ -120,3 +124,8 @@ reportGeneralTypeIssues = "warning"
 asyncio_mode = "auto"
 pythonpath = ["."]
 python_files = ["test_*.py"]
+# `e2e` tests build a real bundle image (need docker, take minutes).
+# `addopts` excludes them by default — the `e2e` CI job runs them with
+# `-m e2e`, which overrides this.
+markers = ["e2e: builds a real bundle image — needs docker, slow"]
+addopts = ["-m", "not e2e"]
