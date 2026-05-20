@@ -91,18 +91,21 @@ include = [
     "plugins/deployment-docker/agentix",
     "plugins/deployment-daytona/agentix",
     "plugins/deployment-e2b/agentix",
+    "plugins/runtime-basic/agentix",
 ]
 exclude = ["**/__pycache__", "**/.venv", ".venv", "**/build"]
 # `agentix` is a pkgutil namespace package — the core lives here, the
-# plugins contribute siblings: `agentix/bridge/` from `plugins/abridge/`
-# and `agentix/deployment/<backend>.py` from each `plugins/deployment-*`.
-# `extraPaths` lets pyright resolve those statically (it doesn't run
+# plugins contribute siblings: `agentix/bridge/` from `plugins/abridge/`,
+# `agentix/deployment/<backend>.py` from each `plugins/deployment-*`, and
+# `agentix/{bash,files}/` from `plugins/runtime-basic/`. `extraPaths`
+# lets pyright resolve those statically (it doesn't run
 # `pkgutil.extend_path`).
 extraPaths = [
     "plugins/abridge",
     "plugins/deployment-docker",
     "plugins/deployment-daytona",
     "plugins/deployment-e2b",
+    "plugins/runtime-basic",
 ]
 typeCheckingMode = "basic"
 # venv lives on local disk (the repo is on a slow FUSE mount); `.venv`

@@ -28,6 +28,7 @@ dependencies = [
 agentixx = { path = "../..", editable = true }
 agentix-bridge = { path = "../../plugins/abridge", editable = true }
 agentix-deployment-docker = { path = "../../plugins/deployment-docker", editable = true }
+agentix-runtime-basic = { path = "../../plugins/runtime-basic", editable = true }
 
 [tool.hatch.build.targets.wheel]
 only-include = ["cc.py", "swe.py", "runner.py"]

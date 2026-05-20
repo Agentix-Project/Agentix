@@ -82,7 +82,8 @@ Agentix/                       — repo root = workspace root
 │   │   └── tests/
 │   ├── deployment-docker/     — `agentix-deployment-docker` → `local`
 │   ├── deployment-daytona/    — `agentix-deployment-daytona` → `daytona`
-│   └── deployment-e2b/        — `agentix-deployment-e2b` → `e2b`
+│   ├── deployment-e2b/        — `agentix-deployment-e2b` → `e2b`
+│   └── runtime-basic/         — `agentix-runtime-basic` → `bash` + `files`
 └── examples/
     └── eval-cc-swe/           — `eval-cc-swe` cookbook example
 ```
@@ -106,9 +107,11 @@ belong to their backend members, not `agentixx`. Members reference each
 other with `[tool.uv.sources] <dep> = { workspace = true }` (editable,
 no fetch).
 
-Runtime extension packages that are NOT in this repo
-(`agentix-runtime-basic`) ship from their own wheels and are updated in
-lockstep with HEAD.
+`runtime-basic` is a *sandbox-side* member — it ships the `bash` +
+`files` namespaces and their `default.nix` data files into the
+`agentix build` bundle. The deployment members are *host-side*. Both
+kinds are ordinary workspace members; the build layer sorts out which
+ones land in the bundle.
 
 ## Systems Map
 

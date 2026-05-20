@@ -8,6 +8,7 @@ members = [
     "agentix-deployment-daytona",
     "agentix-deployment-docker",
     "agentix-deployment-e2b",
+    "agentix-runtime-basic",
     "agentixx",
 ]
 
@@ -60,6 +61,17 @@ requires-dist = [
 name = "agentix-deployment-e2b"
 version = "0.1.2"
 source = { editable = "plugins/deployment-e2b" }
+dependencies = [
+    { name = "agentixx" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "agentixx", editable = "." }]
+
+[[package]]
+name = "agentix-runtime-basic"
+version = "0.1.4"
+source = { editable = "plugins/runtime-basic" }
 dependencies = [
     { name = "agentixx" },
 ]

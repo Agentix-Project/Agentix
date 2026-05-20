@@ -1,0 +1,43 @@
+[project]
+name = "agentix-runtime-basic"
+version = "0.1.4"
+description = "Shell + file I/O primitives for Agentix sandboxes"
+requires-python = ">=3.11"
+dependencies = [
+    # Both namespaces are pure-stdlib at runtime (bash also uses
+    # pydantic, which arrives transitively via agentixx). The framework
+    # dep is here so the worker venv has agentix as a peer — entry-point
+    # discovery needs the framework installed in the same venv.
+    "agentixx",
+]
+
+# `agentixx` is the monorepo workspace root — used editable, never from
+# PyPI. Core edits are live here with no release step.
+[tool.uv.sources]
+agentixx = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.7,<0.9"]
+build-backend = "uv_build"
+
+# uv_build is uv's own backend — no external build deps need to land in
+# the nix sandbox at `agentix build` time, and this package DOES go into
+# the bundle (it ships sandbox-side namespaces). Two namespace modules
+# ship from one wheel; `default.nix` files alongside each `__init__.py`
+# travel as package data and are discovered by `agentix build` via
+# `importlib.resources.files('agentix.<short>') / 'default.nix'`.
+[tool.uv.build-backend]
+module-name = ["agentix.bash", "agentix.files"]
+module-root = ""
+namespace = true
+
+# Two sandbox namespaces from one wheel — the framework spawns one
+# worker per namespace from the same venv. They're consolidated here
+# because they share a deployment lifecycle (every sandbox needs both)
+# and carry no deps beyond the stdlib + agentix.
+[project.entry-points."agentix.namespace"]
+bash = "agentix.bash"
+files = "agentix.files"
+
+# ruff / pyright / pytest config is centralized in the workspace-root
+# pyproject.toml — this member doesn't repeat it.
