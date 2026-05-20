@@ -14,7 +14,7 @@ import logging
 import os
 import sys
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -25,7 +25,6 @@ from agentix.runtime.shared.models import RemoteError, RemoteRequest, RemoteResp
 logger = logging.getLogger("agentix.runtime.server.worker.client")
 
 _WORKER_START_TIMEOUT = 15.0
-_DEFAULT_WORKER_PATH = "/usr/local/bin:/usr/bin:/bin"
 # Plugin `default.nix` derivations are symlink-joined into this path
 # inside the bundle image (see `agentix/nix/builder.nix`). Worker code
 # (`subprocess.run("claude", ...)`, `c.remote(cc.run, ...)`, ...) must
@@ -42,6 +41,17 @@ _STRIPPED_ENV = {
 _STRIPPED_ENV_PREFIXES = ("NIX_", "FONTCONFIG_")
 
 
+def _join_path_entries(entries: Iterable[str]) -> str:
+    parts: list[str] = []
+    seen: set[str] = set()
+    for entry in entries:
+        if not entry or entry in seen:
+            continue
+        parts.append(entry)
+        seen.add(entry)
+    return os.pathsep.join(parts)
+
+
 def _clean_worker_env(runtime_bin_dir: Path | None) -> dict[str, str]:
     env = {
         key: value
@@ -49,16 +59,15 @@ def _clean_worker_env(runtime_bin_dir: Path | None) -> dict[str, str]:
         if key not in _STRIPPED_ENV and not any(key.startswith(prefix) for prefix in _STRIPPED_ENV_PREFIXES)
     }
     # Build PATH from: the venv's bin (`runtime_bin_dir`), the bundle's
-    # symlink-join (`/nix/runtime/bin`), then a minimal system fallback.
-    # Inside the bundle image the first two are siblings and both must
-    # be searchable; outside the bundle, only the first one exists.
+    # symlink-join (`/nix/runtime/bin`), then the parent environment's
+    # PATH. Inside the bundle image the first two are siblings and both
+    # must be searchable; outside the bundle, only the first one exists.
     parts: list[str] = []
     if runtime_bin_dir is not None:
         parts.append(str(runtime_bin_dir))
-    if _RUNTIME_BIN_PATH not in parts:
-        parts.append(_RUNTIME_BIN_PATH)
-    parts.append(_DEFAULT_WORKER_PATH)
-    env["PATH"] = ":".join(parts)
+    parts.append(_RUNTIME_BIN_PATH)
+    parts.extend(env.get("PATH", "").split(os.pathsep))
+    env["PATH"] = _join_path_entries(parts)
     return env
 
 

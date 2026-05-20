@@ -95,10 +95,11 @@ If the project includes `default.nix`, `agentix build` adds a Nix
 builder stage, copies the derivation closure into the final image, and
 symlinks `bin/*` into `/nix/runtime/bin/`.
 
-Worker processes use:
+Worker processes inherit the runtime server environment, with the
+bundle venv and Nix runtime bins prepended to `PATH`:
 
 ```text
-/nix/runtime/bin:/usr/local/bin:/usr/bin:/bin
+/nix/runtime/venv/bin:/nix/runtime/bin:${PATH}
 ```
 
 So sandbox code can call tools by name:

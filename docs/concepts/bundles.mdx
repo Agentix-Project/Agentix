@@ -67,10 +67,11 @@ If the project root includes `default.nix`, `agentix build` adds a Nix
 builder stage. The derivation closure is copied into the final image,
 and binaries are linked under `/nix/runtime/bin`.
 
-Worker subprocesses use this PATH:
+Worker subprocesses inherit the runtime server's environment, with the
+bundle venv and Nix runtime bins prepended to `PATH`:
 
 ```text
-/nix/runtime/bin:/usr/local/bin:/usr/bin:/bin
+/nix/runtime/venv/bin:/nix/runtime/bin:${PATH}
 ```
 
 That is how CLI wrappers can call tools by name:
