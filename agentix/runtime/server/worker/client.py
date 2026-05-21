@@ -18,6 +18,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any, Protocol
 
+from agentix.runtime.env import AGENTIX_ADDED_PATH
 from agentix.runtime.server.worker.invoker import CallableInvoker
 from agentix.runtime.shared.framing import read_frame, write_frame
 from agentix.runtime.shared.models import RemoteError, RemoteRequest, RemoteResponse
@@ -44,8 +45,9 @@ _WORKER_IMPORT_ROOT = Path(__file__).resolve().parents[4]
 # (`subprocess.run("claude", ...)`, `c.remote(cc.run, ...)`, ...) must
 # be able to find those binaries by bare name.
 _RUNTIME_BIN_PATH = "/nix/runtime/bin"
+_RUNTIME_LIB_PATH = "/nix/runtime/lib"
+_RUNTIME_INCLUDE_PATH = "/nix/runtime/include"
 _STRIPPED_ENV = {
-    "LD_LIBRARY_PATH",
     "LD_PRELOAD",
     "PYTHONPATH",
     "PYTHONHOME",
@@ -53,6 +55,18 @@ _STRIPPED_ENV = {
     "SSL_CERT_FILE",
 }
 _STRIPPED_ENV_PREFIXES = ("NIX_", "FONTCONFIG_")
+_RUNTIME_PATH_ADDITIONS = {
+    "LD_LIBRARY_PATH": (_RUNTIME_LIB_PATH,),
+    "LIBRARY_PATH": (_RUNTIME_LIB_PATH,),
+    "CPATH": (_RUNTIME_INCLUDE_PATH,),
+    "C_INCLUDE_PATH": (_RUNTIME_INCLUDE_PATH,),
+    "CPLUS_INCLUDE_PATH": (_RUNTIME_INCLUDE_PATH,),
+    "PKG_CONFIG_PATH": (
+        "/nix/runtime/lib/pkgconfig",
+        "/nix/runtime/share/pkgconfig",
+    ),
+    "CMAKE_PREFIX_PATH": ("/nix/runtime",),
+}
 
 
 def _join_path_entries(entries: Iterable[str]) -> str:
@@ -64,6 +78,17 @@ def _join_path_entries(entries: Iterable[str]) -> str:
         parts.append(entry)
         seen.add(entry)
     return os.pathsep.join(parts)
+
+
+def _tracking_var(name: str) -> str:
+    return f"AGENTIX_ADDED_{name}"
+
+
+def _prepend_recorded_path_entries(env: dict[str, str], name: str, entries: Iterable[str]) -> None:
+    added = _join_path_entries(entries)
+    env[name] = _join_path_entries([*added.split(os.pathsep), *env.get(name, "").split(os.pathsep)])
+    tracking_name = _tracking_var(name)
+    env[tracking_name] = _join_path_entries([*env.get(tracking_name, "").split(os.pathsep), *added.split(os.pathsep)])
 
 
 def _clean_worker_env(runtime_bin_dir: Path | None) -> dict[str, str]:
@@ -82,6 +107,16 @@ def _clean_worker_env(runtime_bin_dir: Path | None) -> dict[str, str]:
     parts.append(_RUNTIME_BIN_PATH)
     parts.extend(env.get("PATH", "").split(os.pathsep))
     env["PATH"] = _join_path_entries(parts)
+
+    added_path = []
+    added_path.extend(env.get(AGENTIX_ADDED_PATH, "").split(os.pathsep))
+    if runtime_bin_dir is not None:
+        added_path.append(str(runtime_bin_dir))
+    added_path.append(_RUNTIME_BIN_PATH)
+    env[AGENTIX_ADDED_PATH] = _join_path_entries(added_path)
+
+    for name, entries in _RUNTIME_PATH_ADDITIONS.items():
+        _prepend_recorded_path_entries(env, name, entries)
     return env
 
 
