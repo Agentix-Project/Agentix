@@ -50,5 +50,11 @@ let
 in
 pkgs.symlinkJoin {
   name = "eval-cc-swe-deps";
-  paths = [ claude pkgs.git ];
+  paths = [
+    claude
+    pkgs.git
+    # Binary wheels used by the SWE-bench harness stack (numpy, pandas,
+    # pyarrow, scikit-learn) need libstdc++ at runtime.
+    pkgs.stdenv.cc.cc.lib
+  ];
 }

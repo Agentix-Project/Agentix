@@ -48,6 +48,8 @@ async def test_create_passes_platform_to_carrier_and_sandbox(monkeypatch: pytest
 
     assert create_call[1:3] == ("--platform", "linux/amd64")
     assert run_call[1:3] == ("--platform", "linux/amd64")
+    assert run_call[run_call.index("-p") + 1] == "127.0.0.1:18000:18000"
+    assert "--network" not in run_call
     assert run_call[-3:] == (
         "python:3.13-slim",
         "-c",

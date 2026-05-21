@@ -23,14 +23,16 @@ Design:
 
   Sandbox create:
       docker create [--platform <platform>] --name <carrier> <runtime_image>
-      docker run [--platform <platform>] -d --name <sid> --network host \\
+      docker run [--platform <platform>] -d --name <sid> \\
+         -p 127.0.0.1:<port>:<port> \\
          -e AGENTIX_BIND_PORT=<port> \\
          --volumes-from <carrier>:ro \\
          --entrypoint /bin/sh \\
          <image> -c '<inject runtime env; exec agentix-server>'
 
   `agentix-server` binds to the port from `AGENTIX_BIND_PORT`. We pick
-  a free host port, pass it through, and health-check `/health` on it.
+  a free host port, publish the same port to loopback, and health-check
+  `/health` on it.
 """
 
 from __future__ import annotations
@@ -81,7 +83,8 @@ exec /nix/runtime/venv/bin/agentix-server
 
 async def _docker(*args: str, check: bool = True) -> tuple[int, bytes, bytes]:
     proc = await asyncio.create_subprocess_exec(
-        "docker", *args,
+        "docker",
+        *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -143,13 +146,18 @@ class DockerDeployment(Deployment):
             "run",
             *platform_args,
             "-d",
-            "--name", sandbox_id,
-            "--network", "host",
+            "--name",
+            sandbox_id,
+            "-p",
+            f"127.0.0.1:{port}:{port}",
             *env_args,
-            "--volumes-from", f"{carrier}:ro",
-            "--entrypoint", _RUNTIME_ENTRYPOINT,
+            "--volumes-from",
+            f"{carrier}:ro",
+            "--entrypoint",
+            _RUNTIME_ENTRYPOINT,
             config.image,
-            "-c", _RUNTIME_BOOTSTRAP,
+            "-c",
+            _RUNTIME_BOOTSTRAP,
         )
 
         self._ports[sandbox_id] = port
@@ -180,7 +188,11 @@ class DockerDeployment(Deployment):
         if port is None:
             raise KeyError(f"Sandbox not found: {sandbox_id}")
         rc, stdout, _ = await _docker(
-            "inspect", "-f", "{{.State.Status}}", sandbox_id, check=False,
+            "inspect",
+            "-f",
+            "{{.State.Status}}",
+            sandbox_id,
+            check=False,
         )
         status = stdout.decode().strip() if rc == 0 else "unknown"
         return SandboxInfo(

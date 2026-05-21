@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         shard_index:
           - 0
@@ -71,10 +71,9 @@ jobs:
         env:
           SHARD_INDEX: ${{ matrix.shard_index }}
         run: |
-          uv run python -m runner \
-            --ground-truth \
-            --fail-on-unresolved \
+          uv run python -m ci_runner \
             --bundle-image "$BUNDLE_IMAGE" \
+            --docker-platform linux/amd64 \
             --num-shards "$NUM_SHARDS" \
             --shard-index "$SHARD_INDEX" \
             --out "runs/ground-truth-shard-${SHARD_INDEX}"

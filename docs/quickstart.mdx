@@ -167,7 +167,7 @@ Under the hood, `DockerDeployment.create` does:
 docker create --name agentix-runtime-<hash> hello-agentix:0.1.0
 
 # Per sandbox — task image plus the runtime's /nix as a shared volume.
-docker run -d --name <sid> --network host \
+docker run -d --name <sid> -p 127.0.0.1:<port>:<port> \
     -e AGENTIX_BIND_PORT=<port> \
     --volumes-from agentix-runtime-<hash>:ro \
     --entrypoint /nix/runtime/bin/agentix-server \

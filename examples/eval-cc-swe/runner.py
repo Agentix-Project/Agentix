@@ -125,15 +125,6 @@ async def _run_eval_phase(
 ) -> swe.EvalResult:
     async with session(DockerDeployment(), cfg) as sandbox:
         async with RuntimeClient(sandbox.runtime_url) as c:
-            cleaned = await c.remote(
-                swe.clean,
-                workdir=WORKDIR,
-                base_commit=inst["base_commit"],
-            )
-            if not cleaned.ok:
-                tail = cleaned.log[-1000:]
-                message = f"failed to reset {WORKDIR} to {inst['base_commit']}:\n{tail}"
-                raise RuntimeError(message)
             return await c.remote(
                 swe.eval,
                 instance=inst,
@@ -149,6 +140,7 @@ async def evaluate_ground_truth_one(
     swebench_namespace: str,
     swebench_tag: str,
     arch: str,
+    docker_platform: str | None,
     eval_timeout: float,
     out_dir: Path,
 ) -> dict:
@@ -167,7 +159,7 @@ async def evaluate_ground_truth_one(
         (out_dir / f"{iid}.json").write_text(json.dumps(summary, indent=2))
         return summary
 
-    cfg = SandboxConfig(image=base_image, runtime_image=bundle_image)
+    cfg = SandboxConfig(image=base_image, runtime_image=bundle_image, platform=docker_platform)
     started = time.time()
     print(f"[{iid}] ground-truth eval sandbox: {base_image}")
     print(f"[{iid}] patch_bytes={len(patch)}")
@@ -177,6 +169,8 @@ async def evaluate_ground_truth_one(
         patch=patch,
         eval_timeout=eval_timeout,
     )
+    (out_dir / f"{iid}.apply.log").write_text(ev.apply_log)
+    (out_dir / f"{iid}.test.log").write_text(ev.test_log)
 
     summary = {
         "instance_id": iid,
@@ -209,6 +203,7 @@ async def solve_one(
     swebench_namespace: str,
     swebench_tag: str,
     arch: str,
+    docker_platform: str | None,
     openai_base_url: str,
     openai_api_key: str,
     upstream_model: str,
@@ -226,7 +221,7 @@ async def solve_one(
         arch=arch,
     )
     out_dir.mkdir(parents=True, exist_ok=True)
-    cfg = SandboxConfig(image=base_image, runtime_image=bundle_image)
+    cfg = SandboxConfig(image=base_image, runtime_image=bundle_image, platform=docker_platform)
 
     print(f"[{iid}] agent sandbox: {base_image}")
     started = time.time()
@@ -256,6 +251,8 @@ async def solve_one(
         patch=patch,
         eval_timeout=eval_timeout,
     )
+    (out_dir / f"{iid}.apply.log").write_text(ev.apply_log)
+    (out_dir / f"{iid}.test.log").write_text(ev.test_log)
 
     summary = {
         "instance_id": iid,
@@ -322,6 +319,11 @@ async def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--swebench-namespace", default="swebench")
     parser.add_argument("--swebench-tag", default="latest")
     parser.add_argument("--arch", default="x86_64", choices=["x86_64", "arm64"])
+    parser.add_argument(
+        "--docker-platform",
+        default=None,
+        help="Docker platform for the runtime and task containers, e.g. linux/amd64.",
+    )
     parser.add_argument("--dataset", default="princeton-nlp/SWE-bench_Verified")
     parser.add_argument("--split", default="test")
     parser.add_argument(
@@ -408,6 +410,7 @@ async def main(argv: list[str] | None = None) -> int:
                     swebench_namespace=args.swebench_namespace,
                     swebench_tag=args.swebench_tag,
                     arch=args.arch,
+                    docker_platform=args.docker_platform,
                     eval_timeout=args.eval_timeout,
                     out_dir=out_dir,
                 )
@@ -418,6 +421,7 @@ async def main(argv: list[str] | None = None) -> int:
                     swebench_namespace=args.swebench_namespace,
                     swebench_tag=args.swebench_tag,
                     arch=args.arch,
+                    docker_platform=args.docker_platform,
                     openai_base_url=args.openai_base_url,
                     openai_api_key=args.openai_api_key,
                     upstream_model=args.upstream_model,
