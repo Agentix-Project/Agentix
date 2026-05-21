@@ -43,11 +43,47 @@ async def test_swe_eval_script_runs_without_agentix_runtime_paths(
     assert "TRACKING=unset" in out
 
 
-def test_sphinx_tox_eval_emits_pytest_report_sections() -> None:
-    script, fixed = swe._fix_sphinx_tox_pytest_report_sections(
-        "cd /testbed\ntox --current-env -epy39 -v -- tests/test_ext_autodoc_automodule.py\n"
+def test_new_file_only_test_patch_reset_preserves_setup_commit() -> None:
+    script, fixed = swe._fix_swebench_new_file_only_test_patch_reset(
+        base_commit="abc123",
+        test_patch=(
+            "diff --git a/tests/test_new.py b/tests/test_new.py\n"
+            "new file mode 100644\n"
+            "--- /dev/null\n"
+            "+++ b/tests/test_new.py\n"
+            "@@ -0,0 +1 @@\n"
+            "+def test_new(): pass\n"
+        ),
+        eval_script=(
+            "cd /testbed\n"
+            "git checkout abc123 \n"
+            "git apply -v - <<'EOF'\n"
+            "tox --current-env -epy39 -v -- tests/test_new.py\n"
+            "git checkout abc123 \n"
+        ),
     )
 
     assert fixed is True
-    assert 'export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:-} -rA"' in script
-    assert script.index("PYTEST_ADDOPTS") < script.index("tox --current-env")
+    assert "git checkout abc123" not in script
+    assert "new-file-only test_patch must not reset the whole repo" in script
+    assert "tests/test_new.py" in script
+    assert "PYTEST_ADDOPTS" not in script
+
+
+def test_modified_test_patch_reset_is_left_to_swebench() -> None:
+    script = "cd /testbed\ngit checkout abc123 tests/test_existing.py\n"
+    fixed_script, fixed = swe._fix_swebench_new_file_only_test_patch_reset(
+        base_commit="abc123",
+        test_patch=(
+            "diff --git a/tests/test_existing.py b/tests/test_existing.py\n"
+            "--- a/tests/test_existing.py\n"
+            "+++ b/tests/test_existing.py\n"
+            "@@ -1 +1 @@\n"
+            "-old\n"
+            "+new\n"
+        ),
+        eval_script=script,
+    )
+
+    assert fixed is False
+    assert fixed_script == script

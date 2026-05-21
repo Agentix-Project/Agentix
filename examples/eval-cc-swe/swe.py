@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import shlex
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -205,7 +206,7 @@ async def eval(
     # (b) Run the eval script. test_spec.eval_script handles applying
     # test_patch and invoking the test command with START/END markers.
     eval_script = workroot / "eval.sh"
-    eval_script_text, known_fixes = _patch_eval_script_for_known_image_issues(spec, spec.eval_script)
+    eval_script_text, known_fixes = _prepare_eval_script(spec, instance, spec.eval_script)
     eval_script.write_text(eval_script_text)
     eval_script.chmod(0o755)
 
@@ -267,6 +268,33 @@ async def _capture_diff(workdir: str) -> str:
     return out.decode(errors="replace").strip()
 
 
+def _prepare_eval_script(
+    spec: Any,
+    instance: dict[str, Any],
+    eval_script: str,
+) -> tuple[str, list[str]]:
+    """Normalize SWE-bench's eval script, then patch instance-scoped environment drift."""
+    known_fixes: list[str] = []
+    eval_script, runner_fixes = _normalize_swebench_eval_script(instance, eval_script)
+    known_fixes.extend(runner_fixes)
+    eval_script, image_fixes = _patch_eval_script_for_known_image_issues(spec, eval_script)
+    known_fixes.extend(image_fixes)
+    return eval_script, known_fixes
+
+
+def _normalize_swebench_eval_script(instance: dict[str, Any], eval_script: str) -> tuple[str, list[str]]:
+    """Apply upstream-compatible fixes to SWE-bench's generated eval script."""
+    known_fixes: list[str] = []
+    eval_script, fixed = _fix_swebench_new_file_only_test_patch_reset(
+        base_commit=str(instance.get("base_commit", "")),
+        test_patch=str(instance.get("test_patch", "")),
+        eval_script=eval_script,
+    )
+    if fixed:
+        known_fixes.append("swebench:new-file-only-test-patch-reset")
+    return eval_script, known_fixes
+
+
 def _patch_eval_script_for_known_image_issues(spec: Any, eval_script: str) -> tuple[str, list[str]]:
     """Patch instance-scoped SWE-bench environment drift before tests run."""
     known_fixes: list[str] = []
@@ -279,10 +307,6 @@ def _patch_eval_script_for_known_image_issues(spec: Any, eval_script: str) -> tu
     if spec.instance_id == "django__django-10097":
         eval_script = _fix_django_10097_sqlite_legacy_alter_table(eval_script)
         known_fixes.append("django__django-10097:sqlite-legacy-alter-table")
-    if spec.instance_id.startswith("sphinx-doc__"):
-        eval_script, fixed = _fix_sphinx_tox_pytest_report_sections(eval_script)
-        if fixed:
-            known_fixes.append("sphinx-doc:tox-pytest-report-sections")
     if spec.instance_id in PSF_REQUESTS_LOCAL_HTTPBIN_INSTANCES:
         eval_script = _fix_psf_requests_local_httpbin(eval_script)
         known_fixes.append(f"{spec.instance_id}:local-httpbin")
@@ -290,6 +314,46 @@ def _patch_eval_script_for_known_image_issues(spec: Any, eval_script: str) -> tu
         eval_script = _fix_psf_requests_tarpit_connect_timeout(eval_script)
         known_fixes.append(f"{spec.instance_id}:tarpit-connect-timeout")
     return eval_script, known_fixes
+
+
+def _fix_swebench_new_file_only_test_patch_reset(
+    *,
+    base_commit: str,
+    test_patch: str,
+    eval_script: str,
+) -> tuple[str, bool]:
+    # Mirrors upstream SWE-bench's fix for new-file-only test patches: an
+    # empty checkout path list must not become a whole-repo reset.
+    modified_paths, touched_paths = _extract_test_patch_paths(test_patch)
+    if not base_commit or modified_paths or not touched_paths:
+        return eval_script, False
+
+    quoted_paths = " ".join(shlex.quote(path) for path in touched_paths)
+    cleanup = (
+        ": 'agentix upstream harness fix: new-file-only test_patch must not reset the whole repo'\n"
+        f"for path in {quoted_paths}; do\n"
+        '  if [ -e "$path" ] && ! git ls-files --error-unmatch -- "$path" >/dev/null 2>&1; then\n'
+        '    rm -rf -- "$path"\n'
+        "  fi\n"
+        "done"
+    )
+    pattern = re.compile(rf"(?m)^git checkout {re.escape(base_commit)}[ \t]*$")
+    fixed, count = pattern.subn(cleanup, eval_script)
+    return fixed, count > 0
+
+
+def _extract_test_patch_paths(test_patch: str) -> tuple[list[str], list[str]]:
+    preimage_paths = [
+        path
+        for path in re.findall(r"^--- a/(.*)$", test_patch, re.MULTILINE)
+        if path != "/dev/null"
+    ]
+    postimage_paths = [
+        path
+        for path in re.findall(r"^\+\+\+ b/(.*)$", test_patch, re.MULTILINE)
+        if path != "/dev/null"
+    ]
+    return list(dict.fromkeys(preimage_paths)), list(dict.fromkeys(postimage_paths))
 
 
 def _fix_astropy_pytest_7_incompat(instance_id: str, eval_script: str) -> str:
@@ -360,18 +424,6 @@ path.write_text(text.replace(old, new))
 PY
 ''',
     )
-
-
-def _fix_sphinx_tox_pytest_report_sections(eval_script: str) -> tuple[str, bool]:
-    # Some Sphinx eval scripts run pytest through tox without -rA, so a passing
-    # targeted test can produce only "." plus "1 passed". SWE-bench grading
-    # needs per-test PASSED lines; PYTEST_ADDOPTS is already threaded through
-    # Sphinx tox.ini, so this changes report verbosity without changing tests.
-    needle = "tox --current-env"
-    insertion = 'export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:-} -rA"\n'
-    if insertion in eval_script or needle not in eval_script:
-        return eval_script, False
-    return eval_script.replace(needle, insertion + needle, 1), True
 
 
 def _fix_psf_requests_local_httpbin(eval_script: str) -> str:
