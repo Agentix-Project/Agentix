@@ -104,6 +104,9 @@ export OPENAI_MODEL=gpt-4o-mini
 python -m runner --limit 5
 # or specific instances:
 python -m runner --instance-id django__django-11099 --instance-id sympy__sympy-20212
+
+# CI-only ground-truth check: exits on the first unresolved instance.
+python -m ci_runner --num-shards 20 --shard-index 0 --out runs/ground-truth-shard-0
 ```
 
 Runner flags (all optional unless noted):
