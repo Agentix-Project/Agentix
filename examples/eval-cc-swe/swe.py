@@ -279,6 +279,10 @@ def _patch_eval_script_for_known_image_issues(spec: Any, eval_script: str) -> tu
     if spec.instance_id == "django__django-10097":
         eval_script = _fix_django_10097_sqlite_legacy_alter_table(eval_script)
         known_fixes.append("django__django-10097:sqlite-legacy-alter-table")
+    if spec.instance_id.startswith("sphinx-doc__"):
+        eval_script, fixed = _fix_sphinx_tox_pytest_report_sections(eval_script)
+        if fixed:
+            known_fixes.append("sphinx-doc:tox-pytest-report-sections")
     if spec.instance_id in PSF_REQUESTS_LOCAL_HTTPBIN_INSTANCES:
         eval_script = _fix_psf_requests_local_httpbin(eval_script)
         known_fixes.append(f"{spec.instance_id}:local-httpbin")
@@ -356,6 +360,18 @@ path.write_text(text.replace(old, new))
 PY
 ''',
     )
+
+
+def _fix_sphinx_tox_pytest_report_sections(eval_script: str) -> tuple[str, bool]:
+    # Some Sphinx eval scripts run pytest through tox without -rA, so a passing
+    # targeted test can produce only "." plus "1 passed". SWE-bench grading
+    # needs per-test PASSED lines; PYTEST_ADDOPTS is already threaded through
+    # Sphinx tox.ini, so this changes report verbosity without changing tests.
+    needle = "tox --current-env"
+    insertion = 'export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:-} -rA"\n'
+    if insertion in eval_script or needle not in eval_script:
+        return eval_script, False
+    return eval_script.replace(needle, insertion + needle, 1), True
 
 
 def _fix_psf_requests_local_httpbin(eval_script: str) -> str:

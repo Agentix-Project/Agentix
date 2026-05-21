@@ -41,3 +41,13 @@ async def test_swe_eval_script_runs_without_agentix_runtime_paths(
     assert "PATH=/usr/bin:/bin" in out
     assert "LD_LIBRARY_PATH=/task/lib" in out
     assert "TRACKING=unset" in out
+
+
+def test_sphinx_tox_eval_emits_pytest_report_sections() -> None:
+    script, fixed = swe._fix_sphinx_tox_pytest_report_sections(
+        "cd /testbed\ntox --current-env -epy39 -v -- tests/test_ext_autodoc_automodule.py\n"
+    )
+
+    assert fixed is True
+    assert 'export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:-} -rA"' in script
+    assert script.index("PYTEST_ADDOPTS") < script.index("tox --current-env")
