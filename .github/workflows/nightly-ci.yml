@@ -1,4 +1,4 @@
-name: nightly swebench verified
+name: nightly-CI
 
 on:
   schedule:
@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: nightly-swebench-verified-${{ github.ref }}
+  group: nightly-ci-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
