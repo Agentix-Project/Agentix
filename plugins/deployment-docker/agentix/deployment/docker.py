@@ -26,8 +26,8 @@ Design:
       docker run [--platform <platform>] -d --name <sid> --network host \\
          -e AGENTIX_BIND_PORT=<port> \\
          --volumes-from <carrier>:ro \\
-         --entrypoint /nix/runtime/bin/agentix-server \\
-         <image>
+         --entrypoint /bin/sh \\
+         <image> -c '<inject runtime env; exec agentix-server>'
 
   `agentix-server` binds to the port from `AGENTIX_BIND_PORT`. We pick
   a free host port, pass it through, and health-check `/health` on it.
@@ -47,7 +47,36 @@ from agentix.deployment.base import Deployment, Sandbox, SandboxConfig, SandboxI
 
 logger = logging.getLogger("agentix.deployment.docker")
 
-_RUNTIME_ENTRYPOINT = "/nix/runtime/bin/agentix-server"
+_RUNTIME_ENTRYPOINT = "/bin/sh"
+_RUNTIME_BOOTSTRAP = r"""
+set -eu
+agentix_prepend_path() {
+  name="$1"
+  added="$2"
+  tracking="AGENTIX_ADDED_${name}"
+  eval "current=\${$name-}"
+  eval "tracked=\${$tracking-}"
+  if [ -n "$current" ]; then
+    export "$name=$added:$current"
+  else
+    export "$name=$added"
+  fi
+  if [ -n "$tracked" ]; then
+    export "$tracking=$tracked:$added"
+  else
+    export "$tracking=$added"
+  fi
+}
+agentix_prepend_path PATH "/nix/runtime/venv/bin:/nix/runtime/bin"
+agentix_prepend_path LD_LIBRARY_PATH "/nix/runtime/lib"
+agentix_prepend_path LIBRARY_PATH "/nix/runtime/lib"
+agentix_prepend_path CPATH "/nix/runtime/include"
+agentix_prepend_path C_INCLUDE_PATH "/nix/runtime/include"
+agentix_prepend_path CPLUS_INCLUDE_PATH "/nix/runtime/include"
+agentix_prepend_path PKG_CONFIG_PATH "/nix/runtime/lib/pkgconfig:/nix/runtime/share/pkgconfig"
+agentix_prepend_path CMAKE_PREFIX_PATH "/nix/runtime"
+exec /nix/runtime/venv/bin/agentix-server
+""".strip()
 
 
 async def _docker(*args: str, check: bool = True) -> tuple[int, bytes, bytes]:
@@ -120,6 +149,7 @@ class DockerDeployment(Deployment):
             "--volumes-from", f"{carrier}:ro",
             "--entrypoint", _RUNTIME_ENTRYPOINT,
             config.image,
+            "-c", _RUNTIME_BOOTSTRAP,
         )
 
         self._ports[sandbox_id] = port

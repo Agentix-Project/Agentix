@@ -27,40 +27,30 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Annotated, Literal
 
 from pydantic import Field
 
-# Env vars stripped before forking a user-space subprocess. The runtime
-# is a Nix-built binary; os.environ is pre-loaded with Nix runtime paths
-# (LD_LIBRARY_PATH pointing at Nix-store libs, NIX_*, PYTHONPATH,
-# FONTCONFIG_*). Leaking those into a host-image subprocess causes glibc
-# ABI mismatches and silent library override bugs.
-_RUNTIME_ONLY_ENV = {
-    "LD_LIBRARY_PATH",
-    "LD_PRELOAD",
-    "PYTHONPATH",
-    "PYTHONHOME",
-    "LOCALE_ARCHIVE",
-    "FONTCONFIG_FILE",
-    "FONTCONFIG_PATH",
-    "SSL_CERT_FILE",
-    "NIX_SSL_CERT_FILE",
-}
+_BUNDLE_BASH = "/nix/runtime/bin/bash"
 
 
 def _clean_env(extra: dict[str, str] | None) -> dict[str, str]:
-    """Build a subprocess env: scrubbed base + caller overrides."""
-    env = {
-        k: v
-        for k, v in os.environ.items()
-        if k not in _RUNTIME_ONLY_ENV and not k.startswith("NIX_")
-    }
+    """Build a subprocess env: inherited runtime env + caller overrides."""
+    env = dict(os.environ)
     if extra:
         env.update(extra)
     return env
+
+
+def _shell_executable(executable: str | None, env: dict[str, str]) -> str:
+    if executable:
+        return shutil.which(executable, path=env.get("PATH")) or executable
+    if os.access(_BUNDLE_BASH, os.X_OK):
+        return _BUNDLE_BASH
+    return shutil.which("bash", path=env.get("PATH")) or "/bin/bash"
 
 
 async def _read_capped(stream: asyncio.StreamReader, limit: int) -> str:
@@ -155,6 +145,7 @@ async def run(
     env: dict[str, str] | None = None,
     timeout: float | None = None,
     max_output: int = 10 * 1024 * 1024,
+    executable: str | None = None,
 ) -> BashResult:
     """Run a shell command in the sandbox and return its captured output."""
     sub_env = _clean_env(env)
@@ -164,6 +155,7 @@ async def run(
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
         env=sub_env,
+        executable=_shell_executable(executable, sub_env),
     )
     assert proc.stdout is not None and proc.stderr is not None
     stdout_task = asyncio.create_task(_read_capped(proc.stdout, max_output))
@@ -193,6 +185,7 @@ async def run_stream(
     cwd: str | None = None,
     env: dict[str, str] | None = None,
     timeout: float | None = None,
+    executable: str | None = None,
 ) -> AsyncIterator[BashEvent]:
     """Run a shell command, yielding events as the subprocess emits them.
 
@@ -206,6 +199,7 @@ async def run_stream(
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
         env=sub_env,
+        executable=_shell_executable(executable, sub_env),
     )
 
     async def _pump(stream, tag, queue):

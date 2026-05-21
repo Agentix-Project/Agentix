@@ -30,7 +30,23 @@ WORKDIR /build
 # nix build (toolchain + runtime), uv venv + uv sync, closure discovery.
 RUN sh ./bundle-build.sh
 
-ENV PATH="/nix/runtime/bin:/nix/runtime/venv/bin:${PATH}" \
+ENV PATH="/nix/runtime/venv/bin:/nix/runtime/bin:${PATH}" \
+    LD_LIBRARY_PATH="/nix/runtime/lib" \
+    LIBRARY_PATH="/nix/runtime/lib" \
+    CPATH="/nix/runtime/include" \
+    C_INCLUDE_PATH="/nix/runtime/include" \
+    CPLUS_INCLUDE_PATH="/nix/runtime/include" \
+    PKG_CONFIG_PATH="/nix/runtime/lib/pkgconfig:/nix/runtime/share/pkgconfig" \
+    CMAKE_PREFIX_PATH="/nix/runtime" \
+    AGENTIX_ADDED_PATH="/nix/runtime/venv/bin:/nix/runtime/bin" \
+    AGENTIX_ADDED_LD_LIBRARY_PATH="/nix/runtime/lib" \
+    AGENTIX_ADDED_LIBRARY_PATH="/nix/runtime/lib" \
+    AGENTIX_ADDED_CPATH="/nix/runtime/include" \
+    AGENTIX_ADDED_C_INCLUDE_PATH="/nix/runtime/include" \
+    AGENTIX_ADDED_CPLUS_INCLUDE_PATH="/nix/runtime/include" \
+    AGENTIX_ADDED_PKG_CONFIG_PATH="/nix/runtime/lib/pkgconfig:/nix/runtime/share/pkgconfig" \
+    AGENTIX_ADDED_CMAKE_PREFIX_PATH="/nix/runtime" \
     AGENTIX_BIND_PORT=8000
 EXPOSE 8000/tcp
+VOLUME ["/nix"]
 ENTRYPOINT ["/nix/runtime/venv/bin/agentix-server"]
