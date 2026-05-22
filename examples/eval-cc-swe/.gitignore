@@ -1,0 +1,6 @@
+.venv/
+uv.lock
+
+runs/
+logs/
+gold.*.json
