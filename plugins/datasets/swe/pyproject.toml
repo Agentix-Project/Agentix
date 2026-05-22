@@ -16,9 +16,9 @@ requires = ["uv_build>=0.7,<0.9"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
-module-name = "agentix.datasets.swe"
+module-name = "agentix.plugins.datasets.swe"
 module-root = ""
 namespace = true
 
 [project.entry-points."agentix.nix"]
-swe = "agentix.datasets.swe"
+swe = "agentix.plugins.datasets.swe"

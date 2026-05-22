@@ -4,14 +4,14 @@ Per instance, two sandboxes back-to-back:
 
     1. Agent sandbox (base = `swebench/sweb.eval.x86_64.<id>:latest`)
          - register `agentix.bridge.anthropic.OpenAIGateway` on the host RuntimeClient
-         - c.remote(agentix.datasets.swe.prepare_env, /testbed, base_commit)
+         - c.remote(agentix.plugins.datasets.swe.prepare_env, /testbed, base_commit)
          - c.remote(agentix.bridge.anthropic.start_service, ...)
          - c.remote(agentix.agents.claude_code.run, ..., anthropic_base_url=svc.url)
          - c.remote(git_patch.get_patch, /testbed)
 
     2. Eval sandbox (fresh container, no LLM gateway)
-         - c.remote(agentix.datasets.swe.prepare_env, /testbed, base_commit)
-         - c.remote(agentix.datasets.swe.score, instance=..., patch=...)
+         - c.remote(agentix.plugins.datasets.swe.prepare_env, /testbed, base_commit)
+         - c.remote(agentix.plugins.datasets.swe.score, instance=..., patch=...)
 
 Host wires an `openai.AsyncOpenAI` client into `AnthropicGateway` so
 the actual provider call (model-eval, OpenRouter, etc.) lives on the
@@ -34,7 +34,7 @@ from pathlib import Path
 
 import agentix.agents.claude_code as cc
 import agentix.bridge.anthropic
-import agentix.datasets.swe as swe
+import agentix.plugins.datasets.swe as swe
 import git_patch
 from agentix.deployment.docker import DockerDeployment
 from datasets import load_dataset

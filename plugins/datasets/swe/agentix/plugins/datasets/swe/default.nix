@@ -1,4 +1,4 @@
-# System binaries and shared libraries the `agentix.datasets.swe`
+# System binaries and shared libraries the `agentix.plugins.datasets.swe`
 # evaluator expects inside SWE-bench task images.
 #
 # The function form `{ pkgs }: drv` is the plugin Nix convention: the

@@ -20,8 +20,9 @@ plugins/agents/claude-code/
     └── default.nix    — Claude Code CLI
 
 plugins/datasets/swe/
-└── agentix/datasets/swe/
-    ├── __init__.py    — sandbox: `swe.prepare_env`, `swe.score`
+└── agentix/plugins/datasets/swe/
+    ├── __init__.py    — public exports
+    ├── swe.py         — sandbox implementation
     └── default.nix    — git/patch/libstdc++ for SWE-bench images
 ```
 
@@ -32,7 +33,7 @@ plugins/datasets/swe/
    ┌────────────────────────────┐         ┌────────────────────────────────────┐
    │ python -m runner           │         │  base: sweb.eval.x86_64.<id>:latest│
    │                            │         │  overlay: eval-cc-swe:<ver>        │
-   │ # client1 / agent sandbox  │  ─────► │    agentix.datasets.swe.prepare_env│
+   │ # client1 / agent sandbox  │  ─────► │    agentix.plugins.datasets.swe.prepare_env│
    │   c.remote(swe.prepare_env)│         │    agentix.agents.claude_code.run  │
    │   c.remote(cc.run,…)       │         │      ↳ claude --print via abridge  │
    │   c.remote(get_patch,…)    │         │    git_patch.get_patch             │
@@ -48,11 +49,9 @@ plugins/datasets/swe/
                                           └────────────────────────────────────┘
 ```
 
-Routing is by `fn.__module__`: `agentix.agents.claude_code.run`,
-`agentix.datasets.swe.prepare_env`, `agentix.datasets.swe.score`, and
-the example-local `git_patch.get_patch` land on workers for those
-modules. The framework auto-registers each module on first dispatch —
-no entry-point declaration needed.
+Use it as `from agentix.plugins.datasets import swe` or
+`from agentix.plugins.datasets.swe import prepare_env, score`; the
+example-local `git_patch.get_patch` stays outside the dataset plugin.
 
 ### Trace flow
 

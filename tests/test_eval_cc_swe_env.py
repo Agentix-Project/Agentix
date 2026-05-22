@@ -9,11 +9,17 @@ ROOT = Path(__file__).resolve().parents[1]
 SWE_PLUGIN = ROOT / "plugins" / "datasets" / "swe"
 sys.path.insert(0, str(SWE_PLUGIN))
 
-import agentix.datasets.swe as swe  # noqa: E402
+import agentix.plugins.datasets.swe as swe  # noqa: E402
+from agentix.plugins.datasets.swe import swe as swe_module  # noqa: E402
+
+
+def test_swe_public_exports() -> None:
+    assert swe.prepare_env is swe_module.prepare_env
+    assert swe.score is swe_module.score
 
 
 def test_new_file_only_test_patch_reset_preserves_setup_commit() -> None:
-    modified, touched = swe._extract_test_patch_paths(
+    modified, touched = swe_module._extract_test_patch_paths(
         "diff --git a/tests/test_new.py b/tests/test_new.py\n"
         "new file mode 100644\n"
         "--- /dev/null\n"
@@ -27,7 +33,7 @@ def test_new_file_only_test_patch_reset_preserves_setup_commit() -> None:
 
 
 def test_modified_test_patch_reset_is_left_to_swebench() -> None:
-    modified, touched = swe._extract_test_patch_paths(
+    modified, touched = swe_module._extract_test_patch_paths(
         "diff --git a/tests/test_existing.py b/tests/test_existing.py\n"
         "--- a/tests/test_existing.py\n"
         "+++ b/tests/test_existing.py\n"
@@ -43,13 +49,15 @@ def test_modified_test_patch_reset_is_left_to_swebench() -> None:
 def test_eval_export_commands_update_subprocess_env() -> None:
     env: dict[str, str] = {}
 
-    assert swe._apply_export_command("export LANG=en_US.UTF-8", env) is True
+    assert swe_module._apply_export_command("export LANG=en_US.UTF-8", env) is True
     assert env == {"LANG": "en_US.UTF-8"}
-    assert swe._apply_export_command("sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && locale-gen", env) is False
+    assert (
+        swe_module._apply_export_command("sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && locale-gen", env) is False
+    )
 
 
 def test_status_names_fallback_to_test_modules() -> None:
-    assert swe._test_directives_from_status(
+    assert swe_module._test_directives_from_status(
         {
             "FAIL_TO_PASS": '["test_a (auth_tests.test_templates.AuthTemplateTests)"]',
             "PASS_TO_PASS": (
@@ -61,7 +69,7 @@ def test_status_names_fallback_to_test_modules() -> None:
 
 
 def test_status_fallback_reports_unmapped_docstring_names() -> None:
-    directives, missing = swe._test_directives_from_status_with_missing(
+    directives, missing = swe_module._test_directives_from_status_with_missing(
         {
             "FAIL_TO_PASS": '["Named URLs should be reversible"]',
             "PASS_TO_PASS": '["test_b (auth_tests.test_templates.AuthTemplateTests)"]',
@@ -97,7 +105,7 @@ def test_eval_plan_uses_testspec_without_swe_repo_specs() -> None:
         ],
     )
 
-    plan = swe._eval_plan_from_test_spec(
+    plan = swe_module._eval_plan_from_test_spec(
         spec,
         {
             "repo": "pallets/flask",
@@ -126,7 +134,7 @@ def test_local_score_uses_testspec_gold_lists() -> None:
         ">>>>> End Test Output\n"
     )
 
-    entry, fixes = swe._score_eval_log(spec=spec, patch="diff", patch_applied=True, combined_log=log)
+    entry, fixes = swe_module._score_eval_log(spec=spec, patch="diff", patch_applied=True, combined_log=log)
 
     assert fixes == []
     assert entry["resolved"] is True
@@ -147,7 +155,7 @@ def test_local_score_treats_missing_required_test_as_failure() -> None:
         ">>>>> End Test Output\n"
     )
 
-    entry, _ = swe._score_eval_log(spec=spec, patch="diff", patch_applied=True, combined_log=log)
+    entry, _ = swe_module._score_eval_log(spec=spec, patch="diff", patch_applied=True, combined_log=log)
 
     assert entry["resolved"] is False
     assert entry["tests_status"]["FAIL_TO_PASS"]["failure"] == ["tests/test_app.py::test_fixed"]
@@ -166,7 +174,7 @@ def test_empty_pytest_param_alias_is_grading_only_normalization() -> None:
     }
     log = "pkg/test_mod.py::test_roundtrip[unit3] PASSED\npkg/test_mod.py::test_roundtrip[x] PASSED\n"
 
-    fixed, fixes = swe._apply_grading_normalizations(entry, log)
+    fixed, fixes = swe_module._apply_grading_normalizations(entry, log)
 
     assert fixes == ["pytest:empty-param-id-alias"]
     assert fixed["resolved"] is True
@@ -187,7 +195,7 @@ def test_empty_pytest_param_alias_requires_unique_passed_alias() -> None:
         "pkg/test_mod.py::test_roundtrip[param1] PASSED\n"
     )
 
-    fixed, fixes = swe._apply_grading_normalizations(entry, log)
+    fixed, fixes = swe_module._apply_grading_normalizations(entry, log)
 
     assert fixes == []
     assert fixed["resolved"] is False
@@ -195,9 +203,9 @@ def test_empty_pytest_param_alias_requires_unique_passed_alias() -> None:
 
 
 def test_compatibility_predicates_are_repo_version_scoped() -> None:
-    assert swe._is_old_astropy({"repo": "astropy/astropy", "version": "3.1"}) is True
-    assert swe._is_old_astropy({"repo": "astropy/astropy", "version": "5.1"}) is False
-    assert swe._is_old_astropy({"repo": "django/django", "version": "3.1"}) is False
+    assert swe_module._is_old_astropy({"repo": "astropy/astropy", "version": "3.1"}) is True
+    assert swe_module._is_old_astropy({"repo": "astropy/astropy", "version": "5.1"}) is False
+    assert swe_module._is_old_astropy({"repo": "django/django", "version": "3.1"}) is False
 
 
 def test_requests_tarpit_patch_is_scoped_to_legacy_address(tmp_path: Path) -> None:
@@ -211,18 +219,18 @@ def test_requests_tarpit_patch_is_scoped_to_legacy_address(tmp_path: Path) -> No
         "    return host, port, err\n"
     )
 
-    assert swe._patch_requests_tarpit_connect_timeout(tmp_path) is True
+    assert swe_module._patch_requests_tarpit_connect_timeout(tmp_path) is True
     text = connection.read_text()
 
     assert 'if host == "10.255.255.1":' in text
     assert "raise socket.timeout" in text
-    assert swe._patch_requests_tarpit_connect_timeout(tmp_path) is False
+    assert swe_module._patch_requests_tarpit_connect_timeout(tmp_path) is False
 
 
 def test_requests_httpbin_retry_shim_is_scoped_to_transient_httpbin_failures(tmp_path: Path) -> None:
     env = {"PYTHONPATH": "/existing"}
 
-    assert swe._install_requests_httpbin_retry_shim(tmp_path, env) is True
+    assert swe_module._install_requests_httpbin_retry_shim(tmp_path, env) is True
 
     shim_dir = tmp_path / "requests-httpbin-retry"
     shim = shim_dir / "sitecustomize.py"
@@ -238,8 +246,8 @@ def test_requests_httpbin_retry_shim_is_scoped_to_transient_httpbin_failures(tmp
 def test_requests_httpbin_retry_shim_does_not_duplicate_pythonpath(tmp_path: Path) -> None:
     env: dict[str, str] = {}
 
-    assert swe._install_requests_httpbin_retry_shim(tmp_path, env) is True
-    assert swe._install_requests_httpbin_retry_shim(tmp_path, env) is True
+    assert swe_module._install_requests_httpbin_retry_shim(tmp_path, env) is True
+    assert swe_module._install_requests_httpbin_retry_shim(tmp_path, env) is True
 
     shim_dir = str(tmp_path / "requests-httpbin-retry")
     assert env["PYTHONPATH"].split(os.pathsep) == [shim_dir]
@@ -337,5 +345,5 @@ def _exec_requests_httpbin_retry_shim(monkeypatch, send):
     monkeypatch.setitem(sys.modules, "requests.adapters", adapters_module)
     monkeypatch.setitem(sys.modules, "requests.exceptions", exceptions_module)
 
-    exec(swe.REQUESTS_HTTPBIN_RETRY_SHIM, {})
+    exec(swe_module.REQUESTS_HTTPBIN_RETRY_SHIM, {})
     return FakeHTTPAdapter

@@ -44,7 +44,7 @@ agentix-server = "agentix.runtime.server:main"
 #   pip install agentix-deployment-daytona  # registers `daytona`
 #   pip install agentix-deployment-e2b      # registers `e2b`
 #   pip install agentix-agent-claude-code   # provides `agentix.agents.claude_code`
-#   pip install agentix-dataset-swe         # provides `agentix.datasets.swe`
+#   pip install agentix-dataset-swe         # provides `agentix.plugins.datasets.swe`
 #   pip install agentix-runtime-basic       # registers `bash`, `files`
 
 [build-system]
@@ -110,7 +110,7 @@ exclude = ["**/__pycache__", "**/.venv", ".venv", "**/build"]
 # `agentix` is a pkgutil namespace package — the core lives here, the
 # plugins contribute siblings: `agentix/bridge/` from `plugins/abridge/`,
 # `agentix/deployment/<backend>.py` from each `plugins/deployments/*`,
-# `agentix/agents/*`, `agentix/datasets/*`, and `agentix/{bash,files}/`
+# `agentix/agents/*`, `agentix/plugins/datasets/*`, and `agentix/{bash,files}/`
 # from `plugins/runtime-basic/`. `extraPaths` lets pyright resolve those
 # statically (it doesn't run `pkgutil.extend_path`).
 extraPaths = [
