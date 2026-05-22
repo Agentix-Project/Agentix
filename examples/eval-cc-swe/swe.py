@@ -70,6 +70,52 @@ XFAIL = "XFAIL"
 
 NON_TEST_EXTS = (".json", ".png", "csv", ".txt", ".md", ".jpg", ".jpeg", ".pkl", ".yml", ".yaml", ".toml")
 
+REQUESTS_HTTPBIN_RETRY_SHIM = r'''
+"""Retry transient httpbin.org failures in legacy Requests SWE-bench tests."""
+
+import time
+try:
+    from urlparse import urlparse
+except ImportError:
+    from urllib.parse import urlparse
+
+try:
+    from requests.adapters import HTTPAdapter
+    from requests.exceptions import ConnectionError, Timeout
+except Exception:
+    HTTPAdapter = None
+    ConnectionError = Timeout = Exception
+
+
+def _agentix_is_httpbin(url):
+    host = urlparse(url).hostname or ""
+    return host == "httpbin.org" or host.endswith(".httpbin.org")
+
+
+if HTTPAdapter is not None and not getattr(HTTPAdapter, "_agentix_httpbin_retry", False):
+    _agentix_orig_send = HTTPAdapter.send
+
+    def _agentix_send_with_httpbin_retry(self, request, **kwargs):
+        attempts = 4 if _agentix_is_httpbin(getattr(request, "url", "")) else 1
+        for attempt in range(attempts):
+            try:
+                response = _agentix_orig_send(self, request, **kwargs)
+            except (ConnectionError, Timeout):
+                if attempt + 1 >= attempts:
+                    raise
+            else:
+                if response.status_code not in (502, 503, 504) or attempt + 1 >= attempts:
+                    return response
+                try:
+                    response.close()
+                except Exception:
+                    pass
+            time.sleep(0.25 * (attempt + 1))
+
+    HTTPAdapter.send = _agentix_send_with_httpbin_retry
+    HTTPAdapter._agentix_httpbin_retry = True
+'''
+
 
 @dataclass
 class CleanResult:
@@ -205,6 +251,7 @@ async def eval(
         spec=spec,
         instance=instance,
         workdir=workdir,
+        workroot=workroot,
         timeout=eval_timeout,
     )
 
@@ -262,6 +309,7 @@ async def _run_swebench_tests(
     spec: Any,
     instance: dict[str, Any],
     workdir: str,
+    workroot: Path,
     timeout: float,
 ) -> tuple[str, list[str]]:
     """Apply SWE-bench's test patch and run targeted tests without generated eval scripts."""
@@ -316,7 +364,7 @@ async def _run_swebench_tests(
         known_fixes.append("astropy:legacy-test-deps")
     if _patch_django_legacy_sqlite_schema_editor(Path(workdir), instance):
         known_fixes.append("django:legacy-sqlite-alter-table")
-    requests_fixes = await _prepare_legacy_requests_network(Path(workdir), instance, env, log_parts)
+    requests_fixes = await _prepare_legacy_requests_network(Path(workdir), workroot, instance, env, log_parts)
     known_fixes.extend(requests_fixes)
 
     install_commands = [] if instance["repo"] == "scikit-learn/scikit-learn" else plan.install_commands
@@ -552,6 +600,7 @@ def _patch_django_legacy_sqlite_schema_editor(workdir: Path, instance: dict[str,
 
 async def _prepare_legacy_requests_network(
     workdir: Path,
+    workroot: Path,
     instance: dict[str, Any],
     env: dict[str, str],
     log_parts: list[str],
@@ -561,11 +610,28 @@ async def _prepare_legacy_requests_network(
 
     fixes = ["requests:https-httpbin"]
     env["HTTPBIN_URL"] = "https://httpbin.org/"
+    if _install_requests_httpbin_retry_shim(workroot, env):
+        fixes.append("requests:httpbin-transient-retry")
 
     needs_tarpit_patch = await _requests_tarpit_needs_connect_timeout_patch(workdir, env, log_parts)
     if needs_tarpit_patch and _patch_requests_tarpit_connect_timeout(workdir):
         fixes.append("requests:docker-tarpit-connect-timeout")
     return fixes
+
+
+def _install_requests_httpbin_retry_shim(workroot: Path, env: dict[str, str]) -> bool:
+    shim_dir = workroot / "requests-httpbin-retry"
+    shim_dir.mkdir(parents=True, exist_ok=True)
+    (shim_dir / "sitecustomize.py").write_text(REQUESTS_HTTPBIN_RETRY_SHIM.lstrip())
+    pythonpath = env.get("PYTHONPATH")
+    shim_path = str(shim_dir)
+    if pythonpath:
+        paths = pythonpath.split(os.pathsep)
+        if shim_path not in paths:
+            env["PYTHONPATH"] = os.pathsep.join([shim_path, *paths])
+    else:
+        env["PYTHONPATH"] = shim_path
+    return True
 
 
 async def _requests_tarpit_needs_connect_timeout_patch(

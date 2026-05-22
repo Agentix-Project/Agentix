@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -216,3 +217,29 @@ def test_requests_tarpit_patch_is_scoped_to_legacy_address(tmp_path: Path) -> No
     assert 'if host == "10.255.255.1":' in text
     assert "raise socket.timeout" in text
     assert swe._patch_requests_tarpit_connect_timeout(tmp_path) is False
+
+
+def test_requests_httpbin_retry_shim_is_scoped_to_transient_httpbin_failures(tmp_path: Path) -> None:
+    env = {"PYTHONPATH": "/existing"}
+
+    assert swe._install_requests_httpbin_retry_shim(tmp_path, env) is True
+
+    shim_dir = tmp_path / "requests-httpbin-retry"
+    shim = shim_dir / "sitecustomize.py"
+    text = shim.read_text()
+
+    assert env["PYTHONPATH"] == os.pathsep.join([str(shim_dir), "/existing"])
+    assert 'host == "httpbin.org" or host.endswith(".httpbin.org")' in text
+    assert "response.status_code not in (502, 503, 504)" in text
+    assert "from requests.adapters import HTTPAdapter" in text
+    assert "HTTPAdapter.send = _agentix_send_with_httpbin_retry" in text
+
+
+def test_requests_httpbin_retry_shim_does_not_duplicate_pythonpath(tmp_path: Path) -> None:
+    env: dict[str, str] = {}
+
+    assert swe._install_requests_httpbin_retry_shim(tmp_path, env) is True
+    assert swe._install_requests_httpbin_retry_shim(tmp_path, env) is True
+
+    shim_dir = str(tmp_path / "requests-httpbin-retry")
+    assert env["PYTHONPATH"].split(os.pathsep) == [shim_dir]
