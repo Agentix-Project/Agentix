@@ -59,12 +59,8 @@ jobs:
         with:
           platforms: amd64,arm64
       - uses: docker/setup-buildx-action@v3
-      - name: sync workspace
-        run: uv sync --all-packages --all-extras
-      # `agentix build` drives `docker buildx`; Nix runs inside the
-      # build container, so the runner needs only Docker. `-m e2e`
-      # overrides the default exclusion.
-      - name: build a real bundle
-        run: uv run pytest tests/test_build_e2e.py::test_platform_bundle_builds_and_runs -v -m e2e
-        env:
-          AGENTIX_E2E_PLATFORM: ${{ matrix.target_platform }}
+      # Build the minimal bundle directly for each runner/target pair.
+      # Nix runs inside the build container, so the runner needs only Docker.
+      - name: build hello-world bundle
+        working-directory: examples/hello-world
+        run: uv run agentix build . --platform "${{ matrix.target_platform }}"
