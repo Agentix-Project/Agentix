@@ -316,6 +316,8 @@ async def _run_swebench_tests(
         known_fixes.append("astropy:legacy-test-deps")
     if _patch_django_legacy_sqlite_schema_editor(Path(workdir), instance):
         known_fixes.append("django:legacy-sqlite-alter-table")
+    requests_fixes = await _prepare_legacy_requests_network(Path(workdir), instance, env, log_parts)
+    known_fixes.extend(requests_fixes)
 
     install_commands = [] if instance["repo"] == "scikit-learn/scikit-learn" else plan.install_commands
     for install_command in install_commands:
@@ -545,6 +547,75 @@ def _patch_django_legacy_sqlite_schema_editor(workdir: Path, instance: dict[str,
     if old not in text:
         return False
     path.write_text(text.replace(old, new))
+    return True
+
+
+async def _prepare_legacy_requests_network(
+    workdir: Path,
+    instance: dict[str, Any],
+    env: dict[str, str],
+    log_parts: list[str],
+) -> list[str]:
+    if instance["repo"] != "psf/requests":
+        return []
+
+    fixes = ["requests:https-httpbin"]
+    env["HTTPBIN_URL"] = "https://httpbin.org/"
+
+    needs_tarpit_patch = await _requests_tarpit_needs_connect_timeout_patch(workdir, env, log_parts)
+    if needs_tarpit_patch and _patch_requests_tarpit_connect_timeout(workdir):
+        fixes.append("requests:docker-tarpit-connect-timeout")
+    return fixes
+
+
+async def _requests_tarpit_needs_connect_timeout_patch(
+    workdir: Path,
+    env: dict[str, str],
+    log_parts: list[str],
+) -> bool:
+    command = """python - <<'PY'
+import socket
+import sys
+
+s = socket.socket()
+s.settimeout(0.2)
+try:
+    s.connect(("10.255.255.1", 80))
+except socket.timeout:
+    sys.exit(0)
+except OSError:
+    sys.exit(1)
+else:
+    sys.exit(1)
+finally:
+    s.close()
+PY"""
+    code, out = await _run_conda_shell(command, workdir=str(workdir), env=env, timeout=5)
+    log_parts.append(f"$ requests tarpit connect-timeout probe\n{out}\n")
+    return code != 0
+
+
+def _patch_requests_tarpit_connect_timeout(workdir: Path) -> bool:
+    path = workdir / "requests/packages/urllib3/util/connection.py"
+    if not path.exists():
+        return False
+    text = path.read_text()
+    if "Agentix Docker Desktop tarpit compatibility" in text:
+        return False
+    old = """    host, port = address
+    err = None
+"""
+    new = """    host, port = address
+    # Agentix Docker Desktop tarpit compatibility: old Requests tests expect
+    # 10.255.255.1 to hang during connect, but some local Docker networks
+    # accept the TCP connection and hang only on read.
+    if host == "10.255.255.1":
+        raise socket.timeout("timed out")
+    err = None
+"""
+    if old not in text:
+        return False
+    path.write_text(text.replace(old, new, 1))
     return True
 
 

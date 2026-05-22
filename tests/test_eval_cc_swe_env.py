@@ -197,3 +197,22 @@ def test_compatibility_predicates_are_repo_version_scoped() -> None:
     assert swe._is_old_astropy({"repo": "astropy/astropy", "version": "3.1"}) is True
     assert swe._is_old_astropy({"repo": "astropy/astropy", "version": "5.1"}) is False
     assert swe._is_old_astropy({"repo": "django/django", "version": "3.1"}) is False
+
+
+def test_requests_tarpit_patch_is_scoped_to_legacy_address(tmp_path: Path) -> None:
+    target = tmp_path / "requests/packages/urllib3/util"
+    target.mkdir(parents=True)
+    connection = target / "connection.py"
+    connection.write_text(
+        "def create_connection(address):\n"
+        "    host, port = address\n"
+        "    err = None\n"
+        "    return host, port, err\n"
+    )
+
+    assert swe._patch_requests_tarpit_connect_timeout(tmp_path) is True
+    text = connection.read_text()
+
+    assert 'if host == "10.255.255.1":' in text
+    assert "raise socket.timeout" in text
+    assert swe._patch_requests_tarpit_connect_timeout(tmp_path) is False
