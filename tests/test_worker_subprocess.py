@@ -49,7 +49,7 @@ async def test_subprocess_worker_bad_callable_fails_fast():
         resp = await asyncio.wait_for(
             mp.call(
                 RemoteRequest(
-                    callable=RemoteCallable("not-valid-base64-pickle"),
+                    callable=RemoteCallable("not-valid-import-path"),
                     arguments=pickle.dumps(((), {})),
                 )
             ),

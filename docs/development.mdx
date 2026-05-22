@@ -41,7 +41,7 @@ The server exposes `/health`; remote calls use `/socket.io/`.
 
 ## Build the Runtime Base Image
 
-Bundle images extend a base runtime image. Build it from the sibling
+Bundles extend a base image. Build it from the sibling
 runtime repo when testing end-to-end locally.
 
 ```bash
@@ -75,7 +75,7 @@ from agentix.deployment.docker import DockerDeployment
 
 async def main() -> None:
     deployment = DockerDeployment()
-    config = SandboxConfig(image="my-rollout:dev")
+    config = SandboxConfig(image="python:3.13-slim", bundle="my-rollout:dev")
 
     async with session(deployment, config) as sandbox:
         async with RuntimeClient(sandbox.runtime_url) as client:

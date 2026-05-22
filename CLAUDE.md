@@ -214,7 +214,7 @@ a generated `request_id`.
 
 ## Bundle Implementation
 
-`agentix build [path]` produces a runtime image from one project root.
+`agentix build [path]` produces a bundle from one project root.
 The build splits along one hard line — **uv owns Python, Nix owns
 system binaries; there is no uv2nix.**
 
@@ -263,7 +263,7 @@ Result image layout (`/nix` is what gets mounted):
 /nix/runtime/{bin,lib,...}   symlinkJoin of every closure
 ```
 
-The two-image runtime: deployments overlay `SandboxConfig.runtime_image`
+The two-image runtime: deployments overlay `SandboxConfig.bundle`
 (the bundle from `agentix build`) onto `SandboxConfig.image` (a
 task-specific base) via Docker 25's `--mount type=image,source=…,
 target=/nix,subpath=nix,readonly`. No rebuild needed when the agent

@@ -92,7 +92,7 @@ def _supports_platform(supported: set[str], platform: str) -> bool:
 
 
 @pytest.fixture(scope="module")
-def bundle_image() -> Iterator[str]:
+def bundle() -> Iterator[str]:
     """Build `examples/hello-bundle` into a bundle image once."""
     build = subprocess.run(
         [sys.executable, "-m", "agentix.cli", "build", str(_EXAMPLE), "--name", _IMAGE],
@@ -106,48 +106,48 @@ def bundle_image() -> Iterator[str]:
     subprocess.run(["docker", "rmi", "-f", _IMAGE, f"{name}:latest"], capture_output=True)
 
 
-def test_image_built(bundle_image: str) -> None:
+def test_image_built(bundle: str) -> None:
     ids = subprocess.run(
-        ["docker", "images", "-q", bundle_image],
+        ["docker", "images", "-q", bundle],
         capture_output=True,
         text=True,
     ).stdout.strip()
-    assert ids, f"{bundle_image} not present in the local daemon"
+    assert ids, f"{bundle} not present in the local daemon"
 
 
-def test_runtime_layout(bundle_image: str) -> None:
-    entries = set(_sh(bundle_image, "ls /nix/runtime").split())
+def test_runtime_layout(bundle: str) -> None:
+    entries = set(_sh(bundle, "ls /nix/runtime").split())
     assert {"venv", "bin"} <= entries, entries
 
 
-def test_venv_python_is_nix_provided(bundle_image: str) -> None:
+def test_venv_python_is_nix_provided(bundle: str) -> None:
     """The venv's interpreter must resolve into `/nix/store` — that is
     what makes the bundle hermetic against the task image's libc."""
-    real = _sh(bundle_image, "readlink -f /nix/runtime/venv/bin/python").strip()
+    real = _sh(bundle, "readlink -f /nix/runtime/venv/bin/python").strip()
     assert real.startswith("/nix/store/"), real
-    version = _sh(bundle_image, "/nix/runtime/venv/bin/python --version").strip()
+    version = _sh(bundle, "/nix/runtime/venv/bin/python --version").strip()
     assert version.startswith("Python 3.11"), version
 
 
-def test_remote_target_importable(bundle_image: str) -> None:
+def test_remote_target_importable(bundle: str) -> None:
     """The project module + the framework + a plugin all import, and
     the remote callable runs — the venv is a real, working closure."""
     out = _sh(
-        bundle_image,
+        bundle,
         "/nix/runtime/venv/bin/python -c "
         "'import hello_bundle, agentix, agentix.bash; print(hello_bundle.run())'",
     )
     assert "hello, world" in out
 
 
-def test_plugin_closure_merged(bundle_image: str) -> None:
+def test_plugin_closure_merged(bundle: str) -> None:
     """`agentix-runtime-basic` ships a bash system closure; it must be
     merged into `/nix/runtime` via the discovered `agentix.nix` file."""
-    assert "ok" in _sh(bundle_image, "test -x /nix/runtime/bin/bash && echo ok")
+    assert "ok" in _sh(bundle, "test -x /nix/runtime/bin/bash && echo ok")
 
 
-def test_entrypoint_wired(bundle_image: str) -> None:
-    assert "agentix-server" in _sh(bundle_image, "/nix/runtime/venv/bin/agentix-server --help")
+def test_entrypoint_wired(bundle: str) -> None:
+    assert "agentix-server" in _sh(bundle, "/nix/runtime/venv/bin/agentix-server --help")
 
 
 @pytest.mark.parametrize(

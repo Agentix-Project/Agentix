@@ -1,14 +1,8 @@
-# System binaries for the eval-cc-swe bundle.
-#
-# `agentix build` runs this derivation in a builder stage and symlinks
-# the resulting `bin/*` into `/nix/runtime/bin/` inside the bundle
-# image. Every worker subprocess inherits `/nix/runtime/bin/` on PATH,
-# so user code can `subprocess.run("claude", ...)` or call `git` by
-# bare name.
-#
-# Only system binaries belong here. The Python package itself is
-# installed into `/nix/runtime/`'s venv by `pip install`, not by Nix.
-{ pkgs ? import <nixpkgs> { config.allowUnfree = true; } }:
+# Claude Code CLI pinned for the `agentix.agents.claude_code` sandbox
+# integration. `agentix build` discovers this file through the
+# `agentix.nix` entry point and places `claude` on `/nix/runtime/bin`.
+
+{ pkgs }:
 
 let
   claude = pkgs.stdenv.mkDerivation (finalAttrs: {
@@ -49,12 +43,8 @@ let
   });
 in
 pkgs.symlinkJoin {
-  name = "eval-cc-swe-deps";
+  name = "agentix-agent-claude-code-sys";
   paths = [
     claude
-    pkgs.git
-    # Binary wheels used by the SWE-bench harness stack (numpy, pandas,
-    # pyarrow, scikit-learn) need libstdc++ at runtime.
-    pkgs.stdenv.cc.cc.lib
   ];
 }

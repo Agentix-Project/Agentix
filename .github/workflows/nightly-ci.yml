@@ -42,7 +42,10 @@ jobs:
           - 18
           - 19
     env:
-      BUNDLE_IMAGE: eval-cc-swe:nightly
+      BUNDLE: eval-cc-swe:nightly
+      DATASET: parquet
+      DATASET_FILE: https://raw.githubusercontent.com/SWE-bench/SWE-bench/50b9f47a7cacd7084ae900b27840a3c7b1c8ca24/data/SWE-bench_Verified/test.parquet
+      DATASET_SPLIT: train
       NUM_SHARDS: 20
     steps:
       - uses: actions/checkout@v4
@@ -64,16 +67,21 @@ jobs:
 
       - name: build eval bundle
         working-directory: examples/eval-cc-swe
-        run: uv run agentix build . --name "$BUNDLE_IMAGE" --platform linux/amd64
+        run: uv run agentix build . --name "$BUNDLE" --platform linux/amd64
 
       - name: evaluate ground-truth patches
         working-directory: examples/eval-cc-swe
         env:
           SHARD_INDEX: ${{ matrix.shard_index }}
         run: |
-          uv run python -m ci_runner \
-            --bundle-image "$BUNDLE_IMAGE" \
+          uv run python -m runner \
+            --ground-truth \
+            --fail-on-unresolved \
+            --bundle "$BUNDLE" \
             --docker-platform linux/amd64 \
+            --dataset "$DATASET" \
+            --dataset-file "$DATASET_FILE" \
+            --split "$DATASET_SPLIT" \
             --num-shards "$NUM_SHARDS" \
             --shard-index "$SHARD_INDEX" \
             --out "runs/ground-truth-shard-${SHARD_INDEX}"

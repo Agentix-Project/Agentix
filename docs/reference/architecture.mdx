@@ -128,7 +128,7 @@ Deployments are host-side plugins that start bundle images. They return a
 where the sandbox is running.
 
 ```text
-Deployment.create(SandboxConfig(image="my-rollout:0.1.0"))
+Deployment.create(SandboxConfig(image="python:3.13-slim", bundle="my-rollout:0.1.0"))
         |
         v
 Sandbox(runtime_url="http://...")

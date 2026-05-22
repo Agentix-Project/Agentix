@@ -1,4 +1,4 @@
-"""`agentix build` — package a Python project into a runtime image.
+"""`agentix build` — package a Python project into a bundle image.
 
 Usage:
 

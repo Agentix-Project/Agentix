@@ -21,7 +21,7 @@ def test_carrier_name_includes_platform() -> None:
 async def test_create_passes_platform_to_carrier_and_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, ...]] = []
 
-    async def fake_docker(*args: str, check: bool = True) -> tuple[int, bytes, bytes]:
+    async def fake_docker(*args: str, check: bool = True, retries: int = 0) -> tuple[int, bytes, bytes]:
         calls.append(args)
         if args[0] == "inspect":
             return 1, b"", b""
@@ -38,7 +38,7 @@ async def test_create_passes_platform_to_carrier_and_sandbox(monkeypatch: pytest
     await deployment.create(
         SandboxConfig(
             image="python:3.13-slim",
-            runtime_image="bundle:pytest",
+            bundle="bundle:pytest",
             platform="linux/amd64",
         )
     )
@@ -58,3 +58,28 @@ async def test_create_passes_platform_to_carrier_and_sandbox(monkeypatch: pytest
     assert run_call[run_call.index("--entrypoint") + 1] == "/bin/sh"
     assert "LD_LIBRARY_PATH" in docker_mod._RUNTIME_BOOTSTRAP
     assert 'tracking="AGENTIX_ADDED_${name}"' in docker_mod._RUNTIME_BOOTSTRAP
+
+
+@pytest.mark.asyncio
+async def test_carrier_recreated_when_runtime_tag_moves(monkeypatch: pytest.MonkeyPatch) -> None:
+    carrier = docker_mod._carrier_name("bundle:pytest", "linux/amd64")
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_docker(*args: str, check: bool = True, retries: int = 0) -> tuple[int, bytes, bytes]:
+        calls.append(args)
+        if args == ("inspect", carrier):
+            return 0, b"", b""
+        if args == ("inspect", "-f", "{{.Image}}", carrier):
+            return 0, b"sha256:old\n", b""
+        if args == ("image", "inspect", "-f", "{{.Id}}", "bundle:pytest"):
+            return 0, b"sha256:new\n", b""
+        return 0, b"", b""
+
+    monkeypatch.setattr(docker_mod, "_docker", fake_docker)
+
+    deployment = DockerDeployment()
+    assert await deployment._ensure_carrier("bundle:pytest", "linux/amd64") == carrier
+
+    rm_call = calls.index(("rm", "-f", carrier))
+    create_call = calls.index(("create", "--platform", "linux/amd64", "--name", carrier, "bundle:pytest"))
+    assert rm_call < create_call

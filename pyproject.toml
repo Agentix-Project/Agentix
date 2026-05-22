@@ -37,11 +37,14 @@ agentix = "agentix.cli:main"
 # Runtime server entrypoint — the bundle image's Docker ENTRYPOINT.
 agentix-server = "agentix.runtime.server:main"
 
-# Deployment backends and runtime integrations ship in their own wheels.
-# Runtime integrations are normal Python dependencies installed into the bundle.
+# Deployment backends, agents, datasets, and runtime integrations ship
+# in their own wheels. Runtime integrations are normal Python dependencies
+# installed into the bundle.
 #   pip install agentix-deployment-docker   # registers `local`
 #   pip install agentix-deployment-daytona  # registers `daytona`
 #   pip install agentix-deployment-e2b      # registers `e2b`
+#   pip install agentix-agent-claude-code   # provides `agentix.agents.claude_code`
+#   pip install agentix-dataset-swe         # provides `agentix.plugins.datasets.swe`
 #   pip install agentix-runtime-basic       # registers `bash`, `files`
 
 [build-system]
@@ -54,21 +57,25 @@ packages = ["agentix"]
 # hatchling includes non-.py files in packages automatically.
 
 # ── monorepo workspace ────────────────────────────────────────────
-# The core (`agentixx`, this file) plus the plugins under `plugins/*`
+# The core (`agentixx`, this file) plus the plugins under `plugins/`
 # form one uv workspace. `uv sync` installs every member editable into
 # one venv — edit any file and it's live, no commit/push/publish.
 #
-# Dependency separation is preserved: each member keeps its own
-# `pyproject.toml` + dependency list. The core never pulls a plugin's
-# deps (e.g. `openai` stays in `agentix-bridge`).
+# Dependency ownership is still explicit: each member keeps its own
+# `pyproject.toml` + dependency list, so plugin deps stay attached to
+# the plugin that needs them.
 #
-# `examples/*` are deliberately NOT members — a cookbook example like
-# `eval-cc-swe` drags in heavy deps (swebench, datasets, pandas) that
-# don't belong in a core-dev venv. Each example is a standalone
+# `examples/*` are deliberately NOT members. Each example is a standalone
 # project that path-depends on the workspace (editable), so it still
 # sees core edits live without a release step.
 [tool.uv.workspace]
-members = ["plugins/*"]
+members = [
+    "plugins/abridge",
+    "plugins/runtime-basic",
+    "plugins/agents/*",
+    "plugins/datasets/*",
+    "plugins/deployments/*",
+]
 # `examples/*` are standalone projects, not members — each has its own
 # lock and path-depends on the workspace. Excluding them lets `uv lock`
 # run inside an example without uv claiming it as a stray member.
@@ -92,23 +99,27 @@ select = ["E", "F", "I", "W", "UP"]
 include = [
     "agentix",
     "plugins/abridge/agentix",
-    "plugins/deployment-docker/agentix",
-    "plugins/deployment-daytona/agentix",
-    "plugins/deployment-e2b/agentix",
+    "plugins/agents/claude-code/src",
+    "plugins/datasets/swebench/src",
+    "plugins/deployments/docker/agentix",
+    "plugins/deployments/daytona/agentix",
+    "plugins/deployments/e2b/agentix",
     "plugins/runtime-basic/agentix",
 ]
 exclude = ["**/__pycache__", "**/.venv", ".venv", "**/build"]
 # `agentix` is a pkgutil namespace package — the core lives here, the
 # plugins contribute siblings: `agentix/bridge/` from `plugins/abridge/`,
-# `agentix/deployment/<backend>.py` from each `plugins/deployment-*`, and
-# `agentix/{bash,files}/` from `plugins/runtime-basic/`. `extraPaths`
-# lets pyright resolve those statically (it doesn't run
-# `pkgutil.extend_path`).
+# `agentix/deployment/<backend>.py` from each `plugins/deployments/*`,
+# `agentix/agents/*`, `agentix/plugins/datasets/*`, and `agentix/{bash,files}/`
+# from `plugins/runtime-basic/`. `extraPaths` lets pyright resolve those
+# statically (it doesn't run `pkgutil.extend_path`).
 extraPaths = [
     "plugins/abridge",
-    "plugins/deployment-docker",
-    "plugins/deployment-daytona",
-    "plugins/deployment-e2b",
+    "plugins/agents/claude-code/src",
+    "plugins/datasets/swebench/src",
+    "plugins/deployments/docker",
+    "plugins/deployments/daytona",
+    "plugins/deployments/e2b",
     "plugins/runtime-basic",
 ]
 typeCheckingMode = "basic"

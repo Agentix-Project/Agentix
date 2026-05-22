@@ -46,13 +46,13 @@ SandboxId = NewType("SandboxId", str)
 class SandboxConfig(BaseModel):
     """Configuration a deployment uses to provision a sandbox.
 
-    Two images, one container. `runtime_image` is the generic Agentix
+    Two images, one container. `bundle` is the generic Agentix
     bundle produced by `agentix build` — it carries the runtime server,
     user callables, and their Python deps under `/nix/runtime/`.
     `image` is the task-specific base (e.g. a SWE-bench task image, a
     customer environment image) the workload actually runs against.
 
-    The deployment overlays `runtime_image:/nix` onto `image` at start
+    The deployment overlays `bundle:/nix` onto `image` at start
     time (no rebuild, no copy), then runs `/nix/runtime/bin/agentix-server`
     as the entrypoint inside `image`'s filesystem.
     """
@@ -61,7 +61,7 @@ class SandboxConfig(BaseModel):
         description="Task base image — the environment the workload runs in "
         "(e.g. `swebench/task-django__django-12345:latest`).",
     )
-    runtime_image: str = Field(
+    bundle: str = Field(
         description="Agentix runtime bundle image ref produced by "
         "`agentix build`, e.g. `my-agent:0.1.0`. Mounted at "
         "`/nix` in the sandbox via `--mount type=image`.",
@@ -69,7 +69,7 @@ class SandboxConfig(BaseModel):
     platform: str | None = Field(
         default=None,
         description="Optional Docker/OCI platform for both the task image "
-        "and runtime image, e.g. `linux/amd64` or `linux/arm64`.",
+        "and bundle image, e.g. `linux/amd64` or `linux/arm64`.",
     )
     env: dict[str, str] | None = Field(
         default=None,

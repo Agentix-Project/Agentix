@@ -19,7 +19,7 @@ from agentix import RuntimeClient, SandboxConfig
 from agentix.deployment.docker import DockerDeployment
 
 async with DockerDeployment().lifecycle(
-    SandboxConfig(image="my-agent:0.1.0")
+    SandboxConfig(image="python:3.13-slim", bundle="my-agent:0.1.0")
 ) as sandbox:
     async with RuntimeClient(sandbox.runtime_url) as c:
         ...

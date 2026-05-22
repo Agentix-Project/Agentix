@@ -16,8 +16,8 @@ Env-var contract for the claude subprocess:
   `anthropic_model` so the CLI doesn't try to switch to an alias the
   upstream provider doesn't know about.
 
-Requires `claude` and `git` on PATH inside the sandbox — provided by
-`default.nix` at the project root.
+Requires `claude` on PATH inside the sandbox — provided by this
+plugin's `default.nix`.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
-logger = logging.getLogger("eval_cc_swe.cc")
+logger = logging.getLogger("agentix.agents.claude_code")
 
 
 @dataclass

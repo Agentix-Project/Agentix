@@ -7,9 +7,9 @@ This quickstart walks the shortest end-to-end Agentix flow:
 
 1. Declare deps in a normal Python project.
 2. `agentix build` packages the project + every transitive dep into a
-   self-contained runtime image — no `FROM`, no `pip install` at run
+   self-contained bundle — no `FROM`, no `pip install` at run
    time, just a Nix closure under `/nix/store/...`.
-3. Deploy a sandbox: the runtime image is overlaid onto a task base
+3. Deploy a sandbox: the bundle is overlaid onto a task base
    image with `--volumes-from`. Different task images, same runtime.
 4. Call a remote function with `RuntimeClient.remote(fn, …)`.
 
@@ -27,7 +27,7 @@ This quickstart walks the shortest end-to-end Agentix flow:
 
 The two-image model is the heart of Agentix:
 
-- **`runtime_image`** — the bundle from `agentix build`. Generic and
+- **`bundle`** — the bundle from `agentix build`. Generic and
   reusable. Holds Python, agentixx, every plugin, your code, all
   transitive deps under `/nix/store/...` with libc vendored.
 - **`image`** — the task-specific base the workload runs in (a
@@ -134,8 +134,8 @@ async def main() -> None:
     config = SandboxConfig(
         # Task base image — workload environment.
         image="python:3.13-slim",
-        # Runtime overlay from `agentix build`.
-        runtime_image="hello-agentix:0.1.0",
+        # Bundle overlay from `agentix build`.
+        bundle="hello-agentix:0.1.0",
     )
     async with session(deployment, config) as sandbox:
         print(f"sandbox up at {sandbox.runtime_url}")
@@ -163,7 +163,7 @@ exit=0 stdout='hello from Linux <kernel> ... GNU/Linux\n'
 Under the hood, `DockerDeployment.create` does:
 
 ```bash
-# Once per distinct runtime_image — stopped container holds its /nix.
+# Once per distinct bundle — stopped container holds its /nix.
 docker create --name agentix-runtime-<hash> hello-agentix:0.1.0
 
 # Per sandbox — task image plus the runtime's /nix as a shared volume.

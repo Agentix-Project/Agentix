@@ -1,0 +1,26 @@
+[project]
+name = "agentix-dataset-swe"
+version = "0.1.0"
+description = "SWE-bench dataset and ground-truth evaluation helpers for Agentix"
+requires-python = ">=3.11"
+dependencies = [
+    "agentixx",
+    "swebench>=4.0",
+]
+
+[tool.uv.sources]
+agentixx = { workspace = true }
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "agentix.plugins.datasets.swe" = "src" }
+packages = ["agentix.plugins.datasets.swe"]
+
+[tool.agentix]
+nix = "default.nix"
+
+[project.entry-points."agentix.nix"]
+swe = "agentix.plugins.datasets.swe"

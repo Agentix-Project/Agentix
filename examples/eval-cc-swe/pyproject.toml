@@ -15,9 +15,10 @@ dependencies = [
     "agentixx",
     "agentix-runtime-basic>=0.1.0",      # bash inside the sandbox
     "agentix-deployment-docker>=0.1.0",  # local-docker backend
+    "agentix-agent-claude-code>=0.1.0",  # sandbox-side Claude Code runner
+    "agentix-dataset-swe>=0.1.0",        # sandbox-side SWE-bench evaluator
     "agentix-bridge",                    # Anthropic↔OpenAI proxy across the sandbox boundary
     "openai>=1.40",                      # host-side: real provider call
-    "swebench>=4.0",                     # upstream harness (used inside the sandbox)
     "datasets>=2",                       # host-side: load the Verified split
 ]
 
@@ -27,11 +28,10 @@ dependencies = [
 [tool.uv.sources]
 agentixx = { path = "../..", editable = true }
 agentix-bridge = { path = "../../plugins/abridge", editable = true }
-agentix-deployment-docker = { path = "../../plugins/deployment-docker", editable = true }
+agentix-deployment-docker = { path = "../../plugins/deployments/docker", editable = true }
+agentix-agent-claude-code = { path = "../../plugins/agents/claude-code", editable = true }
+agentix-dataset-swe = { path = "../../plugins/datasets/swebench", editable = true }
 agentix-runtime-basic = { path = "../../plugins/runtime-basic", editable = true }
 
-[tool.agentix]
-nix = "default.nix"
-
 [tool.hatch.build.targets.wheel]
-only-include = ["cc.py", "swe.py", "runner.py", "ci_runner.py"]
+only-include = ["runner.py"]

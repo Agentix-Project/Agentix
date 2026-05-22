@@ -1,6 +1,6 @@
 """Shared fixtures for agentix tests.
 
-Production remote calls execute pickle-serialized callables inside a
+Production remote calls execute import-path callables inside a
 worker process. Protocol tests can switch the runtime to an in-process
 worker so they exercise HTTP/Socket.IO without subprocess stdio.
 """

@@ -29,7 +29,7 @@ from agentix.deployment.docker import DockerDeployment
 deployment = DockerDeployment()
 config = SandboxConfig(
     image="python:3.13-slim",
-    runtime_image="my-rollout:0.1.0",
+    bundle="my-rollout:0.1.0",
 )
 
 async with session(deployment, config) as sandbox:
@@ -45,7 +45,7 @@ Docker/OCI platform so the task image and runtime overlay match:
 ```python
 config = SandboxConfig(
     image="python:3.13-slim",
-    runtime_image="my-rollout:0.1.0",
+    bundle="my-rollout:0.1.0",
     platform="linux/amd64",
 )
 ```

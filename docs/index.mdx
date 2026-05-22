@@ -8,7 +8,7 @@ Ship agents like software. Run them like experiments.
 Agentix turns any importable Python function into a sandboxed rollout
 primitive. Your trainer, evaluator, or orchestration script passes a
 function object. `agentix build` packages that code and its
-dependencies into a runtime image; Agentix then overlays that runtime
+dependencies into a bundle image; Agentix then overlays that bundle
 onto a task image and gives the typed result back.
 
 ```bash
@@ -25,7 +25,7 @@ from agentix.deployment.docker import DockerDeployment
 
 config = SandboxConfig(
     image="python:3.13-slim",
-    runtime_image="hello-agentix:0.1.0",
+    bundle="hello-agentix:0.1.0",
 )
 async with session(DockerDeployment(), config) as sandbox:
     async with RuntimeClient(sandbox.runtime_url) as client:
@@ -40,8 +40,8 @@ Agentix keeps the execution layer deliberately small:
 
 - **Remote calls** run an installed function inside a sandbox worker.
   `client.remote(fn, ...)` derives the target from `fn.__module__` and
-  `fn.__name__`, validates inputs from the signature, and decodes the
-  annotated return type.
+  `fn.__qualname__`, ships args/kwargs as one pickle blob, and imports
+  the function inside the worker.
 - **Bundles** package one Python project and its declared dependencies
   into a deploy-ready image. Agents, tools, benchmark scorers, and user
   code are just packages in the same runtime venv.
@@ -51,7 +51,7 @@ Agentix keeps the execution layer deliberately small:
     Call sandbox code with ordinary Python functions instead of bespoke RPC clients.
   </Card>
   <Card title="Bundles" icon="box" href="/concepts/bundles">
-    Build a reproducible runtime image from `pyproject.toml` dependencies.
+    Build a reproducible bundle from `pyproject.toml` dependencies.
   </Card>
   <Card title="Deployments" icon="server" href="/deployment">
     Run the same bundle through local Docker or a deployment backend plugin.
@@ -82,7 +82,7 @@ Trainer / evaluator / script
   calls RuntimeClient.remote(fn, *args, **kwargs)
         |
         v
-Sandbox runtime image
+Sandbox bundle
   imports the same module
   runs the function in a worker process
   returns the result
@@ -150,7 +150,7 @@ installed modules with functions the worker can import.
     Learn the target string, call shapes, and typing model.
   </Card>
   <Card title="Bundles" icon="box" href="/concepts/bundles">
-    See how dependency declarations become runtime images.
+    See how dependency declarations become bundles.
   </Card>
   <Card title="Architecture" icon="sitemap" href="/reference/architecture">
     Follow the request from client to server to worker and back.

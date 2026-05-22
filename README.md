@@ -5,7 +5,7 @@
 **Sandboxed rollouts you call like typed Python.**
 
 Turn agents, tools, and scorers into Python callables. Package their
-dependencies into runtime images. Call them from evaluators, trainers,
+dependencies into bundle images. Call them from evaluators, trainers,
 and orchestration code without writing a new runner for every pairing.
 
 [![GitHub Stars](https://img.shields.io/github/stars/Agentiix/Agentix)](https://github.com/Agentiix/Agentix)
@@ -24,7 +24,7 @@ Agentix has two primitives:
   callable inside a sandbox worker. The callable is serialized with
   stdlib pickle, Python's native callable reference mechanism.
 - **Bundles**: `agentix build [path]` packages a Python project and its
-  declared dependencies into a deploy-ready runtime image.
+  declared dependencies into a deploy-ready bundle image.
 
 ```python
 from agentix import RuntimeClient, SandboxConfig, session
@@ -33,7 +33,7 @@ from agentix.deployment.docker import DockerDeployment
 
 config = SandboxConfig(
     image="python:3.13-slim",
-    runtime_image="hello-agentix:0.1.0",
+    bundle="hello-agentix:0.1.0",
 )
 async with session(DockerDeployment(), config) as sandbox:
     async with RuntimeClient(sandbox.runtime_url) as client:
@@ -109,7 +109,7 @@ async def main() -> None:
     deployment = DockerDeployment()
     config = SandboxConfig(
         image="python:3.13-slim",
-        runtime_image="hello-agentix:0.1.0",
+        bundle="hello-agentix:0.1.0",
     )
     async with session(deployment, config) as sandbox:
         print(f"sandbox up at {sandbox.runtime_url}")
@@ -129,7 +129,7 @@ project layout, lockfile, and runtime-image details.
 ```text
 Host process
   RuntimeClient.remote(fn, *args, **kwargs)
-    builds RemoteCallable from pickle.dumps(fn)
+    builds RemoteCallable from fn's import path
     pickles (args, kwargs) as one blob
         |
         v  Socket.IO "unary"
@@ -138,7 +138,7 @@ Sandbox
         |  msgpack frame
         v
   worker subprocess
-    RemoteCallable.resolve() -> fn
+    RemoteCallable.resolve() imports fn
     pickle.loads(arguments) -> args, kwargs
     calls fn(*args, **kwargs)
     pickles the result back

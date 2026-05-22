@@ -2,7 +2,7 @@
 
 Design:
 
-  Two images, one container. `config.runtime_image` is the generic
+  Two images, one container. `config.bundle` is the generic
   Agentix bundle from `agentix build` (carries `/nix/runtime/bin/` and
   the full Python closure under `/nix/store/...`). `config.image` is
   the task-specific base the workload runs against. The runtime is
@@ -10,11 +10,11 @@ Design:
   entrypoint and its store paths resolve regardless of the task
   image's distribution.
 
-  Overlay mechanism: a per-runtime-image stopped "carrier" container
+  Overlay mechanism: a per-bundle stopped "carrier" container
   declares the runtime's `/nix` as a VOLUME (set in the image's config
   by `agentix build`); sandbox containers re-use it with
   `--volumes-from <carrier>:ro`. One stopped carrier per distinct
-  runtime_image — they cost only metadata.
+  bundle — they cost only metadata.
 
   (`--mount type=image,subpath=nix` would let us skip the carrier
   entirely with one docker invocation, but `subpath` isn't yet
@@ -22,7 +22,7 @@ Design:
   release. Switch when available.)
 
   Sandbox create:
-      docker create [--platform <platform>] --name <carrier> <runtime_image>
+      docker create [--platform <platform>] --name <carrier> <bundle>
       docker run [--platform <platform>] -d --name <sid> \\
          -p 127.0.0.1:<port>:<port> \\
          -e AGENTIX_BIND_PORT=<port> \\
@@ -81,23 +81,52 @@ exec /nix/runtime/venv/bin/agentix-server
 """.strip()
 
 
-async def _docker(*args: str, check: bool = True) -> tuple[int, bytes, bytes]:
-    proc = await asyncio.create_subprocess_exec(
-        "docker",
-        *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+async def _docker(*args: str, check: bool = True, retries: int = 0) -> tuple[int, bytes, bytes]:
+    attempt = 0
+    delay = 2.0
+    while True:
+        proc = await asyncio.create_subprocess_exec(
+            "docker",
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        rc = proc.returncode or 0
+        if not check or rc == 0:
+            return rc, stdout, stderr
+        if attempt >= retries or not _is_transient_docker_error(stderr):
+            raise RuntimeError(f"docker {args[0]} failed: {stderr.decode(errors='replace')}")
+        attempt += 1
+        logger.warning(
+            "docker %s failed with transient error; retrying in %.1fs (%d/%d)",
+            args[0],
+            delay,
+            attempt,
+            retries,
+        )
+        await asyncio.sleep(delay)
+        delay *= 2
+
+
+def _is_transient_docker_error(stderr: bytes) -> bool:
+    text = stderr.decode(errors="replace").lower()
+    return any(
+        needle in text
+        for needle in (
+            "failed to fetch oauth token",
+            "unexpected status from post request",
+            "tls handshake timeout",
+            "connection reset by peer",
+            "i/o timeout",
+            "temporarily unavailable",
+        )
     )
-    stdout, stderr = await proc.communicate()
-    rc = proc.returncode or 0
-    if check and rc != 0:
-        raise RuntimeError(f"docker {args[0]} failed: {stderr.decode(errors='replace')}")
-    return rc, stdout, stderr
 
 
-def _carrier_name(runtime_image: str, platform: str | None = None) -> str:
+def _carrier_name(bundle: str, platform: str | None = None) -> str:
     """Stable name for the stopped container that holds a runtime's /nix volume."""
-    key = f"{runtime_image}@{platform}" if platform else runtime_image
+    key = f"{bundle}@{platform}" if platform else bundle
     slug = hashlib.sha1(key.encode()).hexdigest()[:12]
     return f"agentix-runtime-{slug}"
 
@@ -117,18 +146,23 @@ class DockerDeployment(Deployment):
             s.bind(("127.0.0.1", 0))
             return s.getsockname()[1]
 
-    async def _ensure_carrier(self, runtime_image: str, platform: str | None) -> str:
-        """Create (if missing) a stopped container exposing runtime_image's /nix.
+    async def _ensure_carrier(self, bundle: str, platform: str | None) -> str:
+        """Create (if missing) a stopped container exposing bundle's /nix.
 
         Stopped containers cost only metadata; one per distinct
-        runtime_image/platform is enough regardless of how many sandboxes share it.
+        bundle/platform is enough regardless of how many sandboxes share it.
         """
-        carrier = _carrier_name(runtime_image, platform)
+        carrier = _carrier_name(bundle, platform)
         rc, _, _ = await _docker("inspect", carrier, check=False)
         if rc == 0:
-            return carrier
+            current_image = await _image_id(bundle)
+            carrier_image = await _container_image_id(carrier)
+            if current_image and carrier_image and current_image != carrier_image:
+                await _docker("rm", "-f", carrier, check=False)
+            else:
+                return carrier
         platform_args = ["--platform", platform] if platform else []
-        await _docker("create", *platform_args, "--name", carrier, runtime_image)
+        await _docker("create", *platform_args, "--name", carrier, bundle)
         return carrier
 
     async def create(self, config: SandboxConfig) -> Sandbox:
@@ -140,7 +174,7 @@ class DockerDeployment(Deployment):
             for k, v in config.env.items():
                 env_args.extend(["-e", f"{k}={v}"])
 
-        carrier = await self._ensure_carrier(config.runtime_image, config.platform)
+        carrier = await self._ensure_carrier(config.bundle, config.platform)
         platform_args = ["--platform", config.platform] if config.platform else []
         await _docker(
             "run",
@@ -158,6 +192,7 @@ class DockerDeployment(Deployment):
             config.image,
             "-c",
             _RUNTIME_BOOTSTRAP,
+            retries=3,
         )
 
         self._ports[sandbox_id] = port
@@ -205,3 +240,17 @@ class DockerDeployment(Deployment):
         await _docker("rm", "-f", sandbox_id, check=False)
         self._ports.pop(sandbox_id, None)
         logger.info("Deleted sandbox %s", sandbox_id)
+
+
+async def _image_id(image: str) -> str | None:
+    rc, stdout, _ = await _docker("image", "inspect", "-f", "{{.Id}}", image, check=False)
+    if rc != 0:
+        return None
+    return stdout.decode().strip() or None
+
+
+async def _container_image_id(container: str) -> str | None:
+    rc, stdout, _ = await _docker("inspect", "-f", "{{.Image}}", container, check=False)
+    if rc != 0:
+        return None
+    return stdout.decode().strip() or None
