@@ -190,32 +190,29 @@ async def _score_patch(
                 eval_timeout=eval_timeout,
             )
 
-    (out_dir / f"{iid}.apply.log").write_text(ev.apply_log)
-    (out_dir / f"{iid}.test.log").write_text(ev.test_log)
-
     summary = {
         "instance_id": iid,
         "mode": mode,
-        "resolved": ev.resolved,
-        "patch_applied": ev.patch_applied,
-        "apply_cmd": ev.apply_cmd,
-        "known_fixes": ev.known_fixes,
-        "fail_to_pass": ev.fail_to_pass,
-        "pass_to_pass": ev.pass_to_pass,
+        "resolved": _score_field(ev, "resolved", False),
+        "patch_applied": _score_field(ev, "patch_applied", False),
+        "test_status": _score_field(ev, "test_status", {}),
         "duration_s": round(time.time() - started, 1),
     }
     (out_dir / f"{iid}.json").write_text(json.dumps(summary, indent=2))
 
-    verdict = "PASS" if ev.resolved else "FAIL"
-    ftp_ok = len(ev.fail_to_pass.get("success", []))
-    ftp_n = ftp_ok + len(ev.fail_to_pass.get("failure", []))
+    verdict = "PASS" if summary["resolved"] else "FAIL"
     print(
-        f"[{iid}] {verdict}  patch_applied={ev.patch_applied}  "
-        f"resolved={ftp_ok}/{ftp_n}  "
-        f"regressions={len(ev.pass_to_pass.get('failure', []))}  "
+        f"[{iid}] {verdict}  patch_applied={summary['patch_applied']}  "
+        f"tests={len(summary['test_status'])}  "
         f"({summary['duration_s']}s)"
     )
     return summary
+
+
+def _score_field(result, key: str, default):
+    if isinstance(result, dict):
+        return result.get(key, default)
+    return getattr(result, key, default)
 
 
 async def solve_one(

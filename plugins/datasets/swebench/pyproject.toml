@@ -19,8 +19,8 @@ build-backend = "setuptools.build_meta"
 package-dir = { "agentix.plugins.datasets.swe" = "src" }
 packages = ["agentix.plugins.datasets.swe"]
 
-[tool.setuptools.package-data]
-"agentix.plugins.datasets.swe" = ["default.nix"]
+[tool.agentix]
+nix = "default.nix"
 
 [project.entry-points."agentix.nix"]
 swe = "agentix.plugins.datasets.swe"
