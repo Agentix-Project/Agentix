@@ -24,5 +24,6 @@ agentix-deployment-docker = { path = "../../plugins/deployments/docker", editabl
 [tool.agentix]
 nix = "default.nix"
 
+# Keep root-level main.py importable in the built bundle.
 [tool.hatch.build.targets.wheel]
 only-include = ["main.py"]
