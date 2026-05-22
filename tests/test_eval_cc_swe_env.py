@@ -47,6 +47,23 @@ def test_test_patch_paths_include_modified_preimage() -> None:
     assert touched == ["tests/test_existing.py"]
 
 
+def test_test_patch_paths_include_renamed_target_for_cleanup() -> None:
+    modified, touched = swe_score._test_patch_paths(
+        "diff --git a/tests/old.py b/tests/new.py\n"
+        "similarity index 90%\n"
+        "rename from tests/old.py\n"
+        "rename to tests/new.py\n"
+        "--- a/tests/old.py\n"
+        "+++ b/tests/new.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+
+    assert modified == ["tests/old.py"]
+    assert touched == ["tests/old.py", "tests/new.py"]
+
+
 def test_eval_export_commands_update_subprocess_env() -> None:
     env: dict[str, str] = {}
 

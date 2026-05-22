@@ -40,8 +40,8 @@ Agentix keeps the execution layer deliberately small:
 
 - **Remote calls** run an installed function inside a sandbox worker.
   `client.remote(fn, ...)` derives the target from `fn.__module__` and
-  `fn.__name__`, validates inputs from the signature, and decodes the
-  annotated return type.
+  `fn.__qualname__`, ships args/kwargs as one pickle blob, and imports
+  the function inside the worker.
 - **Bundles** package one Python project and its declared dependencies
   into a deploy-ready image. Agents, tools, benchmark scorers, and user
   code are just packages in the same runtime venv.

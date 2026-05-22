@@ -4,11 +4,9 @@ Every type here is part of the runtime wire surface between
 `RuntimeClient` (orchestrator side), the runtime server (sandbox side),
 and the worker subprocess. Both client and server import from here.
 
-Wire encoding: every payload is a stdlib pickle blob. The runtime
-only ships Python callables — no cross-language clients — so pickle is
-the simplest faithful encoding for arbitrary Python objects (top-level
-functions, bound methods, `functools.partial`, callable instances,
-return values).
+Wire encoding: callable identity travels as an import path
+(`module::qualname`). Args, kwargs, and return values travel as stdlib
+pickle blobs so arbitrary Python values can cross the boundary.
 """
 
 from __future__ import annotations
@@ -27,10 +25,9 @@ class HealthResponse(BaseModel):
 class RemoteRequest(BaseModel):
     """One remote call.
 
-      - `callable`: a `RemoteCallable` (str subclass holding the
-        base64-pickle of the callable). `.resolve()` recovers the fn
-        on the worker; `RemoteCallable._resolve(fn)` builds one on the
-        host.
+      - `callable`: a `RemoteCallable` (str subclass holding
+        `module::qualname`). `.resolve()` imports the fn on the worker;
+        `RemoteCallable._resolve(fn)` builds one on the host.
       - `arguments`: pickle.dumps((args, kwargs)).
 
     No display name on the wire — both ends compute it locally from

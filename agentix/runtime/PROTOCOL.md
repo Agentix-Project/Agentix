@@ -6,19 +6,20 @@ Tests in `tests/test_rpc_protocol.py` enforce these rules.
 ## Callable Reference
 
 The client encodes the callable as a `RemoteCallable` — a `str`
-subclass holding `base64(pickle.dumps(fn))`. The same single-line
-identifier appears in the SIO event payload, in worker frames, and on
-the wire generally.
+subclass holding `module::qualname`. The same single-line identifier
+appears in the SIO event payload, in worker frames, and on the wire
+generally.
 
-`pickle.dumps` round-trips:
+Remote call targets must be importable by the worker:
 
-  - top-level functions / classes
-  - bound methods (carries the instance)
-  - `functools.partial` (carries bound args)
-  - pickleable callable instances (`__call__`)
+  - top-level functions
+  - builtin functions such as `len`
+  - top-level functions defined in a `python script.py` entrypoint,
+    encoded as the script module path when that module is importable
 
-Lambdas and local closures are intentionally outside the boundary —
-pickle can't serialize them.
+Lambdas, local closures, bound methods, partials, and callable
+instances are intentionally outside the callable boundary. Put remote
+code behind an importable top-level function instead.
 
 Args and kwargs travel separately as `arguments = pickle.dumps((args, kwargs))`.
 

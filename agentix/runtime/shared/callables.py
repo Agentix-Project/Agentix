@@ -1,15 +1,15 @@
-"""Callable identification + serialization.
+"""Callable identification.
 
 `RemoteCallable` is the wire type for a remote callable: a `str`
-subclass that stores `base64(pickle.dumps(fn))`. Both ends use its
-classmethod / instance method to cross the wire — no separate free
-functions.
+subclass that stores `module::qualname`. Args, kwargs, and return
+values are pickled separately; function identity stays import-path
+based.
 
-Round-trip works for anything `pickle.dumps` handles: top-level
-functions (carries `module::qualname`), bound methods (carries instance),
-`functools.partial` (carries bound args), and callable instances.
-Lambdas and local closures are intentionally outside the boundary —
-pickle can't serialize them.
+Top-level functions defined in a `python script.py` entrypoint are
+encoded as an import reference to the script module, so users do not
+have to special-case `__main__`. Lambdas, local closures, bound
+methods, and callable instances are intentionally outside the remote
+call boundary; put remote code behind an importable top-level function.
 
 `display_name_for(fn)` is a host/worker-local helper for log lines and
 error messages. It is not shipped on the wire — both ends recompute it
@@ -18,9 +18,11 @@ from their own fn reference.
 
 from __future__ import annotations
 
-import base64
-import pickle
+import importlib
+import inspect
+import sys
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 
@@ -39,9 +41,51 @@ def display_name_for(fn: Any) -> str:
     return f"{cls_module}::{cls_qualname}" if cls_module else cls_qualname
 
 
+def _main_module_name() -> str | None:
+    main = sys.modules.get("__main__")
+    spec = getattr(main, "__spec__", None)
+    spec_name = getattr(spec, "name", None)
+    if isinstance(spec_name, str) and spec_name and spec_name != "__main__":
+        return spec_name
+
+    main_file = getattr(main, "__file__", None)
+    if not isinstance(main_file, str) or not main_file:
+        return None
+
+    path = Path(main_file).resolve()
+    for raw_entry in sys.path:
+        root = Path(raw_entry or ".").resolve()
+        try:
+            rel = path.relative_to(root)
+        except ValueError:
+            continue
+        if rel.suffix != ".py":
+            continue
+        parts = rel.with_suffix("").parts
+        if parts and all(part.isidentifier() for part in parts):
+            return ".".join(parts)
+    return None
+
+
+def _callable_ref(fn: Callable[..., Any]) -> tuple[str, str] | None:
+    if not (inspect.isfunction(fn) or inspect.isbuiltin(fn)):
+        return None
+
+    name = getattr(fn, "__name__", "")
+    qualname = getattr(fn, "__qualname__", "")
+    if not name or name == "<lambda>" or not qualname or "<locals>" in qualname:
+        return None
+
+    module = getattr(fn, "__module__", None)
+    if module == "__main__":
+        module = _main_module_name()
+    if not isinstance(module, str) or not module:
+        return None
+    return module, qualname
+
+
 class RemoteCallable(str):
-    """Wire form of a remote callable: a string carrying
-    `base64(pickle.dumps(fn))`.
+    """Wire form of a remote callable: `module::qualname`.
 
     Subclasses `str` so it's directly serializable via msgpack / json /
     any text protocol with no special handling. Use the classmethod to
@@ -56,12 +100,24 @@ class RemoteCallable(str):
         """Encode a Python callable as a `RemoteCallable` string."""
         if not callable(fn):
             raise TypeError(f"remote value must be callable (got {type(fn).__name__})")
-        encoded = base64.b64encode(pickle.dumps(fn)).decode("ascii")
-        return cls(encoded)
+        ref = _callable_ref(fn)
+        if ref is None:
+            raise TypeError(
+                "remote callable must be an importable top-level function",
+            )
+        module, qualname = ref
+        return cls(f"{module}::{qualname}")
 
     def resolve(self) -> Callable[..., Any]:
         """Decode this string back into a Python callable."""
-        fn = pickle.loads(base64.b64decode(self.encode("ascii")))
+        try:
+            module, qualname = self.split("::", 1)
+        except ValueError as exc:
+            raise ValueError(f"invalid remote callable reference {self!r}") from exc
+        obj: Any = importlib.import_module(module)
+        for part in qualname.split("."):
+            obj = getattr(obj, part)
+        fn = obj
         if not callable(fn):
             raise TypeError(f"resolved value is not callable (got {type(fn).__name__})")
         return fn

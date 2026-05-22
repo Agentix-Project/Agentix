@@ -129,7 +129,7 @@ project layout, lockfile, and runtime-image details.
 ```text
 Host process
   RuntimeClient.remote(fn, *args, **kwargs)
-    builds RemoteCallable from pickle.dumps(fn)
+    builds RemoteCallable from fn's import path
     pickles (args, kwargs) as one blob
         |
         v  Socket.IO "unary"
@@ -138,7 +138,7 @@ Sandbox
         |  msgpack frame
         v
   worker subprocess
-    RemoteCallable.resolve() -> fn
+    RemoteCallable.resolve() imports fn
     pickle.loads(arguments) -> args, kwargs
     calls fn(*args, **kwargs)
     pickles the result back

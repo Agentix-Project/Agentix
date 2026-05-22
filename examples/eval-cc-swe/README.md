@@ -11,21 +11,19 @@ on the host through `agentix.trace` and feed abridge for rollout logs.
 examples/eval-cc-swe/
 ├── pyproject.toml     — project + deps
 ├── README.md
-├── git_patch.py       — sandbox: generic `get_patch(...)`
-└── runner.py          — host: orchestrator + abridge wiring
+└── runner.py          — host orchestrator + sandbox `get_patch(...)`
 
 plugins/agents/claude-code/
-└── agentix/agents/claude_code/
-    ├── __init__.py    — sandbox: `claude_code.run(...)`
-    └── default.nix    — Claude Code CLI
+├── src/
+│   └── __init__.py    — sandbox: `claude_code.run(...)`
+└── default.nix        — Claude Code CLI
 
 plugins/datasets/swebench/
 ├── src/
 │   ├── __init__.py    — public exports
 │   ├── env.py         — sandbox env preparation
-│   ├── score.py       — sandbox scoring
-│   └── utils.py       — shared helpers
-└── src/default.nix    — git/patch/libstdc++ for SWE-bench images
+│   └── score.py       — sandbox scoring
+└── default.nix        — git/patch/libstdc++ for SWE-bench images
 ```
 
 ## Architecture
@@ -38,13 +36,13 @@ plugins/datasets/swebench/
    │ # client1 / agent sandbox  │  ─────► │    agentix.plugins.datasets.swe.prepare_env│
    │   c.remote(swe.prepare_env)│         │    agentix.agents.claude_code.run  │
    │   c.remote(cc.run,…)       │         │      ↳ claude --print via abridge  │
-   │   c.remote(get_patch,…)    │         │    git_patch.get_patch             │
+   │   c.remote(get_patch,…)    │         │    runner.get_patch               │
    │   c.traces() → abridge     │ ◄────── │                                    │
    │   c.attach_logging(…)      │ ◄────── │                                    │
    │                            │         └────────────────────────────────────┘
    │ # client2 / score sandbox  │         ┌────────────────────────────────────┐
-   │   c.remote(swe.prepare_env)│  ─────► │  same base + overlay; new container│
-   │   c.remote(swe.score,…)    │         │    reset to base_commit            │
+   │   c.remote(swe.score,…)    │  ─────► │  same base + overlay; new container│
+   │                            │         │    reset to base_commit            │
    └────────────────────────────┘         │    apply patch (GIT_APPLY_CMDS)    │
                                           │    apply SWE test patch            │
                                           │    run targeted tests + score      │
@@ -52,8 +50,9 @@ plugins/datasets/swebench/
 ```
 
 Use it as `from agentix.plugins.datasets import swe` or
-`from agentix.plugins.datasets.swe import prepare_env, score`; the
-example-local `git_patch.get_patch` stays outside the dataset plugin.
+`from agentix.plugins.datasets.swe import prepare_env, score`.
+`score(...)` prepares `/testbed` itself before applying the submitted
+patch.
 
 ### Trace flow
 
@@ -115,7 +114,7 @@ python -m runner --instance-id django__django-11099 --instance-id sympy__sympy-2
 
 # Ground-truth check: skips client1 and scores dataset patches directly.
 uv run python -m runner --ground-truth --fail-on-unresolved \
-  --num-shards 20 --shard-index 0 --out runs/ground-truth-shard-0
+  --concurrency 20 --out runs/ground-truth
 ```
 
 Runner flags (all optional unless noted):
@@ -131,6 +130,7 @@ Runner flags (all optional unless noted):
 - `--cc-timeout`          wall-clock budget for claude (default 1800s)
 - `--eval-timeout`        wall-clock budget for SWE test scoring (default 1800s)
 - `--max-turns`           forwarded to the claude CLI
+- `--concurrency`         max instances to run at once (default 1)
 - `--out`                 directory for per-instance `.patch`, `.json`, `.rollouts.jsonl`
 
 ## Output
@@ -141,7 +141,7 @@ Runner flags (all optional unless noted):
 [django__django-11099] running claude (model=gpt-4o-mini)
 [django__django-11099] claude exit=0
 [django__django-11099] patch_bytes=412  call_id=eval-cc-swe-django__django-11099-9af2b6cd
-[django__django-11099] eval sandbox
+[django__django-11099] score sandbox
 [django__django-11099] PASS  patch_applied=True  resolved=2/2  regressions=0  (847.3s)
 
 1/1 resolved
@@ -150,6 +150,6 @@ Runner flags (all optional unless noted):
 Per-instance artifacts in `runs/`:
 
 - `runs/<id>.patch`            unified diff applied to `/testbed`
-- `runs/<id>.json`             `{resolved, patch_applied, apply_cmd, fail_to_pass, pass_to_pass, ...}`
+- `runs/<id>.json`             `{resolved, patch_applied, timed_out, test_status, ...}`
 - `runs/<id>.rollouts.jsonl`   abridge Rollout per call_id (LLM turns + steps)
 - `runs/summary.json`          list of every per-instance summary

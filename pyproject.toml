@@ -99,7 +99,7 @@ select = ["E", "F", "I", "W", "UP"]
 include = [
     "agentix",
     "plugins/abridge/agentix",
-    "plugins/agents/claude-code/agentix",
+    "plugins/agents/claude-code/src",
     "plugins/datasets/swebench/src",
     "plugins/deployments/docker/agentix",
     "plugins/deployments/daytona/agentix",
@@ -115,7 +115,7 @@ exclude = ["**/__pycache__", "**/.venv", ".venv", "**/build"]
 # statically (it doesn't run `pkgutil.extend_path`).
 extraPaths = [
     "plugins/abridge",
-    "plugins/agents/claude-code",
+    "plugins/agents/claude-code/src",
     "plugins/datasets/swebench/src",
     "plugins/deployments/docker",
     "plugins/deployments/daytona",

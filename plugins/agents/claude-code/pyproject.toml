@@ -11,13 +11,15 @@ dependencies = [
 agentixx = { workspace = true }
 
 [build-system]
-requires = ["uv_build>=0.7,<0.9"]
-build-backend = "uv_build"
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
 
-[tool.uv.build-backend]
-module-name = "agentix.agents.claude_code"
-module-root = ""
-namespace = true
+[tool.setuptools]
+package-dir = { "agentix.agents.claude_code" = "src" }
+packages = ["agentix.agents.claude_code"]
+
+[tool.agentix]
+nix = "default.nix"
 
 [project.entry-points."agentix.nix"]
 claude-code = "agentix.agents.claude_code"

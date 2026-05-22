@@ -34,4 +34,4 @@ agentix-dataset-swe = { path = "../../plugins/datasets/swebench", editable = tru
 agentix-runtime-basic = { path = "../../plugins/runtime-basic", editable = true }
 
 [tool.hatch.build.targets.wheel]
-only-include = ["runner.py", "git_patch.py"]
+only-include = ["runner.py"]

@@ -14,11 +14,11 @@ result = await client.remote(run, input="hello")
 Agentix reads exactly two attributes from `run`:
 
 ```python
-target = f"{run.__module__}::{run.__name__}"
+target = f"{run.__module__}::{run.__qualname__}"
 ```
 
 The runtime worker receives that target, imports the module inside the
-sandbox, resolves the function, validates the arguments, and calls it.
+sandbox, resolves the function, unpickles the arguments, and calls it.
 
 ## Why Function Objects
 
@@ -45,9 +45,8 @@ becomes this wire payload:
 
 ```python
 {
-    "target": "app::run",
-    "args": [],
-    "kwargs": {"input": "hello"},
+    "callable": "app::run",
+    "arguments": "pickle.dumps(((), {'input': 'hello'}))",
     "call_id": "optional-correlation-key",
 }
 ```

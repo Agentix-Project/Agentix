@@ -8,7 +8,7 @@ Endpoints:
 - Socket.IO at `/socket.io/` — `call` / `call:result` / `call:error`,
   `cancel`, plus broadcast `trace:event`.
 
-Remote requests carry a `RemoteCallable` (base64-pickled callable) plus
+Remote requests carry a `RemoteCallable` import path plus
 a pickle of the (args, kwargs) tuple. Module-level functions/classes,
 bound methods, `functools.partial`, and pickleable callable instances
 are the supported boundary.

@@ -25,9 +25,9 @@ Frame schemas (`{"type": "...", ...}` — extra fields per type):
 
 `call_id` correlates request frames with their response frames.
 
-`callable` is a base64-encoded pickle of the function (a
-`RemoteCallable` string); `arguments` is pickle.dumps((args, kwargs));
-the worker pickles the return value back into `value`.
+`callable` is an import-path `RemoteCallable` string
+(`module::qualname`); `arguments` is pickle.dumps((args, kwargs)); the
+worker pickles the return value back into `value`.
 """
 
 from __future__ import annotations

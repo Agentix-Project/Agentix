@@ -76,9 +76,9 @@ async def test_socketio_bad_callable_returns_error(use_inprocess_worker, live_se
 
         from agentix.runtime.shared.callables import RemoteCallable
 
-        # Garbage base64 that can't be decoded into a callable.
+        # Garbage import path that can't be resolved into a callable.
         req = RemoteRequest(
-            callable=RemoteCallable("not-valid-base64-pickle"),
+            callable=RemoteCallable("not-valid-import-path"),
             arguments=pickle.dumps(((), {})),
             call_id="call-bad",
         )
@@ -88,8 +88,7 @@ async def test_socketio_bad_callable_returns_error(use_inprocess_worker, live_se
         await sio.disconnect()
 
     assert payload["call_id"] == "call-bad"
-    # b64decode can raise binascii.Error or pickle can raise UnpicklingError.
-    assert payload["error"]["type"] in {"UnpicklingError", "ValueError", "Error", "EOFError"}
+    assert payload["error"]["type"] == "ValueError"
 
 
 async def test_client_remote_round_trip(use_inprocess_worker, live_server):
@@ -132,34 +131,66 @@ async def test_remote_rejects_unimportable_lambda(use_inprocess_worker, live_ser
     use_inprocess_worker()
     base_url = await live_server()
     async with RuntimeClient(base_url) as c:
-        # pickle can't serialize a local lambda, so the host-side
-        # `RemoteCallable._resolve(fn)` raises before the call leaves.
+        # Lambdas do not have an importable top-level function path, so
+        # the host-side `RemoteCallable._resolve(fn)` raises before the
+        # call leaves.
         with pytest.raises(Exception):
             await c.remote(lambda x: x + 1, 41)
 
 
-async def test_remote_accepts_partial(use_inprocess_worker, live_server):
+async def test_remote_rejects_partial(use_inprocess_worker, live_server):
     use_inprocess_worker()
     base_url = await live_server()
     add_three = functools.partial(target.add, 3)
     async with RuntimeClient(base_url) as c:
-        assert await c.remote(add_three, 4) == 7
+        with pytest.raises(Exception):
+            await c.remote(add_three, 4)
 
 
-async def test_remote_accepts_bound_method(use_inprocess_worker, live_server):
+async def test_remote_rejects_bound_method(use_inprocess_worker, live_server):
     use_inprocess_worker()
     base_url = await live_server()
     async with RuntimeClient(base_url) as c:
-        result = await c.remote(target.prefixer.bound, "hello")
-    assert result.msg == "bound:instance:hello"
+        with pytest.raises(Exception):
+            await c.remote(target.prefixer.bound, "hello")
 
 
-async def test_remote_accepts_callable_instance(use_inprocess_worker, live_server):
+async def test_remote_rejects_callable_instance(use_inprocess_worker, live_server):
     use_inprocess_worker()
     base_url = await live_server()
     async with RuntimeClient(base_url) as c:
-        result = await c.remote(target.prefixer, "hello")
-    assert result.msg == "instance:hello"
+        with pytest.raises(Exception):
+            await c.remote(target.prefixer, "hello")
+
+
+async def test_remote_accepts_script_main_function(
+    use_inprocess_worker,
+    live_server,
+    tmp_path,
+    monkeypatch,
+):
+    script = tmp_path / "runner_like.py"
+    script.write_text(
+        "async def get_patch(workdir):\n"
+        "    return f'patch from {workdir}'\n",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    import __main__ as main_module
+
+    monkeypatch.setattr(main_module, "__file__", str(script), raising=False)
+    monkeypatch.setattr(main_module, "__spec__", None, raising=False)
+    namespace = {"__name__": "__main__"}
+    exec(
+        "async def get_patch(workdir):\n"
+        "    return f'patch from {workdir}'\n",
+        namespace,
+    )
+
+    use_inprocess_worker()
+    base_url = await live_server()
+    async with RuntimeClient(base_url) as c:
+        assert await c.remote(namespace["get_patch"], "/testbed") == "patch from /testbed"
 
 
 # ── cancel ────────────────────────────────────────────────────────────

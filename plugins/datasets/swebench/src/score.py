@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import shlex
 import shutil
 from pathlib import Path
 from typing import Any, cast
+
+from unidiff import PatchSet
 
 from swebench.harness.constants import (
     FAIL_ONLY_REPOS,
@@ -22,6 +23,8 @@ from swebench.harness.log_parsers.python import parse_log_pytest_v2
 from swebench.harness.run_evaluation import GIT_APPLY_CMDS
 from swebench.harness.test_spec.python import get_test_directives
 from swebench.harness.test_spec.test_spec import make_test_spec
+
+from .env import prepare_env
 
 logger = logging.getLogger(__name__)
 
@@ -64,9 +67,17 @@ async def score(
 ) -> dict:
     logger.info("scoring %s", instance["instance_id"])
     logger.debug("submitted patch:\n%s", patch)
-    logger.debug("groundtruth patch:\n%s", instance["patch"])
+    logger.debug("groundtruth patch:\n%s", instance.get("patch", ""))
 
     env = _get_env()
+    prepared = await prepare_env(workdir=workdir, base_commit=str(instance["base_commit"]))
+    if not prepared.ok:
+        logger.error("prepare env failed:\n%s", prepared.log)
+        result = _empty_result(patch_applied=False)
+        result["skipped"] = "prepare_env_failed"
+        result["prepare_env_log"] = prepared.log
+        return result
+
     patch_applied = await _apply_model_patch(patch, workdir, env, apply_timeout)
     if not patch_applied:
         return _empty_result(patch_applied=False)
@@ -151,9 +162,30 @@ async def _cleanup_tests(instance: dict, workdir: str, env: dict[str, str], time
 
 
 def _test_patch_paths(test_patch: str) -> tuple[list[str], list[str]]:
-    old = [p for p in re.findall(r"^--- a/(.*)$", test_patch, re.MULTILINE) if p != "/dev/null"]
-    new = [p for p in re.findall(r"^\+\+\+ b/(.*)$", test_patch, re.MULTILINE) if p != "/dev/null"]
-    return list(dict.fromkeys(old)), list(dict.fromkeys(old + new))
+    modified: list[str] = []
+    touched: list[str] = []
+
+    def add_unique(paths: list[str], path: str | None) -> None:
+        if path and path not in paths:
+            paths.append(path)
+
+    for file in PatchSet(test_patch):
+        source = _strip_patch_prefix(file.source_file)
+        target = _strip_patch_prefix(file.target_file)
+        if not file.is_added_file:
+            add_unique(modified, source)
+        add_unique(touched, source)
+        add_unique(touched, target)
+
+    return modified, touched
+
+
+def _strip_patch_prefix(path: str) -> str | None:
+    if path == "/dev/null":
+        return None
+    if path.startswith(("a/", "b/")):
+        return path[2:]
+    return path
 
 
 async def _remove_untracked_paths(workdir: str, paths: list[str], env: dict[str, str], timeout: float) -> None:
