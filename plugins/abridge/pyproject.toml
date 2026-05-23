@@ -16,7 +16,17 @@ mitm = [
 ]
 
 [project.scripts]
-abridge-mitm = "agentix.bridge.mitm:main"
+abridge-mitm = "agentix.bridge.mitm.cli:main"
+
+[project.entry-points."agentix.bridge.handler"]
+anthropic-openai = "agentix.bridge.plugins.anthropic.handler:AnthropicOpenAIHandler"
+
+[project.entry-points."agentix.bridge.interceptor"]
+block-hosts = "agentix.bridge.pipeline.interceptors:BlockHostsInterceptor"
+anthropic-health = "agentix.bridge.pipeline.interceptors:AnthropicHealthInterceptor"
+anthropic-count-tokens = "agentix.bridge.pipeline.interceptors:AnthropicCountTokensInterceptor"
+hook-forward = "agentix.bridge.pipeline.interceptors:HookForwardInterceptor"
+local-upstream = "agentix.bridge.pipeline.interceptors:LocalUpstreamInterceptor"
 
 # `agentixx` is the monorepo workspace root — used editable, never
 # from PyPI. Core edits are live here with no release step.

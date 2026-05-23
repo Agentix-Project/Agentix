@@ -230,7 +230,7 @@ def test_mitmdump_args_default_to_wireguard_with_this_addon(monkeypatch) -> None
 
     args = mitm._mitmdump_args(["--listen-port", "9090"])
 
-    assert args[:4] == ["-s", str(Path(mitm.__file__).resolve()), "--mode", "wireguard"]
+    assert args[:4] == ["-s", str(mitm.ADDON_SCRIPT), "--mode", "wireguard"]
     assert args[4:] == ["--listen-port", "9090"]
 
 
