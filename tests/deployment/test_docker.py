@@ -50,14 +50,17 @@ async def test_create_passes_platform_to_carrier_and_sandbox(monkeypatch: pytest
     assert run_call[1:3] == ("--platform", "linux/amd64")
     assert run_call[run_call.index("-p") + 1] == "127.0.0.1:18000:18000"
     assert "--network" not in run_call
-    assert run_call[-3:] == (
-        "python:3.13-slim",
-        "-c",
-        docker_mod._RUNTIME_BOOTSTRAP,
+    # The bundle's own /nix/runtime/bootstrap.sh is the container
+    # entrypoint — no more `-c '<inline bootstrap>'` indirection. The
+    # script ships with the bundle (built by
+    # `agentix/builder/bundle-build.sh` from `agentix/builder/bootstrap.sh`).
+    assert run_call[-1] == "python:3.13-slim"
+    assert "-c" not in run_call
+    assert (
+        run_call[run_call.index("--entrypoint") + 1]
+        == "/nix/runtime/bootstrap.sh"
     )
-    assert run_call[run_call.index("--entrypoint") + 1] == "/bin/sh"
-    assert "LD_LIBRARY_PATH" in docker_mod._RUNTIME_BOOTSTRAP
-    assert 'tracking="AGENTIX_ADDED_${name}"' in docker_mod._RUNTIME_BOOTSTRAP
+    assert docker_mod._RUNTIME_ENTRYPOINT == "/nix/runtime/bootstrap.sh"
 
 
 @pytest.mark.asyncio

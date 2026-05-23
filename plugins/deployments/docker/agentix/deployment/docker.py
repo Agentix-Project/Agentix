@@ -27,12 +27,13 @@ Design:
          -p 127.0.0.1:<port>:<port> \\
          -e AGENTIX_BIND_PORT=<port> \\
          --volumes-from <carrier>:ro \\
-         --entrypoint /bin/sh \\
-         <image> -c '<inject runtime env; exec agentix-server>'
+         --entrypoint /nix/runtime/bootstrap.sh \\
+         <image>
 
-  `agentix-server` binds to the port from `AGENTIX_BIND_PORT`. We pick
-  a free host port, publish the same port to loopback, and health-check
-  `/health` on it.
+  The bundle's `/nix/runtime/bootstrap.sh` preps the runtime PATHs
+  and execs `agentix-server`. `agentix-server` binds to the port
+  from `AGENTIX_BIND_PORT`; we pick a free host port, publish the
+  same port to loopback, and health-check `/health` on it.
 """
 
 from __future__ import annotations
@@ -49,36 +50,11 @@ from agentix.deployment.base import Deployment, Sandbox, SandboxConfig, SandboxI
 
 logger = logging.getLogger("agentix.deployment.docker")
 
-_RUNTIME_ENTRYPOINT = "/bin/sh"
-_RUNTIME_BOOTSTRAP = r"""
-set -eu
-agentix_prepend_path() {
-  name="$1"
-  added="$2"
-  tracking="AGENTIX_ADDED_${name}"
-  eval "current=\${$name-}"
-  eval "tracked=\${$tracking-}"
-  if [ -n "$current" ]; then
-    export "$name=$added:$current"
-  else
-    export "$name=$added"
-  fi
-  if [ -n "$tracked" ]; then
-    export "$tracking=$tracked:$added"
-  else
-    export "$tracking=$added"
-  fi
-}
-agentix_prepend_path PATH "/nix/runtime/venv/bin:/nix/runtime/bin"
-agentix_prepend_path LD_LIBRARY_PATH "/nix/runtime/lib"
-agentix_prepend_path LIBRARY_PATH "/nix/runtime/lib"
-agentix_prepend_path CPATH "/nix/runtime/include"
-agentix_prepend_path C_INCLUDE_PATH "/nix/runtime/include"
-agentix_prepend_path CPLUS_INCLUDE_PATH "/nix/runtime/include"
-agentix_prepend_path PKG_CONFIG_PATH "/nix/runtime/lib/pkgconfig:/nix/runtime/share/pkgconfig"
-agentix_prepend_path CMAKE_PREFIX_PATH "/nix/runtime"
-exec /nix/runtime/venv/bin/agentix-server
-""".strip()
+# The bundle ships its own startup script at /nix/runtime/bootstrap.sh
+# (see `agentix/builder/bundle-build.sh`). Deployment backends just
+# exec it — they don't bake in any knowledge of Python venvs, LD paths,
+# or where `agentix-server` lives.
+_RUNTIME_ENTRYPOINT = "/nix/runtime/bootstrap.sh"
 
 
 async def _docker(*args: str, check: bool = True, retries: int = 0) -> tuple[int, bytes, bytes]:
@@ -190,8 +166,6 @@ class DockerDeployment(Deployment):
             "--entrypoint",
             _RUNTIME_ENTRYPOINT,
             config.image,
-            "-c",
-            _RUNTIME_BOOTSTRAP,
             retries=3,
         )
 

@@ -91,7 +91,16 @@ _SOURCE_SKIP = frozenset({
 })
 
 # Files staged verbatim from `agentix/builder/` into the build context.
-_BUILDER_FILES = ("flake.nix", "flake.lock", "Dockerfile", "bundle-build.sh")
+_BUILDER_FILES = (
+    "flake.nix",
+    "flake.lock",
+    "Dockerfile",
+    "bundle-build.sh",
+    # Shipped verbatim into the bundle as `/nix/runtime/bootstrap.sh`
+    # by `bundle-build.sh`. The container entrypoint deployment
+    # backends exec.
+    "bootstrap.sh",
+)
 
 _BUILD_FORMATS = ("tar", "oci-image")
 
@@ -229,6 +238,8 @@ def stage_context(
         stage/flake.lock       pinned nixpkgs (verbatim)
         stage/Dockerfile       build container (verbatim)
         stage/bundle-build.sh  in-container orchestration (verbatim)
+        stage/bootstrap.sh     bundle entrypoint, copied to
+                               /nix/runtime/bootstrap.sh by the build
         stage/python-version   interpreter minor, read by flake.nix
         stage/nix-system       target Nix system, read by flake.nix
         stage/closures/        empty — filled in-container by `_assemble`

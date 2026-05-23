@@ -52,36 +52,11 @@ from agentix.deployment.base import Deployment, Sandbox, SandboxConfig, SandboxI
 
 logger = logging.getLogger("agentix.deployment.apptainer")
 
-_RUNTIME_ENTRYPOINT = "/bin/sh"
-_RUNTIME_BOOTSTRAP = r"""
-set -eu
-agentix_prepend_path() {
-  name="$1"
-  added="$2"
-  tracking="AGENTIX_ADDED_${name}"
-  eval "current=\${$name-}"
-  eval "tracked=\${$tracking-}"
-  if [ -n "$current" ]; then
-    export "$name=$added:$current"
-  else
-    export "$name=$added"
-  fi
-  if [ -n "$tracked" ]; then
-    export "$tracking=$tracked:$added"
-  else
-    export "$tracking=$added"
-  fi
-}
-agentix_prepend_path PATH "/nix/runtime/venv/bin:/nix/runtime/bin"
-agentix_prepend_path LD_LIBRARY_PATH "/nix/runtime/lib"
-agentix_prepend_path LIBRARY_PATH "/nix/runtime/lib"
-agentix_prepend_path CPATH "/nix/runtime/include"
-agentix_prepend_path C_INCLUDE_PATH "/nix/runtime/include"
-agentix_prepend_path CPLUS_INCLUDE_PATH "/nix/runtime/include"
-agentix_prepend_path PKG_CONFIG_PATH "/nix/runtime/lib/pkgconfig:/nix/runtime/share/pkgconfig"
-agentix_prepend_path CMAKE_PREFIX_PATH "/nix/runtime"
-exec /nix/runtime/venv/bin/agentix-server
-""".strip()
+# The bundle ships its own startup script at /nix/runtime/bootstrap.sh
+# (see `agentix/builder/bundle-build.sh`). Deployment backends just
+# exec it — they don't bake in any knowledge of Python venvs, LD paths,
+# or where `agentix-server` lives.
+_RUNTIME_ENTRYPOINT = "/nix/runtime/bootstrap.sh"
 
 _DEFAULT_CACHE = Path.home() / ".cache" / "agentix" / "apptainer"
 
@@ -267,8 +242,6 @@ class ApptainerDeployment(Deployment):
             *env_args,
             str(sif),
             _RUNTIME_ENTRYPOINT,
-            "-c",
-            _RUNTIME_BOOTSTRAP,
         ]
         logger.info("apptainer exec %s (port=%d)", sandbox_id, port)
         proc = await asyncio.create_subprocess_exec(
