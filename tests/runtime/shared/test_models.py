@@ -20,7 +20,7 @@ def test_remote_request_round_trips():
     rc = RemoteCallable._resolve(_example_fn)
     r = RemoteRequest(callable=rc, arguments=args_payload)
     assert isinstance(r.callable, str)  # str subclass
-    assert r.callable == "tests.test_models::_example_fn"
+    assert r.callable == "tests.runtime.shared.test_models::_example_fn"
     assert r.callable.resolve()(2) == 3  # round-trip back to fn
     assert pickle.loads(r.arguments) == ((1, 2), {"k": "v"})
 
