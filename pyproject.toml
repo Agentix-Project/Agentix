@@ -44,6 +44,7 @@ agentix-server = "agentix.runtime.server:main"
 #   pip install agentix-deployment-daytona  # registers `daytona`
 #   pip install agentix-deployment-e2b      # registers `e2b`
 #   pip install agentix-agent-claude-code   # provides `agentix.agents.claude_code`
+#   pip install agentix-agent-mini-swe-agent  # provides `agentix.agents.mini_swe_agent`
 #   pip install agentix-dataset-swe         # provides `agentix.plugins.datasets.swe`
 #   pip install agentix-runtime-basic       # registers `bash`, `files`
 
@@ -100,6 +101,7 @@ include = [
     "agentix",
     "plugins/abridge/agentix",
     "plugins/agents/claude-code/src",
+    "plugins/agents/mini-swe-agent/src",
     "plugins/datasets/swebench/src",
     "plugins/deployments/docker/agentix",
     "plugins/deployments/daytona/agentix",
@@ -116,6 +118,7 @@ exclude = ["**/__pycache__", "**/.venv", ".venv", "**/build"]
 extraPaths = [
     "plugins/abridge",
     "plugins/agents/claude-code/src",
+    "plugins/agents/mini-swe-agent/src",
     "plugins/datasets/swebench/src",
     "plugins/deployments/docker",
     "plugins/deployments/daytona",

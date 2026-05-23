@@ -1,0 +1,20 @@
+[project]
+name = "agentix-agent-mini-swe-agent"
+version = "0.1.0"
+description = "mini-swe-agent Python integration for Agentix sandboxes"
+requires-python = ">=3.11"
+dependencies = [
+    "agentixx",
+    "mini-swe-agent",
+]
+
+[tool.uv.sources]
+agentixx = { workspace = true }
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "agentix.agents.mini_swe_agent" = "src" }
+packages = ["agentix.agents.mini_swe_agent"]
