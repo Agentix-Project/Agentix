@@ -16,22 +16,24 @@ Sandbox runtime server
         v
 Worker subprocess
   import module
-  validate args
+  unpickle args
   call function
-  encode result
+  pickle result
 ```
 
-Everything else supports that loop.
+Everything else supports that loop or rides side channels on the same
+Socket.IO connection.
 
 ## Systems
 
 | System | Responsibility |
 | --- | --- |
-| `agentix.runtime.shared` | Wire models, msgpack codec, framing, Socket.IO event names, call-shape helpers |
-| `agentix.runtime.client` | `RuntimeClient.remote(fn, ...)` and transport-specific client behavior |
-| `agentix.runtime.server` | FastAPI and Socket.IO server, worker process management, callable invocation, call correlation |
+| `agentix.runtime.shared` | Wire models, msgpack codec, framing, `RemoteCallable`, `CallId` |
+| `agentix.runtime.client` | `RuntimeClient.remote(fn, ...)` and host-side namespace handlers |
+| `agentix.runtime.server` | FastAPI and Socket.IO server, worker process management, namespace forwarding |
 | `agentix.deployment` | Host-side sandbox lifecycle protocol and backend plugin lookup |
 | `agentix.cli` | `agentix build` |
+| `agentix.sio` | Sandbox-side namespace API bridged over the worker pipe |
 
 ## Remote Target
 
@@ -43,43 +45,38 @@ from app import run
 result = await client.remote(run, input="hello")
 ```
 
-The client serializes a callable reference from the function object:
+The client encodes the callable as an import-path string:
 
 ```python
-callable_ref = f"{run.__module__}::{run.__qualname__}"
-```
-
-Arguments are serialized separately with stdlib pickle:
-
-```python
+callable_ref = RemoteCallable._resolve(run)  # "app::run"
 arguments = pickle.dumps((args, kwargs))
 ```
 
-The runtime worker resolves the callable reference inside the sandbox,
-unpickles arguments, validates them, and invokes the target.
+The runtime worker imports the module, resolves the function, unpickles
+the arguments, and invokes it. Return values travel back as pickle
+blobs inside `call:result`.
 
 ## Call Flow
 
 ```text
 1. Host imports `app.run`.
 2. Host calls `client.remote(run, input="hello")`.
-3. Client inspects the signature and detects unary, stream, or bidi.
-4. Client encodes args and kwargs with the shared codec.
-5. Runtime server receives the call.
-6. Server forwards the request to the worker subprocess.
-7. Worker imports `app`, resolves `run`, validates args, and calls it.
-8. Worker encodes the return value or stream item.
-9. Client decodes the result into the function's annotated return type.
+3. Client builds `RemoteCallable("app::run")` and pickles `((), {"input": "hello"})`.
+4. Client emits `call` on Socket.IO `/`.
+5. Runtime server forwards the request to the worker subprocess.
+6. Worker imports `app`, resolves `run`, unpickles args, and calls it.
+7. Worker pickles the return value.
+8. Server emits `call:result`; client unpickles the value and returns it.
 ```
 
 ## Transports
 
-| Call shape | Function shape | Transport | Client behavior |
-| --- | --- | --- | --- |
-| Unary | `async def f(...) -> T` or sync `def f(...) -> T` | Socket.IO | `await client.remote(f, ...)` |
-
-Unary responses are msgpack RPC envelopes with either `value` or
-`error`.
+| Path | Carries | Wire |
+| --- | --- | --- |
+| `GET /health` | health probe | HTTP JSON |
+| Socket.IO `/` | `c.remote()` RPC | `call` / `call:result` / `call:error` / `cancel` |
+| Socket.IO `/trace`, `/log`, `/<plugin>` | side channels | plugin-defined events (msgpack payloads) |
+| worker private pipe | runtime ↔ worker | length-prefixed msgpack frames |
 
 ## Bundle Layout
 
@@ -101,7 +98,8 @@ dependencies, and integration packages declared in `pyproject.toml`.
 └── lib/python3.11/site-packages/
     ├── agentix/
     ├── agentix/bash/
-    ├── agentix/swebench/
+    ├── agentix/agents/claude_code/
+    ├── agentix/plugins/datasets/swe/
     └── app.py
 ```
 
@@ -113,22 +111,25 @@ and links binaries into `/nix/runtime/bin`.
 The runtime server owns one worker subprocess. The worker handles remote
 function invocation and keeps the runtime server isolated from user code.
 
-For each target, the worker prepares and caches invocation metadata:
+For each call, the worker:
 
-- module import
-- function lookup
-- signature inspection
-- pydantic argument adapters
-- return-value serialization metadata
+1. resolves the `RemoteCallable` import path
+2. unpickles `(args, kwargs)`
+3. calls the callable (awaiting when the return value is awaitable)
+4. pickles the return value
+
+The worker also hosts the sandbox-side `agentix.sio` bridge. Plugin
+namespaces register inside the worker and forward events through
+`sio_emit` / `sio_open` / `sio_inbound` frames on the worker pipe.
 
 The worker uses the same `/nix/runtime` environment as the runtime
 server, so anything installed into the bundle can be imported on demand.
 
 ## Deployment Boundary
 
-Deployments are host-side plugins that start bundle images. They return a
-`runtime_url`; after that, the runtime protocol is the same regardless of
-where the sandbox is running.
+Deployments are host-side plugins that stage a bundle and start the
+sandbox. They return a `runtime_url`; after that, the runtime protocol
+is the same regardless of where the sandbox is running.
 
 ```text
 Deployment.create(SandboxConfig(image="python:3.13-slim", bundle="my-rollout:0.1.0"))
@@ -144,7 +145,8 @@ RuntimeClient(runtime_url)
 
 ```text
 Bundle = what code and dependencies exist in the sandbox
-Remote call = which installed function to call
+Remote call = which importable function to call
 Worker = where user code executes
-Deployment = where the bundle image runs
+agentix.sio = sandbox ↔ host side channels (trace, log, plugins)
+Deployment = where the bundle is staged and run
 ```

@@ -8,10 +8,11 @@ packages, transitive Python dependencies, and optional system binaries in
 one bundle.
 
 `agentix build [path]` takes a normal Python project and produces a
-deploy-ready Docker image.
+deploy-ready bundle. The default output is a portable tar containing
+`manifest.json` and the complete `nix/` runtime tree.
 
 ```bash
-agentix build ./my-rollout --name my-rollout:0.1.0
+agentix build ./my-rollout --name my-rollout:0.1.0 --format oci-image
 ```
 
 ## What Goes In
@@ -31,7 +32,7 @@ dependencies = [
 ]
 ```
 
-During the build, Agentix copies the project into the image and runs one
+During the build, Agentix copies the project into the bundle and runs one
 install into the runtime environment:
 
 ```bash
@@ -65,7 +66,7 @@ can import a module from that environment, the host can call it with
 ## System Binaries
 
 If the project root includes `default.nix`, `agentix build` adds a Nix
-builder stage. The derivation closure is copied into the final image,
+builder stage. The derivation closure is copied into the final bundle,
 and binaries are linked under `/nix/runtime/bin`.
 
 Worker subprocesses inherit the runtime server's environment, with the
@@ -101,7 +102,7 @@ coexist in one sandbox.
 ```text
 Bundle = what exists in the sandbox
 Remote call = which installed function runs
-Deployment = where the image is started
+Deployment = where the bundle is staged and started
 ```
 
 Keep those concerns separate and the same integration can move from a

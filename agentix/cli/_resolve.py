@@ -41,7 +41,7 @@ def read_pyproject(project_dir: Path) -> dict:
 def short_name(pyproject: dict) -> str:
     """Derive a short display/tag name for the project.
 
-    The short name only affects the image tag and a few build
+    The short name only affects the bundle tag and a few build
     diagnostics — wire routing is by `fn.__module__`, which is
     determined by the user's actual Python import path.
     """

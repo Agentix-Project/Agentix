@@ -25,11 +25,13 @@ sandbox, resolves the function, unpickles the arguments, and calls it.
 Passing the function object keeps the host and sandbox API aligned:
 
 - Your editor sees kwargs and return types from the local signature.
-- The worker validates against the sandbox-installed signature before
-  execution.
 - Refactors stay visible to Python tooling instead of hiding in RPC
   strings.
 - Agents, tools, and scorers all use the same call path.
+
+The host rejects callables that cannot be encoded as an import path
+(lambdas, bound methods, partials, local closures). Put remote code
+behind an importable top-level function instead.
 
 ## Payload Shape
 
@@ -46,23 +48,19 @@ becomes this wire payload:
 ```python
 {
     "callable": "app::run",
-    "arguments": "pickle.dumps(((), {'input': 'hello'}))",
-    "call_id": "optional-correlation-key",
+    "arguments": pickle.dumps(((), {"input": "hello"})),
+    "call_id": "uuid-hex",
 }
 ```
 
-Remote calls use Socket.IO on the same runtime server. HTTP is used for
-`/health`.
+`RuntimeClient.remote()` generates a fresh `call_id` per call. The
+runtime uses it to correlate `call:result` / `call:error` responses and
+to support cancellation.
 
-## Call Shape
+Remote calls use Socket.IO events on the `/` namespace. HTTP is only
+used for `/health`.
 
-Current public behavior is unary RPC:
-
-| Function shape | Client usage | Transport |
-| --- | --- | --- |
-| `def f(...) -> T` or `async def f(...) -> T` | `await client.remote(f, ...)` | Socket.IO unary |
-
-## Unary Example
+## Example
 
 ```python title="app.py"
 async def run(input: str) -> dict[str, str]:
@@ -75,10 +73,38 @@ from app import run
 result = await client.remote(run, input="hello")
 ```
 
-## Correlation
+Both sync and async functions are valid targets. The worker awaits the
+return value only when it is awaitable.
 
-Each call is tracked internally with a `call_id` for routing and
-observability.
+## Side Channels
 
-Agentix keeps errors in-band: unary requests return an RPC response with
-either a value or an error.
+Trace, log, and plugin traffic share the same Socket.IO connection but
+ride their own namespaces, separate from `c.remote()`:
+
+| Namespace | Direction | Purpose |
+| --- | --- | --- |
+| `/` | host ↔ sandbox | `c.remote()` |
+| `/trace` | sandbox → host | span lifecycle (auto-registered) |
+| `/log` | sandbox → host | stdlib logging records (auto-registered) |
+| `/<plugin>` | both | plugin-defined events via `agentix.sio` |
+
+Register a host-side handler before connecting:
+
+```python
+client = RuntimeClient(url)
+client.register_namespace(MyHostNamespace())
+async with client as c:
+    await c.remote(my_sandbox_fn, ...)
+```
+
+## Errors and Cancellation
+
+Agentix keeps errors in-band. A failed call emits `call:error` with a
+structured payload; the client raises `RemoteCallError` (or
+`asyncio.CancelledError` when `error.cancelled=True`).
+
+When the client disconnects or the caller's task is cancelled before a
+result arrives, the client emits `cancel` for the in-flight `call_id`.
+
+Per-call timeouts are caller-owned — wrap `await client.remote(...)` in
+`asyncio.wait_for(...)` when you need a deadline.

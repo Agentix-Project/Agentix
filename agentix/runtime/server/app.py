@@ -5,13 +5,13 @@ Runs remote calls through one runtime worker subprocess.
 Endpoints:
 
 - `GET /health`
-- Socket.IO at `/socket.io/` — `call` / `call:result` / `call:error`,
-  `cancel`, plus broadcast `trace:event`.
+- Socket.IO at `/socket.io/` — unary RPC on `/` (`call` / `call:result` /
+  `call:error`, `cancel`), plus side-channel namespaces (`/trace`, `/log`,
+  and plugin paths registered via `agentix.sio`).
 
 Remote requests carry a `RemoteCallable` import path plus
-a pickle of the (args, kwargs) tuple. Module-level functions/classes,
-bound methods, `functools.partial`, and pickleable callable instances
-are the supported boundary.
+a pickle of the (args, kwargs) tuple. Only importable top-level
+functions and builtins are supported call targets.
 """
 
 from __future__ import annotations

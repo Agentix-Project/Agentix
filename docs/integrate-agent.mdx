@@ -110,16 +110,17 @@ the caller that composes several remote calls.
 
 ```toml title="pyproject.toml"
 [project]
-name = "agentix-claude-code"
+name = "agentix-agent-claude-code"
 version = "0.1.0"
 requires-python = ">=3.11"
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/agentix"]
+[tool.setuptools]
+package-dir = { "agentix.agents.claude_code" = "src" }
+packages = ["agentix.agents.claude_code"]
 ```
 
 After installation, callers can import the function normally:
@@ -159,6 +160,25 @@ patch = diff.stdout
 
 The caller decides how to compose repo setup, the agent run, patch
 extraction, scoring, and logging.
+
+## Side Channels
+
+`c.remote(...)` is request/response: the host sends one call and gets
+one return value back. When the agent also needs to push progress,
+tokens, or LLM traffic to the host while work continues in the sandbox,
+use the generic `agentix.sio` namespace API alongside `c.remote()`:
+
+- sandbox side: subclass `agentix.Namespace`, call `await self.emit(...)`
+- host side: subclass `agentix.AsyncClientNamespace`, register with
+  `client.register_namespace(...)` before connecting
+
+The abridge plugin follows this pattern: sandbox code forwards API
+requests over a plugin namespace; the host handler talks to the real
+upstream and replies on the same namespace.
+
+When side channels aren't needed, keep a single `run(...)` that collects
+output internally and returns a `RunResult` when the CLI finishes —
+that is what `agentix.agents.claude_code.run` does today.
 
 ## Boundaries
 
