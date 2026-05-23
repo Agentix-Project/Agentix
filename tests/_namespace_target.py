@@ -69,3 +69,15 @@ async def emit_formatted_log(template: str, *args) -> None:
 
     logger = logging.getLogger("namespace_target")
     logger.info(template, *args)
+
+
+async def emit_log_burst(prefix: str, count: int) -> int:
+    """Emit `count` ordered log records on `namespace_target`. Returns
+    the number actually emitted, used by reconnect tests to drive a
+    bounded burst from the sandbox."""
+    import logging
+
+    logger = logging.getLogger("namespace_target")
+    for i in range(count):
+        logger.info(f"{prefix}-{i:03d}")
+    return count

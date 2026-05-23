@@ -33,6 +33,7 @@ User shape:
 from __future__ import annotations
 
 import asyncio
+import collections
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
@@ -251,6 +252,93 @@ async def _swallow_exc(coro: Awaitable[None], namespace: str, event: str) -> Non
             namespace,
             event,
         )
+
+
+# ── reliable stream helper ────────────────────────────────────────
+
+
+# Reserved control event names on a reliable-stream namespace. Hosts
+# emit these, sandbox replies with replays / drops.
+_STREAM_ACK_EVENT = "_ack"
+_STREAM_RESUME_EVENT = "_resume"
+
+
+class ReliableStream:
+    """Wraps a sandbox-side `Namespace` to give it at-least-once,
+    reconnect-safe delivery for fire-and-forget event streams.
+
+    Used by `/log` and `/trace`. The contract is:
+
+      - **Sequence**: every emit gets a strictly monotonic `_seq`.
+      - **Buffer**: emits are kept in a bounded ring until acked.
+      - **Ordering**: replay preserves emit order.
+      - **At-least-once**: across reconnects, the host gets every
+        event since its last ack — possibly with duplicates if the
+        host already saw an event but disconnected before its ack
+        reached the sandbox. Duplicates are detected on the host by
+        comparing `_seq` to the last delivered.
+
+    Wire envelope: `{"_seq": N, "data": <event payload>}`. The host
+    extracts `data` after dedup. New events outside this envelope are
+    treated as legacy (no-seq) and pass through.
+    """
+
+    def __init__(
+        self,
+        namespace: Namespace,
+        *,
+        max_buffer: int = 10_000,
+    ) -> None:
+        self._ns = namespace
+        self._next_seq = 1
+        self._buffer: collections.deque[tuple[int, str, dict[str, Any]]] = collections.deque(
+            maxlen=max_buffer,
+        )
+        # The host emits these on (re)connect / after delivery; the
+        # namespace's auto-register only catches `on_<identifier>`
+        # methods, so we wire them explicitly here.
+        namespace.on(_STREAM_ACK_EVENT, self._on_ack)
+        namespace.on(_STREAM_RESUME_EVENT, self._on_resume)
+
+    def emit_nowait(self, event: str, data: Any = None) -> int:
+        """Sync emit + buffer. Used by sync producers (logging.Handler)."""
+        seq, wrapped = self._wrap(event, data)
+        _emit_nowait(self._ns.namespace, event, wrapped)
+        return seq
+
+    async def emit(self, event: str, data: Any = None) -> int:
+        """Async emit + buffer."""
+        return self.emit_nowait(event, data)
+
+    def _wrap(self, event: str, data: Any) -> tuple[int, dict[str, Any]]:
+        seq = self._next_seq
+        self._next_seq += 1
+        wrapped = {"_seq": seq, "data": data}
+        self._buffer.append((seq, event, wrapped))
+        return seq, wrapped
+
+    async def _on_ack(self, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            return
+        ack_seq = payload.get("seq")
+        if not isinstance(ack_seq, int):
+            return
+        # Drop everything the host has confirmed it processed.
+        while self._buffer and self._buffer[0][0] <= ack_seq:
+            self._buffer.popleft()
+
+    async def _on_resume(self, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            return
+        since = payload.get("since_seq", 0)
+        if not isinstance(since, int):
+            since = 0
+        # Replay in order. We snapshot first because replays can
+        # interleave with new emits arriving on the same loop.
+        snapshot = list(self._buffer)
+        for seq, event, wrapped in snapshot:
+            if seq > since:
+                _emit_nowait(self._ns.namespace, event, wrapped)
 
 
 # ── public surface ────────────────────────────────────────────────
