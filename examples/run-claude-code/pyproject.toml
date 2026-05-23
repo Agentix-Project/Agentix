@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "run-claude-code"
+version = "0.1.0"
+description = "Run Claude Code in an Agentix sandbox through sandbox-local abridge-mitm"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "agentixx",
+    "agentix-runtime-basic",
+    "agentix-deployment-docker",
+    "agentix-agent-claude-code",
+    "agentix-bridge[mitm]",
+]
+
+[tool.uv.sources]
+agentixx = { path = "../..", editable = true }
+agentix-runtime-basic = { path = "../../plugins/runtime-basic", editable = true }
+agentix-deployment-docker = { path = "../../plugins/deployments/docker", editable = true }
+agentix-agent-claude-code = { path = "../../plugins/agents/claude-code", editable = true }
+agentix-bridge = { path = "../../plugins/abridge", editable = true }
+
+[tool.agentix]
+nix = "default.nix"
+
+[tool.hatch.build.targets.wheel]
+only-include = ["main.py"]
