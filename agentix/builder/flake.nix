@@ -50,11 +50,19 @@
         # Built last — toolchain plus every discovered system-dep
         # closure, merged into one tree of symlinks into /nix/store.
         # This tree is copied to /nix/runtime in the image.
+        #
+        # `pkgs.bash` is part of every bundle so the bundle's
+        # `bootstrap.sh` can rely on a known-good shell at
+        # `/nix/runtime/bin/bash` regardless of what `/bin/sh` the
+        # task image ships. Lets bootstrap.sh use bash-specific
+        # features (heredocs with parameter expansion, `set -o
+        # pipefail`, etc.) without sniffing the task image first.
         runtime = pkgs.symlinkJoin {
           name = "agentix-runtime";
           paths = [
             python
             pkgs.uv
+            pkgs.bash
           ]
           ++ closureDrvs;
         };

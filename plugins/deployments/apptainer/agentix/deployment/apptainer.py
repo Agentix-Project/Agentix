@@ -48,40 +48,18 @@ import tarfile
 from pathlib import Path
 from uuid import uuid4
 
-from agentix.deployment.base import Deployment, Sandbox, SandboxConfig, SandboxId, SandboxInfo
+from agentix.deployment.base import (
+    BIND_PORT_ENV,
+    BUNDLE_NIX_ROOT,
+    BUNDLE_RUNTIME_ENTRYPOINT,
+    Deployment,
+    Sandbox,
+    SandboxConfig,
+    SandboxId,
+    SandboxInfo,
+)
 
 logger = logging.getLogger("agentix.deployment.apptainer")
-
-_RUNTIME_ENTRYPOINT = "/bin/sh"
-_RUNTIME_BOOTSTRAP = r"""
-set -eu
-agentix_prepend_path() {
-  name="$1"
-  added="$2"
-  tracking="AGENTIX_ADDED_${name}"
-  eval "current=\${$name-}"
-  eval "tracked=\${$tracking-}"
-  if [ -n "$current" ]; then
-    export "$name=$added:$current"
-  else
-    export "$name=$added"
-  fi
-  if [ -n "$tracked" ]; then
-    export "$tracking=$tracked:$added"
-  else
-    export "$tracking=$added"
-  fi
-}
-agentix_prepend_path PATH "/nix/runtime/venv/bin:/nix/runtime/bin"
-agentix_prepend_path LD_LIBRARY_PATH "/nix/runtime/lib"
-agentix_prepend_path LIBRARY_PATH "/nix/runtime/lib"
-agentix_prepend_path CPATH "/nix/runtime/include"
-agentix_prepend_path C_INCLUDE_PATH "/nix/runtime/include"
-agentix_prepend_path CPLUS_INCLUDE_PATH "/nix/runtime/include"
-agentix_prepend_path PKG_CONFIG_PATH "/nix/runtime/lib/pkgconfig:/nix/runtime/share/pkgconfig"
-agentix_prepend_path CMAKE_PREFIX_PATH "/nix/runtime"
-exec /nix/runtime/venv/bin/agentix-server
-""".strip()
 
 _DEFAULT_CACHE = Path.home() / ".cache" / "agentix" / "apptainer"
 
@@ -253,7 +231,7 @@ class ApptainerDeployment(Deployment):
         sandbox_id = SandboxId(f"agentix-{uuid4().hex[:8]}")
         port = self._allocate_port()
 
-        env_args: list[str] = ["--env", f"AGENTIX_BIND_PORT={port}"]
+        env_args: list[str] = ["--env", f"{BIND_PORT_ENV}={port}"]
         if config.env:
             for k, v in config.env.items():
                 env_args.extend(["--env", f"{k}={v}"])
@@ -263,12 +241,10 @@ class ApptainerDeployment(Deployment):
             "exec",
             *_isolation_args(),
             "--bind",
-            f"{nix_root}:/nix:ro",
+            f"{nix_root}:{BUNDLE_NIX_ROOT}:ro",
             *env_args,
             str(sif),
-            _RUNTIME_ENTRYPOINT,
-            "-c",
-            _RUNTIME_BOOTSTRAP,
+            BUNDLE_RUNTIME_ENTRYPOINT,
         ]
         logger.info("apptainer exec %s (port=%d)", sandbox_id, port)
         proc = await asyncio.create_subprocess_exec(

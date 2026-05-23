@@ -260,6 +260,10 @@ async def test_create_records_expected_apptainer_cli(env, tmp_path: Path) -> Non
     flat = " ".join(exec_argv)
     assert "AGENTIX_BIND_PORT=" in flat
     assert "HF_HOME=/tmp/hf" in flat
+    # Container entrypoint: the bundle's /nix/runtime/bootstrap.sh,
+    # not an inline `sh -c '...'` indirection.
+    assert exec_argv[-1] == "/nix/runtime/bootstrap.sh"
+    assert "-c" not in exec_argv
 
 
 @pytest.mark.anyio
