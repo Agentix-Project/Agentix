@@ -68,12 +68,19 @@ pause/resume training-bridge controls land in this repo under
    each record on `add()` so a long agent run survives a host
    process crash. Keep the buffer; the sink is a tee.
 
-5. **Tracing integration (task 3 in the parent batch).** Open a
-   `trace.span("llm.request", model=…)` per request, attach the
-   `record_id`, emit `add_event("first_chunk")` for streaming, and
-   close on completion. Spans cross the sandbox/host boundary already
-   via `/trace`, so the captured calls show up next to the rest of
-   the agent's work in any OTel-compatible viewer (task 4).
+5. **~~Tracing integration~~ (shipped).** Every captured LLM call
+   now opens a `trace.span("llm.request", record_id=…, family=…,
+   model=…, stream=…)`; phase events fire for `capture.request`,
+   `translate.start/end` (both directions on Anthropic paths),
+   `upstream.start/end`, and `upstream.error`; the span closes with
+   `usage.prompt_tokens`, `usage.completion_tokens`,
+   `usage.cached_tokens`, `usage.reasoning_tokens`,
+   `usage.total_tokens`, and `duration_ms` attached. Status flips to
+   `error` on timeout and on a non-success upstream reply. Spans
+   ride the existing `/trace` SIO namespace, so captured calls show
+   up next to the rest of the agent's work in any OTel-compatible
+   viewer (task 4). Structured logs at `agentix.bridge.proxy` mirror
+   the same events.
 
 ## Medium-term — additional API families
 

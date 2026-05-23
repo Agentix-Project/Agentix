@@ -47,6 +47,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
 import agentix
+from agentix import trace
 
 from .detection import detect
 from .storage import CompletionRecord, InMemoryStore, make_record
@@ -58,6 +59,15 @@ from .transform import (
 )
 
 logger = logging.getLogger("agentix.bridge.proxy")
+LLM_SPAN_NAME = "llm.request"
+"""Span name emitted around every LLM call routed through the proxy.
+
+Each span carries `record_id`, `family`, `request_path`, and (on
+success) `model` + `usage.*` attributes; an `error` event is added
+when the upstream call fails or times out, along with `set_status`
+flipping to `error`. Sub-events fire during translation, capture, and
+the host round-trip so consumers can see where time went.
+"""
 
 NAMESPACE = "/abridge"
 REQUEST_EVENT = "llm_call"
@@ -235,90 +245,174 @@ async def _handle_request(
     family = detect(api_path, body)
     record_id = uuid.uuid4().hex
     started_at = time.time()
+    client_stream = bool(body.get("stream"))
+    requested_model = str(body.get("model") or "")
 
-    if family.is_anthropic:
-        upstream_body = anthropic_messages_to_openai(body)
-    else:
-        upstream_body = dict(body)
-    upstream_body["stream"] = False
-
-    payload = {
-        "record_id": record_id,
-        "family": family.value,
-        "request_path": api_path,
-        "upstream_body": upstream_body,
-        "client_stream": bool(body.get("stream")),
-        "anthropic_model": str(body.get("model") or "") if family.is_anthropic else None,
-    }
-
-    try:
-        result = await asyncio.wait_for(ns.request(REQUEST_EVENT, payload), timeout=request_timeout)
-    except TimeoutError:
-        record = make_record(
-            request_id=record_id,
-            family=family,
-            started_at=started_at,
-            request_path=api_path,
-            request_body=body,
-            upstream_body=upstream_body,
-            response_body=None,
-            status="timeout",
-            error="proxy timed out waiting for host",
-        )
-        await _emit_record(ns, record)
-        return JSONResponse(
-            {"error": {"type": "timeout", "message": record.error}}, status_code=504
-        )
-
-    if not isinstance(result, dict):
-        raise RuntimeError(f"abridge host returned non-dict result: {result!r}")
-    if "error" in result:
-        err = result["error"]
-        message = str(err.get("message") if isinstance(err, dict) else err)
-        record = make_record(
-            request_id=record_id,
-            family=family,
-            started_at=started_at,
-            request_path=api_path,
-            request_body=body,
-            upstream_body=upstream_body,
-            response_body=None,
-            status="error",
-            error=message,
-        )
-        await _emit_record(ns, record)
-        status = int(err.get("status_code", 502)) if isinstance(err, dict) else 502
-        return JSONResponse({"error": {"type": "upstream_error", "message": message}}, status_code=status)
-
-    openai_response = result.get("response") or {}
-    if not isinstance(openai_response, dict):
-        raise RuntimeError("abridge host returned non-dict response")
-
-    if family.is_anthropic:
-        anthropic_body = openai_to_anthropic_messages(
-            openai_response, response_model=str(body.get("model") or "")
-        )
-        response_body: dict[str, Any] = anthropic_body
-        if body.get("stream"):
-            envelope = anthropic_sse(anthropic_body)
-            response: Response = Response(content=envelope, media_type="text/event-stream")
-        else:
-            response = JSONResponse(anthropic_body)
-    else:
-        response_body = openai_response
-        response = JSONResponse(openai_response)
-
-    record = make_record(
-        request_id=record_id,
-        family=family,
-        started_at=started_at,
+    with trace.span(
+        LLM_SPAN_NAME,
+        record_id=record_id,
+        family=family.value,
         request_path=api_path,
-        request_body=body,
-        upstream_body=upstream_body,
-        response_body=response_body,
-    )
-    await _emit_record(ns, record)
-    return response
+        model=requested_model,
+        stream=client_stream,
+    ) as llm_span:
+        logger.info(
+            "abridge.llm.request",
+            extra={
+                "record_id": record_id,
+                "family": family.value,
+                "request_path": api_path,
+                "model": requested_model,
+            },
+        )
+        llm_span.add_event("capture.request", model=requested_model)
+
+        if family.is_anthropic:
+            llm_span.add_event("translate.start", direction="anthropic->openai")
+            logger.debug(
+                "abridge.llm.translate.request",
+                extra={"record_id": record_id, "direction": "anthropic->openai"},
+            )
+            upstream_body = anthropic_messages_to_openai(body)
+            llm_span.add_event("translate.end", direction="anthropic->openai")
+        else:
+            upstream_body = dict(body)
+        upstream_body["stream"] = False
+
+        payload = {
+            "record_id": record_id,
+            "family": family.value,
+            "request_path": api_path,
+            "upstream_body": upstream_body,
+            "client_stream": client_stream,
+            "anthropic_model": requested_model if family.is_anthropic else None,
+        }
+
+        llm_span.add_event("upstream.start", model=upstream_body.get("model"))
+        logger.info(
+            "abridge.llm.upstream.start",
+            extra={"record_id": record_id, "upstream_model": upstream_body.get("model")},
+        )
+        try:
+            result = await asyncio.wait_for(
+                ns.request(REQUEST_EVENT, payload), timeout=request_timeout
+            )
+        except TimeoutError:
+            err_message = "proxy timed out waiting for host"
+            logger.error(
+                "abridge.llm.timeout",
+                extra={"record_id": record_id, "timeout_s": request_timeout},
+            )
+            llm_span.add_event(
+                "upstream.error", error="timeout", timeout_s=request_timeout
+            )
+            llm_span.set_error(err_message, kind="timeout")
+            record = make_record(
+                request_id=record_id,
+                family=family,
+                started_at=started_at,
+                request_path=api_path,
+                request_body=body,
+                upstream_body=upstream_body,
+                response_body=None,
+                status="timeout",
+                error=err_message,
+            )
+            await _emit_record(ns, record)
+            return JSONResponse(
+                {"error": {"type": "timeout", "message": err_message}}, status_code=504
+            )
+
+        if not isinstance(result, dict):
+            raise RuntimeError(f"abridge host returned non-dict result: {result!r}")
+        if "error" in result:
+            err = result["error"]
+            message = str(err.get("message") if isinstance(err, dict) else err)
+            status = int(err.get("status_code", 502)) if isinstance(err, dict) else 502
+            llm_span.add_event("upstream.error", error=message, status_code=status)
+            llm_span.set_error(message, kind="upstream", status_code=status)
+            logger.warning(
+                "abridge.llm.upstream.error",
+                extra={
+                    "record_id": record_id,
+                    "status_code": status,
+                    "message": message[:200],
+                },
+            )
+            record = make_record(
+                request_id=record_id,
+                family=family,
+                started_at=started_at,
+                request_path=api_path,
+                request_body=body,
+                upstream_body=upstream_body,
+                response_body=None,
+                status="error",
+                error=message,
+            )
+            await _emit_record(ns, record)
+            return JSONResponse(
+                {"error": {"type": "upstream_error", "message": message}}, status_code=status
+            )
+
+        openai_response = result.get("response") or {}
+        if not isinstance(openai_response, dict):
+            raise RuntimeError("abridge host returned non-dict response")
+        llm_span.add_event(
+            "upstream.end",
+            response_id=str(openai_response.get("id", "")),
+            finish_reason=str(
+                ((openai_response.get("choices") or [{}])[0] or {}).get("finish_reason", "")
+            ),
+        )
+
+        if family.is_anthropic:
+            llm_span.add_event("translate.start", direction="openai->anthropic")
+            anthropic_body = openai_to_anthropic_messages(
+                openai_response, response_model=requested_model
+            )
+            llm_span.add_event("translate.end", direction="openai->anthropic")
+            response_body: dict[str, Any] = anthropic_body
+            if client_stream:
+                envelope = anthropic_sse(anthropic_body)
+                response: Response = Response(content=envelope, media_type="text/event-stream")
+            else:
+                response = JSONResponse(anthropic_body)
+        else:
+            response_body = openai_response
+            response = JSONResponse(openai_response)
+
+        record = make_record(
+            request_id=record_id,
+            family=family,
+            started_at=started_at,
+            request_path=api_path,
+            request_body=body,
+            upstream_body=upstream_body,
+            response_body=response_body,
+        )
+        llm_span.attrs.update(
+            {
+                "usage.prompt_tokens": record.usage.prompt_tokens,
+                "usage.completion_tokens": record.usage.completion_tokens,
+                "usage.cached_tokens": record.usage.cached_tokens,
+                "usage.reasoning_tokens": record.usage.reasoning_tokens,
+                "usage.total_tokens": record.usage.total_tokens,
+                "duration_ms": record.duration_ms,
+            }
+        )
+        llm_span.set_status("ok")
+        logger.info(
+            "abridge.llm.response",
+            extra={
+                "record_id": record_id,
+                "prompt_tokens": record.usage.prompt_tokens,
+                "completion_tokens": record.usage.completion_tokens,
+                "duration_ms": record.duration_ms,
+            },
+        )
+        await _emit_record(ns, record)
+        return response
 
 
 async def _emit_record(ns: _SandboxNamespace, record: CompletionRecord) -> None:
