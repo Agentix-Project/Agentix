@@ -1,7 +1,7 @@
 [project]
 name = "agentix-bridge"
-version = "0.2.0"
-description = "Minimal mitmproxy bridge for Agentix sandbox traffic (import as `agentix.bridge`)"
+version = "0.3.0"
+description = "Sandbox LLM proxy + host OpenAI-compatible client for Agentix (import as `agentix.bridge`)"
 requires-python = ">=3.11"
 dependencies = [
     "agentixx",
@@ -9,14 +9,6 @@ dependencies = [
     "httpx>=0.27",
     "uvicorn[standard]>=0.30",
 ]
-
-[project.optional-dependencies]
-mitm = [
-    "mitmproxy>=11",
-]
-
-[project.scripts]
-abridge-mitm = "agentix.bridge.mitm:main"
 
 # `agentixx` is the monorepo workspace root — used editable, never
 # from PyPI. Core edits are live here with no release step.
