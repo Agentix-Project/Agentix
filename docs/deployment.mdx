@@ -1,10 +1,9 @@
 ---
 title: Deployments
-description: Start bundle images as sandboxes and hand RuntimeClient a runtime URL.
+description: Start bundles as sandboxes and hand RuntimeClient a runtime URL.
 ---
 
-A deployment backend answers one question: where should this bundle image
-run?
+A deployment backend answers one question: where should this bundle run?
 
 Remote calls decide which function runs. Bundles decide what code exists
 in the sandbox. Deployments decide where the image is started and how it
@@ -116,5 +115,5 @@ error should surface before the backend starts creating infrastructure.
 ## Boundary
 
 Deployment backends should not know about agent wrappers, dataset
-scorers, or remote-call targets. They only start bundle images and return
-the runtime endpoint.
+scorers, or remote-call targets. They only stage bundles, start
+sandboxes, and return the runtime endpoint.

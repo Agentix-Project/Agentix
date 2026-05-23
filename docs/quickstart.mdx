@@ -100,7 +100,7 @@ hello-agentix/
 ```bash
 cd hello-agentix
 uv sync
-uv run agentix build . --name hello-agentix
+uv run agentix build . --name hello-agentix --format oci-image
 # → docker images now has hello-agentix:0.1.0 and hello-agentix:latest
 ```
 
@@ -111,13 +111,16 @@ uv run agentix build . --name hello-agentix
 2. Runs `nix build` against the vendored Nixpkgs pin: `uv2nix`
    produces a derivation for every entry in `uv.lock`,
    `symlinkJoin` merges them with the plugin trees.
-3. Streams the resulting `dockerTools.streamLayeredImage` tarball
-   into `docker load` and also applies a `:latest` alias for
-   convenience.
+3. Loads the resulting bundle image into Docker and also applies a
+   `:latest` alias for convenience.
 
 The bundle declares `VOLUME /nix` so the deployment can share it via
 `--volumes-from` (see below). No base image, no `FROM` directive, no
 runtime `pip install`.
+
+`agentix build` defaults to the portable tar bundle format. Use
+`--format oci-image` when you want to run the bundle with
+`DockerDeployment`.
 
 ## Call it
 

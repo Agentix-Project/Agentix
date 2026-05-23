@@ -161,14 +161,14 @@ From [`agentix-cookbook/examples/hello-agentix`](https://github.com/Agentiix/age
 ```bash
 cd examples/hello-agentix
 uv sync
-uv run agentix build . --name hello-agentix      # → hello-agentix:0.1.0
+uv run agentix build . --name hello-agentix --format oci-image
 uv run python run.py
 ```
 
 Cross-arch sandboxes:
 
 ```bash
-uv run agentix build . --name hello-agentix --platform linux/amd64
+uv run agentix build . --name hello-agentix --format oci-image --platform linux/amd64
 ```
 
 Full walkthrough: [quickstart](https://agentiix.github.io/quickstart).
