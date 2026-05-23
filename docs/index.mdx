@@ -8,13 +8,13 @@ Ship agents like software. Run them like experiments.
 Agentix turns any importable Python function into a sandboxed rollout
 primitive. Your trainer, evaluator, or orchestration script passes a
 function object. `agentix build` packages that code and its
-dependencies into a bundle image; Agentix then overlays that bundle
+dependencies into a bundle; Agentix then overlays that bundle
 onto a task image and gives the typed result back.
 
 ```bash
 cd examples/hello-agentix
 uv sync
-uv run agentix build . --name hello-agentix  # builds hello-agentix:0.1.0
+uv run agentix build . --name hello-agentix --format oci-image
 uv run python run.py
 ```
 
@@ -43,7 +43,7 @@ Agentix keeps the execution layer deliberately small:
   `fn.__qualname__`, ships args/kwargs as one pickle blob, and imports
   the function inside the worker.
 - **Bundles** package one Python project and its declared dependencies
-  into a deploy-ready image. Agents, tools, benchmark scorers, and user
+  into a deploy-ready bundle. Agents, tools, benchmark scorers, and user
   code are just packages in the same runtime venv.
 
 <CardGroup cols={2}>
@@ -97,7 +97,7 @@ Start with the complete runnable demo in
 [`agentix-cookbook/examples/hello-agentix`](https://github.com/Agentiix/agentix-cookbook/tree/main/examples/hello-agentix):
 
 ```bash
-uv run agentix build . --name hello-agentix
+uv run agentix build . --name hello-agentix --format oci-image
 uv run python run.py
 ```
 

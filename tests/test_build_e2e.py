@@ -1,4 +1,4 @@
-"""End-to-end test for `agentix build` — builds a real bundle image.
+"""End-to-end test for `agentix build --format oci-image`.
 
 Marked `e2e`: excluded from the default `pytest` run (`addopts` in
 pyproject) and from the unit CI job. Run it explicitly with `-m e2e`.
@@ -56,7 +56,7 @@ def _sh(image: str, script: str) -> str:
 def bundle() -> Iterator[str]:
     """Build `examples/hello-world` into a bundle image once."""
     build = subprocess.run(
-        [sys.executable, "-m", "agentix.cli", "build", str(_EXAMPLE), "--name", _IMAGE],
+        [sys.executable, "-m", "agentix.cli", "build", str(_EXAMPLE), "--name", _IMAGE, "--format", "oci-image"],
         capture_output=True,
         text=True,
     )

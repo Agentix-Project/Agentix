@@ -46,15 +46,15 @@ SandboxId = NewType("SandboxId", str)
 class SandboxConfig(BaseModel):
     """Configuration a deployment uses to provision a sandbox.
 
-    Two images, one container. `bundle` is the generic Agentix
+    Two artifacts, one sandbox. `bundle` is the generic Agentix
     bundle produced by `agentix build` — it carries the runtime server,
     user callables, and their Python deps under `/nix/runtime/`.
     `image` is the task-specific base (e.g. a SWE-bench task image, a
     customer environment image) the workload actually runs against.
 
-    The deployment overlays `bundle:/nix` onto `image` at start
-    time (no rebuild, no copy), then runs `/nix/runtime/bin/agentix-server`
-    as the entrypoint inside `image`'s filesystem.
+    The deployment makes the bundle's `/nix` tree appear at `/nix` in
+    the task sandbox, then runs `/nix/runtime/venv/bin/agentix-server`
+    inside `image`'s filesystem.
     """
 
     image: str = Field(
@@ -62,14 +62,14 @@ class SandboxConfig(BaseModel):
         "(e.g. `swebench/task-django__django-12345:latest`).",
     )
     bundle: str = Field(
-        description="Agentix runtime bundle image ref produced by "
-        "`agentix build`, e.g. `my-agent:0.1.0`. Mounted at "
-        "`/nix` in the sandbox via `--mount type=image`.",
+        description="Agentix runtime bundle ref produced by `agentix build`, "
+        "e.g. `my-agent:0.1.0` for Docker-compatible image bundles or a "
+        "backend-specific staged bundle reference.",
     )
     platform: str | None = Field(
         default=None,
-        description="Optional Docker/OCI platform for both the task image "
-        "and bundle image, e.g. `linux/amd64` or `linux/arm64`.",
+        description="Optional runtime platform for both the task image "
+        "and bundle artifact, e.g. `linux/amd64` or `linux/arm64`.",
     )
     env: dict[str, str] | None = Field(
         default=None,
