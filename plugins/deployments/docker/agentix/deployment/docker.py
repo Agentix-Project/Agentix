@@ -46,15 +46,17 @@ from uuid import uuid4
 
 import httpx
 
-from agentix.deployment.base import Deployment, Sandbox, SandboxConfig, SandboxId, SandboxInfo
+from agentix.deployment.base import (
+    BIND_PORT_ENV,
+    BUNDLE_RUNTIME_ENTRYPOINT,
+    Deployment,
+    Sandbox,
+    SandboxConfig,
+    SandboxId,
+    SandboxInfo,
+)
 
 logger = logging.getLogger("agentix.deployment.docker")
-
-# The bundle ships its own startup script at /nix/runtime/bootstrap.sh
-# (see `agentix/builder/bundle-build.sh`). Deployment backends just
-# exec it — they don't bake in any knowledge of Python venvs, LD paths,
-# or where `agentix-server` lives.
-_RUNTIME_ENTRYPOINT = "/nix/runtime/bootstrap.sh"
 
 
 async def _docker(*args: str, check: bool = True, retries: int = 0) -> tuple[int, bytes, bytes]:
@@ -145,7 +147,7 @@ class DockerDeployment(Deployment):
         sandbox_id = SandboxId(f"agentix-{uuid4().hex[:8]}")
         port = self._allocate_port()
 
-        env_args: list[str] = ["-e", f"AGENTIX_BIND_PORT={port}"]
+        env_args: list[str] = ["-e", f"{BIND_PORT_ENV}={port}"]
         if config.env:
             for k, v in config.env.items():
                 env_args.extend(["-e", f"{k}={v}"])
@@ -164,7 +166,7 @@ class DockerDeployment(Deployment):
             "--volumes-from",
             f"{carrier}:ro",
             "--entrypoint",
-            _RUNTIME_ENTRYPOINT,
+            BUNDLE_RUNTIME_ENTRYPOINT,
             config.image,
             retries=3,
         )

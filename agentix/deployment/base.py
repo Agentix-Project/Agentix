@@ -37,6 +37,33 @@ from pydantic import BaseModel, Field
 
 from agentix.deployment._plugin import Registry
 
+# ── Bundle contract ──────────────────────────────────────────────────
+# These constants are part of the bundle ↔ deployment-backend
+# protocol. Every bundle produced by `agentix build` puts the runtime
+# tree at `/nix/runtime/` and its entrypoint at
+# `/nix/runtime/bootstrap.sh` (see `agentix/builder/bootstrap.sh` for
+# the source of that script). Every deployment backend imports these
+# constants instead of hardcoding the paths — that way "rename the
+# bundle entrypoint" / "move the runtime tree" / etc. land in one
+# place, not N.
+
+BUNDLE_NIX_ROOT = "/nix"
+"""Where the bundle's `/nix` tree is bind-mounted inside the task container."""
+
+BUNDLE_RUNTIME_ROOT = "/nix/runtime"
+"""The runtime sub-tree under the bind-mounted bundle root."""
+
+BUNDLE_RUNTIME_ENTRYPOINT = "/nix/runtime/bootstrap.sh"
+"""Path inside the bundle that deployment backends exec as the
+container entrypoint. The script preps Nix-managed runtime PATHs and
+hands off to `agentix-server` (via uvicorn). Backends should never
+have to know what the script does — only that it exists at this path."""
+
+BIND_PORT_ENV = "AGENTIX_BIND_PORT"
+"""Env var the bundle's `agentix-server` reads to choose its listen
+port. Backends pick a free host port, pass it via this name."""
+
+
 SandboxId = NewType("SandboxId", str)
 """Deployment-side handle for a running sandbox container. Returned by
 `Deployment.create(...)` and threaded back through `delete(...)` /

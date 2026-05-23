@@ -54,13 +54,17 @@ async def test_create_passes_platform_to_carrier_and_sandbox(monkeypatch: pytest
     # entrypoint — no more `-c '<inline bootstrap>'` indirection. The
     # script ships with the bundle (built by
     # `agentix/builder/bundle-build.sh` from `agentix/builder/bootstrap.sh`).
+    # Path lives on `agentix.deployment.base.BUNDLE_RUNTIME_ENTRYPOINT`
+    # so every backend reads the same constant.
+    from agentix.deployment.base import BUNDLE_RUNTIME_ENTRYPOINT
+
     assert run_call[-1] == "python:3.13-slim"
     assert "-c" not in run_call
     assert (
         run_call[run_call.index("--entrypoint") + 1]
-        == "/nix/runtime/bootstrap.sh"
+        == BUNDLE_RUNTIME_ENTRYPOINT
     )
-    assert docker_mod._RUNTIME_ENTRYPOINT == "/nix/runtime/bootstrap.sh"
+    assert BUNDLE_RUNTIME_ENTRYPOINT == "/nix/runtime/bootstrap.sh"
 
 
 @pytest.mark.asyncio

@@ -48,15 +48,18 @@ import tarfile
 from pathlib import Path
 from uuid import uuid4
 
-from agentix.deployment.base import Deployment, Sandbox, SandboxConfig, SandboxId, SandboxInfo
+from agentix.deployment.base import (
+    BIND_PORT_ENV,
+    BUNDLE_NIX_ROOT,
+    BUNDLE_RUNTIME_ENTRYPOINT,
+    Deployment,
+    Sandbox,
+    SandboxConfig,
+    SandboxId,
+    SandboxInfo,
+)
 
 logger = logging.getLogger("agentix.deployment.apptainer")
-
-# The bundle ships its own startup script at /nix/runtime/bootstrap.sh
-# (see `agentix/builder/bundle-build.sh`). Deployment backends just
-# exec it — they don't bake in any knowledge of Python venvs, LD paths,
-# or where `agentix-server` lives.
-_RUNTIME_ENTRYPOINT = "/nix/runtime/bootstrap.sh"
 
 _DEFAULT_CACHE = Path.home() / ".cache" / "agentix" / "apptainer"
 
@@ -228,7 +231,7 @@ class ApptainerDeployment(Deployment):
         sandbox_id = SandboxId(f"agentix-{uuid4().hex[:8]}")
         port = self._allocate_port()
 
-        env_args: list[str] = ["--env", f"AGENTIX_BIND_PORT={port}"]
+        env_args: list[str] = ["--env", f"{BIND_PORT_ENV}={port}"]
         if config.env:
             for k, v in config.env.items():
                 env_args.extend(["--env", f"{k}={v}"])
@@ -238,10 +241,10 @@ class ApptainerDeployment(Deployment):
             "exec",
             *_isolation_args(),
             "--bind",
-            f"{nix_root}:/nix:ro",
+            f"{nix_root}:{BUNDLE_NIX_ROOT}:ro",
             *env_args,
             str(sif),
-            _RUNTIME_ENTRYPOINT,
+            BUNDLE_RUNTIME_ENTRYPOINT,
         ]
         logger.info("apptainer exec %s (port=%d)", sandbox_id, port)
         proc = await asyncio.create_subprocess_exec(
