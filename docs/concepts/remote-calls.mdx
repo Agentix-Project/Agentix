@@ -51,21 +51,16 @@ becomes this wire payload:
 }
 ```
 
-Unary, streaming, and bidirectional calls use Socket.IO events on the
-same runtime server. HTTP is only used for `/health`.
+Remote calls use Socket.IO on the same runtime server. HTTP is used for
+`/health`.
 
-## Call Shapes
+## Call Shape
 
-The function signature determines how the client behaves.
+Current public behavior is unary RPC:
 
 | Function shape | Client usage | Transport |
 | --- | --- | --- |
-| `async def f(...) -> T` | `await client.remote(f, ...)` | Socket.IO unary |
-| `async def f(...) -> AsyncIterator[T]` | `async for item in client.remote(f, ...)` | Socket.IO stream |
-| `async def f(..., inbox: Channel[I]) -> AsyncIterator[T]` | send inputs through `Channel`, receive with `async for` | Socket.IO bidi |
-
-Sync functions are valid for unary calls. Streams and bidi calls require
-async generators.
+| `def f(...) -> T` or `async def f(...) -> T` | `await client.remote(f, ...)` | Socket.IO unary |
 
 ## Unary Example
 
@@ -80,59 +75,10 @@ from app import run
 result = await client.remote(run, input="hello")
 ```
 
-## Streaming Example
-
-```python title="app.py"
-from collections.abc import AsyncIterator
-
-
-async def count(limit: int) -> AsyncIterator[int]:
-    for value in range(limit):
-        yield value
-```
-
-```python
-from app import count
-
-async for value in client.remote(count, limit=3):
-    print(value)
-```
-
-## Bidirectional Example
-
-```python title="app.py"
-from collections.abc import AsyncIterator
-from agentix import Channel
-
-
-async def echo(inbox: Channel[str]) -> AsyncIterator[str]:
-    async for message in inbox:
-        yield message
-```
-
-```python
-from agentix import Channel
-from app import echo
-
-inbox = Channel[str]()
-conversation = client.remote(echo, inbox)
-
-await inbox.send("hello")
-await inbox.close()
-
-async for message in conversation:
-    print(message)
-```
-
 ## Correlation
 
-Attach a `call_id` when rollout traces need a stable key:
+Each call is tracked internally with a `call_id` for routing and
+observability.
 
-```python
-with client.call_context(call_id="rollout-42.step-7"):
-    result = await client.remote(run, input="hello")
-```
-
-The runtime forwards the `call_id` in the request payload. Agentix keeps
-errors in-band: unary requests return an RPC response with either a value
-or an error, and stream or bidi calls emit an error event.
+Agentix keeps errors in-band: unary requests return an RPC response with
+either a value or an error.

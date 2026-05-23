@@ -19,9 +19,7 @@ dataset package, start with [integrate an agent](/integrate-agent) or
 ```bash
 git clone https://github.com/Agentiix/Agentix.git
 cd Agentix
-pip install -e '.[dev]'
-pip install -e ../Agentix-Runtime-Basic
-pip install -e ../Agentix-Deployment-Docker
+uv sync --extra dev
 ```
 
 The PyPI distribution is named `agentixx`; the import package is
@@ -54,7 +52,7 @@ Rebuild the base image when runtime code or dependency versions change.
 
 ```bash
 agentix build
-agentix build path/to/project -o my-rollout:dev
+agentix build path/to/project --name my-rollout:dev
 agentix build path/to/project --dry-run
 ```
 
@@ -69,7 +67,7 @@ import asyncio
 
 from agentix import RuntimeClient
 from agentix.bash import run
-from agentix.deployment.base import SandboxConfig, session
+from agentix import SandboxConfig, session
 from agentix.deployment.docker import DockerDeployment
 
 

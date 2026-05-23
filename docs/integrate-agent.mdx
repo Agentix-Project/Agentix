@@ -11,7 +11,7 @@ There is no base class, registry, or framework-specific adapter layer.
 The integration is useful because callers can import it and write:
 
 ```python
-from agentix.claude_code import run
+from agentix.agents.claude_code import run
 
 result = await client.remote(run, instruction="fix the bug", workdir="/testbed")
 ```
@@ -41,9 +41,8 @@ the repository under `/testbed`, or invoke a local Python framework.
 agentix-claude-code/
 ├── pyproject.toml
 ├── default.nix
-└── src/agentix/
-    └── claude_code/
-        └── __init__.py
+└── src/
+    └── __init__.py
 ```
 
 Use `default.nix` when the agent needs a system binary that should be
@@ -51,7 +50,7 @@ available on the worker PATH. Pure Python integrations can omit it.
 
 ## 2. Function Surface
 
-```python title="src/agentix/claude_code/__init__.py"
+```python title="src/__init__.py"
 from __future__ import annotations
 
 import asyncio
@@ -126,7 +125,7 @@ packages = ["src/agentix"]
 After installation, callers can import the function normally:
 
 ```python
-from agentix.claude_code import run
+from agentix.agents.claude_code import run
 ```
 
 When a bundle includes this package, the sandbox worker can import the
@@ -160,62 +159,6 @@ patch = diff.stdout
 
 The caller decides how to compose repo setup, the agent run, patch
 extraction, scoring, and logging.
-
-## Streaming Output
-
-For long-running agents, expose a streaming function next to `run`.
-Annotate it as `AsyncIterator[T]`; Agentix automatically uses the stream
-transport.
-
-```python
-from collections.abc import AsyncIterator
-from dataclasses import dataclass
-from typing import Literal
-
-
-@dataclass
-class TokenChunk:
-    text: str
-    type: Literal["token"] = "token"
-
-
-@dataclass
-class RunDone:
-    result: RunResult
-    type: Literal["done"] = "done"
-
-
-async def run_stream(instruction: str, **kwargs) -> AsyncIterator[TokenChunk | RunDone]:
-    proc = await asyncio.create_subprocess_exec(
-        "claude",
-        "-p",
-        instruction,
-        "--output-format",
-        "stream-json",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-
-    async for raw in proc.stdout:
-        event = json.loads(raw)
-        if event["type"] == "token":
-            yield TokenChunk(text=event["text"])
-        if event["type"] == "done":
-            yield RunDone(result=_build_result(event))
-```
-
-Callers iterate over the remote result:
-
-```python
-from agentix.claude_code import run_stream
-
-async for event in client.remote(run_stream, instruction="fix the bug"):
-    match event:
-        case TokenChunk(text=text):
-            print(text, end="")
-        case RunDone(result=result):
-            return result
-```
 
 ## Boundaries
 

@@ -22,8 +22,7 @@ In code, create a deployment, pass a `SandboxConfig`, and use the
 returned `runtime_url` with `RuntimeClient`.
 
 ```python
-from agentix import RuntimeClient
-from agentix.deployment.base import SandboxConfig, session
+from agentix import RuntimeClient, SandboxConfig, session
 from agentix.deployment.docker import DockerDeployment
 
 deployment = DockerDeployment()
@@ -68,7 +67,7 @@ After installation, the backend name becomes available to
 `load_deployment`:
 
 ```python
-from agentix.deployment.base import load_deployment
+from agentix import load_deployment
 
 FlyDeployment = load_deployment("fly")
 ```
@@ -81,7 +80,7 @@ three async methods.
 ```python title="my_deploy/__init__.py"
 import os
 
-from agentix.deployment.base import Sandbox, SandboxConfig, SandboxId, SandboxInfo
+from agentix import Sandbox, SandboxConfig, SandboxId, SandboxInfo
 
 
 class FlyDeployment:

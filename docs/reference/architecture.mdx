@@ -43,14 +43,20 @@ from app import run
 result = await client.remote(run, input="hello")
 ```
 
-The client serializes the function object with stdlib pickle:
+The client serializes a callable reference from the function object:
 
 ```python
-callable_payload = pickle.dumps(run)
+callable_ref = f"{run.__module__}::{run.__qualname__}"
 ```
 
-The runtime worker unpickles the callable inside the sandbox, validates
-the provided arguments, and invokes it.
+Arguments are serialized separately with stdlib pickle:
+
+```python
+arguments = pickle.dumps((args, kwargs))
+```
+
+The runtime worker resolves the callable reference inside the sandbox,
+unpickles arguments, validates them, and invokes the target.
 
 ## Call Flow
 
@@ -71,12 +77,9 @@ the provided arguments, and invokes it.
 | Call shape | Function shape | Transport | Client behavior |
 | --- | --- | --- | --- |
 | Unary | `async def f(...) -> T` or sync `def f(...) -> T` | Socket.IO | `await client.remote(f, ...)` |
-| Stream | `async def f(...) -> AsyncIterator[T]` | Socket.IO | `async for item in client.remote(f, ...)` |
-| Bidi | `async def f(..., inbox: Channel[I]) -> AsyncIterator[T]` | Socket.IO | send through `Channel`, receive with `async for` |
 
 Unary responses are msgpack RPC envelopes with either `value` or
-`error`. Stream and bidi calls emit item, end, and error events keyed by
-`call_id`.
+`error`.
 
 ## Bundle Layout
 

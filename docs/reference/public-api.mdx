@@ -1,0 +1,108 @@
+---
+title: Public API
+description: Stable APIs users can import and call from Python.
+---
+
+This page is the source of truth for Agentix public APIs.
+
+If an API is not listed here, treat it as internal and subject to change.
+
+## Compatibility contract
+
+- `RuntimeClient.remote(fn, *args, **kwargs)` is a stable public API.
+- `client.remote` has no default retry behavior.
+- `client.remote` returns the target function result on success, and raises
+  on failure.
+- tracing and logging transport details are internal implementation details.
+
+## Core Python API (`import agentix`)
+
+Top-level names exported by `agentix`:
+
+- `RuntimeClient`
+- `RemoteCallError`
+- `Namespace`
+- `RemoteSioError`
+- `register_namespace`
+- `AsyncClientNamespace`
+- `Deployment`
+- `Sandbox`
+- `SandboxConfig`
+- `SandboxId`
+- `SandboxInfo`
+- `load_deployment`
+- `register_deployment`
+- `session`
+- `log`
+- `trace`
+- `__version__`
+
+## Runtime client API
+
+Primary user entrypoint:
+
+```python
+from agentix import RuntimeClient
+
+async with RuntimeClient(runtime_url) as client:
+    result = await client.remote(fn, *args, **kwargs)
+```
+
+Also public:
+
+- `RuntimeClient.health()`
+- `RuntimeClient.register_namespace(ns)`
+
+## Deployment API
+
+Core deployment lifecycle:
+
+```python
+from agentix import SandboxConfig, load_deployment, session
+
+deployment_cls = load_deployment("local")
+deployment = deployment_cls()
+
+config = SandboxConfig(image="python:3.13-slim", bundle="my-bundle:0.1.0")
+async with session(deployment, config) as sandbox:
+    ...
+```
+
+## Namespace extension API
+
+Sandbox-side namespace handlers:
+
+```python
+from agentix import Namespace, register_namespace
+```
+
+Host-side namespace handlers:
+
+```python
+from agentix import AsyncClientNamespace
+```
+
+## Plugin APIs (when installed)
+
+These modules are public once their plugin package is installed:
+
+- `agentix.bash`
+  - `run(...)`
+  - `run_stream(...)`
+- `agentix.files`
+  - `upload(...)`
+  - `download(...)`
+- `agentix.agents.claude_code`
+  - `run(...)`
+- `agentix.plugins.datasets.swe`
+  - `prepare_env(...)`
+  - `score(...)`
+
+## CLI entrypoints
+
+Public command-line entrypoints:
+
+- `agentix`
+- `agentix-server`
+
+Plugin entrypoints may add their own commands (for example, bridge tooling).
