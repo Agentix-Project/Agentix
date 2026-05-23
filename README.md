@@ -21,8 +21,9 @@ and orchestration code without writing a new runner for every pairing.
 Agentix has two primitives:
 
 - **Remote calls**: `client.remote(fn, *args, **kwargs)` runs a Python
-  callable inside a sandbox worker. The callable is serialized with
-  stdlib pickle, Python's native callable reference mechanism.
+  callable inside a sandbox worker. The callable is encoded as an
+  import-path `RemoteCallable`; args, kwargs, and return values travel
+  as pickle blobs.
 - **Bundles**: `agentix build [path]` packages a Python project and its
   declared dependencies into a deploy-ready bundle image.
 
@@ -62,9 +63,10 @@ call it.
 
 ## What Ships
 
-- **Unary remote calls** (`await client.remote(fn, *args, **kwargs)`)
-  across the host-to-sandbox boundary. One shape. Pickled callable +
-  pickled args/kwargs go in; the pickled return value comes back.
+- **Remote calls** (`await client.remote(fn, *args, **kwargs)`) across
+  the host-to-sandbox boundary. The host encodes `fn` as a
+  `RemoteCallable` import path; args, kwargs, and the return value
+  travel as pickle blobs.
 - **One runtime worker process today** behind an internal worker backend
   boundary, so future pools or per-call isolation can stay API-compatible.
 - **Tracing** as an orthogonal layer: `agentix.trace.span(...)` inside
@@ -132,7 +134,7 @@ Host process
     builds RemoteCallable from fn's import path
     pickles (args, kwargs) as one blob
         |
-        v  Socket.IO "unary"
+        v  Socket.IO `/` (call / call:result / call:error / cancel)
 Sandbox
   agentix-server
         |  msgpack frame
@@ -144,10 +146,10 @@ Sandbox
     pickles the result back
 ```
 
-The wire carries a single shape: unary. Cancellation has its own
-event (`cancel`). Trace lifecycle events cross as a separate
-broadcast channel (`trace:event`). HTTP is kept only for `/health`.
-Errors stay in-band.
+`c.remote()` rides Socket.IO `/`; cancellation has its own event
+(`cancel`). Trace, log, and plugin traffic use dedicated SIO namespaces
+on the same connection (`/trace`, `/log`, `/<plugin>`). HTTP is kept
+only for `/health`. Errors stay in-band.
 
 ## Repository Map
 

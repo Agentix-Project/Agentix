@@ -3,8 +3,8 @@
 Agentix keeps two user-facing concepts:
 
 - **Remote calls.** `c.remote(fn, ...)` calls a callable target inside a
-  sandbox. The callable is serialized with stdlib pickle, and the call
-  shape is detected from its signature.
+  sandbox. The callable is encoded as an import-path `RemoteCallable`;
+  args and kwargs travel as a pickle blob.
 - **Bundle.** `agentix build [path]` packages one project root and its
   declared dependencies into a deploy-ready runtime image.
 
@@ -16,10 +16,12 @@ downstream users of the library.
 
 Current architecture:
 
-- [x] `RuntimeClient.remote(fn, ...)` for unary, stream, and bidi calls.
+- [x] `RuntimeClient.remote(fn, ...)` runs an importable callable in the
+      sandbox and returns its value.
 - [x] One runtime server per sandbox image.
 - [x] One worker subprocess per runtime server.
-- [x] Pickle callable payloads for Python-native callable references.
+- [x] Import-path `RemoteCallable` for function identity; pickle for
+      args, kwargs, and return values.
 - [x] Callable invocation inside `agentix.runtime.server`; targets are not
       required to be pure functions. If Python can resolve the callable
       from the requested target, Agentix should be able to invoke it.
@@ -28,6 +30,8 @@ Current architecture:
 - [x] One merged `/nix/runtime` venv containing the framework, user
       project, integrations, and transitive dependencies.
 - [x] Deployment backend plugin axis via `agentix.deployment`.
+- [x] Side channels over the same Socket.IO connection: `/trace`, `/log`,
+      and plugin namespaces via `agentix.sio`.
 
 The single-worker model is intentional for now. It keeps runtime state
 and debugging simple while the public API is still being shaped.
@@ -66,26 +70,27 @@ or integration concern, not a framework constraint.
 
 The framework's responsibility is narrower:
 
-- serialize the callable with stdlib pickle
-- unpickle and invoke it inside the sandbox
-- validate/coerce inputs and outputs through annotations when present
+- encode importable callables as `RemoteCallable`
+- unpickle args/kwargs and invoke the target inside the sandbox
+- pickle the return value back
 - surface errors in-band through the runtime protocol
+
+Future work may add optional annotation-driven validation/coercion on
+top of pickle without changing the default path.
 
 ### Transport Strategy
 
-Remote calls use one Socket.IO connection for unary, stream, and bidi.
-HTTP is kept only for `/health`.
+`c.remote()` and side channels share one Socket.IO connection. HTTP is
+kept only for `/health`.
 
-This gives the runtime one correlation, cancellation, and error path for
-all call shapes. Future trace/log event fan-out should share the same
-connection rather than adding another transport.
+`c.remote()` uses the `/` namespace (`call`, `call:result`,
+`call:error`, `cancel`). Trace, log, and plugin traffic use dedicated
+namespaces bridged through the worker pipe via `agentix.sio`.
 
 Remaining transport work:
 
-- collapse the separate unary / stream / bidi event names into a single
-  `call:*` event family if the current naming becomes noisy
-- let the worker classify actual return values at runtime instead of
-  relying only on pre-call shape detection
+- optional annotation-driven msgpack codec path alongside pickle
+- collapse event naming if the current `call:*` family becomes noisy
 
 ## Sibling Repos
 

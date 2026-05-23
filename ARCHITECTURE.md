@@ -33,9 +33,10 @@ import app
 result = await client.remote(app.run, input="hello")
 ```
 
-Both forms give Agentix the same callable object. Agentix transports
-callables with stdlib pickle, so module-level functions/classes and
-pickleable callable objects are the supported boundary.
+Both forms give Agentix the same callable object. The host encodes it as
+an import-path `RemoteCallable` (`module::qualname`). Lambdas, bound
+methods, partials, and other non-importable callables are rejected at
+the host before the call leaves.
 
 ## Bundle
 
@@ -93,7 +94,7 @@ At runtime, all installed modules live in the same Python environment:
 
 If the project includes `default.nix`, `agentix build` adds a Nix
 builder stage, copies the derivation closure into the final image, and
-symlinks `bin/*` into `/nix/runtime/bin/`.
+symlinks `bin/*` into `/nix/runtime/bin`.
 
 Worker processes inherit the runtime server environment, with the
 bundle venv and Nix runtime bins prepended to `PATH`:
@@ -111,9 +112,12 @@ await asyncio.create_subprocess_exec("claude", "-p", instruction)
 
 ## Remote Calls
 
-`RuntimeClient.remote(fn, ...)` serializes the callable with stdlib
-pickle and sends that callable payload plus args and kwargs to the
-runtime. Pickle is Python's native callable reference mechanism.
+`RuntimeClient.remote(fn, ...)` runs one Python callable in the sandbox
+and returns its value. The host:
+
+1. builds a `RemoteCallable` from `fn.__module__` and `fn.__qualname__`
+2. pickles `(args, kwargs)` with stdlib pickle
+3. sends both over Socket.IO on the `/` namespace
 
 For example:
 
@@ -123,70 +127,50 @@ from agentix.swebench import run
 score = await client.remote(run, instance=inst, patch=patch)
 ```
 
-is sent as a callable payload with a display name like:
-
-```text
-agentix.swebench::run
-```
-
-The request body contains the callable payload plus serialized args and
-kwargs:
+becomes a wire payload like:
 
 ```python
 {
-    "callable_payload": b"...pickle...",
-    "display_name": "agentix.swebench::run",
-    "shape": "unary",
-    "args": [],
-    "kwargs": {"instance": inst, "patch": patch},
+    "call_id": "…uuid…",
+    "callable": "agentix.swebench::run",
+    "arguments": pickle.dumps(((), {"instance": inst, "patch": patch})),
 }
 ```
 
-The runtime worker unpickles the callable inside the sandbox and invokes
-it. For importable callables this resolves to the sandbox-installed
-module implementation.
+The runtime server forwards the request to one worker subprocess. The
+worker imports the module, resolves the function, unpickles args/kwargs,
+calls it (awaiting when the return value is awaitable), and pickles the
+result back.
 
-Arguments are passed as msgpack payloads. Before sending, the client
-uses the local function signature and type annotations to serialize
-positional and keyword arguments. Inside the worker, the signature is
-resolved from the unpickled callable, and pydantic validates/coerces the
-received values before the callable is invoked. Return values and stream
-items are serialized the same way on the way back.
+Sync and async functions both work as targets. Args and return values
+round-trip as pickle blobs; the runtime does not run pydantic
+validation on the wire today.
 
 ## Flow
 
 ```text
 Host
   RuntimeClient.remote(fn, ...)
-    pickle callable
-    detect unary / stream / bidi
-    encode args and kwargs
+    RemoteCallable._resolve(fn)  ->  module::qualname
+    pickle.dumps((args, kwargs))
       |
-      v
+      v  Socket.IO `/` — call / call:result / call:error / cancel
 Sandbox
   agentix-server
       |
-      v
+      v  length-prefixed msgpack frames on a private pipe
 Single runtime worker process
-  unpickle callable
+  RemoteCallable.resolve()  ->  import fn
+  pickle.loads(arguments)
   call fn(*args, **kwargs)
+  pickle.dumps(result)
 ```
 
-## Call Shapes
+Side channels on the same Socket.IO connection:
 
-Agentix supports three call shapes:
-
-| Function shape | Transport | Client usage |
-| --- | --- | --- |
-| normal async function | Socket.IO unary event | `await client.remote(fn, ...)` |
-| async generator | Socket.IO stream | `async for item in client.remote(fn, ...)` |
-| async generator with `Channel[T]` input | Socket.IO bidi | send through `Channel`, receive with `async for` |
-
-Shape detection is structural:
-
-- async generator -> stream
-- async generator with a `Channel[T]` parameter -> bidi
-- everything else -> unary
+- `/trace` — span lifecycle from sandbox to host
+- `/log` — stdlib logging records from sandbox to host
+- `/<plugin>` — plugin namespaces registered via `agentix.sio`
 
 ## Worker Model
 
@@ -197,11 +181,10 @@ without changing `RuntimeClient.remote(...)`.
 
 For each call, the worker:
 
-1. unpickles the callable payload
-2. detects and verifies the expected call shape
-3. validates args with pydantic
-4. calls the callable
-5. serializes the return value or stream items
+1. resolves the `RemoteCallable` import path
+2. unpickles `(args, kwargs)`
+3. calls the callable (awaiting when needed)
+4. pickles the return value
 
 The worker uses the same `/nix/runtime` venv as the runtime server, so
 anything installed into the bundle can be imported by the worker.
@@ -228,6 +211,8 @@ runtime environment.
 
 ```text
 Bundle = what code and dependencies exist in the sandbox
-client.remote(fn) = which callable to call
-Worker = where the callable executes
+client.remote(fn) = which importable function to call
+Worker = where user code executes
+agentix.sio = host ↔ sandbox side channels (trace, log, plugins)
+Deployment = where the bundle image runs
 ```

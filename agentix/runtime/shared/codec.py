@@ -12,8 +12,8 @@ Extension types registered:
     the same header format.
   * `_EXT_PYDANTIC` (2) — pydantic `BaseModel` instances. Encoded as
     `(qualname, model_dump(mode="python") packed)`. On the receiving
-    side the qualname is informational; the decoded dict is what the
-    runtime callable invoker feeds into `TypeAdapter.validate_python`.
+    side the qualname is informational; the decoded dict is returned
+    as a plain mapping for callers to interpret.
 
 Numpy is optional — if it's not installed, the ndarray hook is just
 skipped (the type never appears on the wire). pydantic is a hard dep
@@ -76,8 +76,7 @@ def _decode_ext(code: int, data: bytes) -> Any:
         shape = tuple(int(s) for s in shape_str.split(",") if s)
         return np.frombuffer(raw, dtype=np.dtype(dtype_str)).reshape(shape)
     if code == _EXT_PYDANTIC:
-        # Decoded as a plain dict; the receiving side's TypeAdapter
-        # validates into the concrete model class.
+        # Decoded as a plain dict for callers to interpret.
         return msgpack.unpackb(data, ext_hook=_decode_ext, raw=False)
     return msgpack.ExtType(code, data)
 

@@ -5,7 +5,7 @@ sandboxes. One wheel, two namespaces:
 
 | Namespace | Purpose |
 |---|---|
-| `agentix.bash` | execute shell commands, stream stdout/stderr |
+| `agentix.bash` | execute shell commands |
 | `agentix.files` | upload/download/list files inside the sandbox |
 
 These two used to ship as separate `agentix-bash` and `agentix-files`
@@ -21,16 +21,16 @@ pip install agentix-runtime-basic
 
 ## Use
 
+Call `run` from the host and await one `BashResult`:
+
 ```python
 from agentix import RuntimeClient
-from agentix.bash import run as bash_run, run_stream as bash_stream
+from agentix.bash import run as bash_run
 from agentix.files import upload, download
 
 async with RuntimeClient(sandbox.runtime_url) as c:
     await c.remote(upload, path="data.json", content=blob)
     result = await c.remote(bash_run, command="cat data.json | jq .")
-    async for ev in c.remote(bash_stream, command="pytest -q"):
-        ...  # ev is a BashStdout / BashStderr / BashExit / BashError
 ```
 
 Each namespace is "the package IS the namespace": top-level async

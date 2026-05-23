@@ -191,7 +191,9 @@ def run(
     raise NotImplementedError("call via RuntimeClient.remote(<name>.run, ...)")
 ```
 
-The signature is the contract. mypy / pyright validate the caller; pydantic on the wire validates the over-the-wire payload.
+The signature is the contract on the caller side — mypy / pyright validate
+host code against it. Over the wire, args and return values travel as
+pickle blobs today; the worker does not run pydantic validation on them.
 
 ### 3. `_impl.py` — real bodies
 

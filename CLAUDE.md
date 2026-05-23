@@ -145,7 +145,7 @@ One line per system:
 - **runtime.client** — `RuntimeClient.remote(fn, ...)` over Socket.IO
   `/`. `register_namespace(ns)` attaches plugin handlers.
 - **runtime.server** — `agentix-server`; owns one worker subprocess,
-  invokes pickle-resolved callables, dynamic namespace forwarding for
+  resolves import-path callables, dynamic namespace forwarding for
   `/trace`, `/log`, and any plugin `/<package-name>`.
 - **deployment** — host-side `Deployment` Protocol and backend lookup.
 - **cli** — `agentix build [path]` (host) + `agentix.cli._assemble`
@@ -155,9 +155,9 @@ One line per system:
 
 ## Remote Call Implementation
 
-`c.remote(fn, ...)` serializes `fn` with stdlib pickle (wrapped in a
-base64-encoded `RemoteCallable` str). args + kwargs travel as a single
-pickle blob.
+`c.remote(fn, ...)` encodes `fn` as an import-path `RemoteCallable`
+(`module::qualname`). Args and kwargs travel as one pickle blob; the
+return value comes back as another pickle blob.
 
 ```python
 # my_project/tasks.py
@@ -171,9 +171,8 @@ result = await client.remote(run, seed=42)
 ```
 
 Sync functions work too; the invoker awaits only when the result is
-awaitable. Only the unary call shape is supported — for streaming /
-bidirectional needs, build it on top of the generic `agentix.sio`
-namespace API.
+awaitable. Side-channel traffic (trace events, log records, plugin
+events) rides separate SIO namespaces via `agentix.sio`.
 
 ## Plugin Extension via Namespaces
 
