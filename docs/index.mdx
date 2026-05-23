@@ -1,15 +1,14 @@
 ---
 title: Agentix
-description: Sandboxed rollouts you call like typed Python.
+description: The universal bridge between agents and environments.
 ---
 
-Ship agents like software. Run them like experiments.
+**The universal bridge between agents and environments.**
 
-Agentix turns any importable Python function into a sandboxed rollout
-primitive. Your trainer, evaluator, or orchestration script passes a
-function object. `agentix build` packages that code and its
-dependencies into a bundle image; Agentix then overlays that bundle
-onto a task image and gives the typed result back.
+Train, evaluate, and collect rollouts across any agent and any sandbox.
+`agentix build` packages your stack; `client.remote` runs callables inside
+it; abridge captures trajectories for eval and RL—no custom rollout
+microservice per pairing.
 
 ```bash
 cd examples/hello-agentix

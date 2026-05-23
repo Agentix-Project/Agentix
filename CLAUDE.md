@@ -1,5 +1,15 @@
 # Project Conventions
 
+## Product context
+
+Agentix targets **agent eval**, **RL rollouts**, and **rollout data
+collection** (via `agentix.trace` + `abridge`). Positioning: a friendlier
+alternative to HTTP rollout servers such as
+[ProRL-Agent-Server](https://github.com/NVIDIA-NeMo/ProRL-Agent-Server)—
+integrate with importable callables and `client.remote(fn, ...)`, not
+custom `AgentHandler` services. Public slogan: *The universal bridge
+between agents and environments.*
+
 ## Two Concepts
 
 Agentix has exactly two ideas:

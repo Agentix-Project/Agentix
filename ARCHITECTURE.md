@@ -1,5 +1,17 @@
 # Agentix Architecture
 
+## Audience
+
+Agentix is a user-friendly framework for **agent evaluation**, **RL
+rollout execution**, and **training data collection**. Host-side trainers
+and eval scripts orchestrate sandboxes; sandbox-side code is ordinary
+Python (agents, bash, scorers). [`abridge`](plugins/abridge/README.md)
+correlates traces into rollout logs for RL buffers. The design goal is
+lower integration tax than bespoke rollout servers—see the README
+comparison with [ProRL-Agent-Server](https://github.com/NVIDIA-NeMo/ProRL-Agent-Server).
+
+## Core pieces
+
 Agentix has two core pieces:
 
 1. **Bundle**: build one runtime image containing the framework, user
