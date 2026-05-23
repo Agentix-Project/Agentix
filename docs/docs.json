@@ -15,7 +15,7 @@
         "pages": ["index", "quickstart"]
       },
       {
-        "group": "Core model",
+        "group": "Concepts",
         "pages": [
           "concepts/remote-calls",
           "concepts/bundles",
@@ -23,12 +23,13 @@
         ]
       },
       {
-        "group": "Integrations",
+        "group": "How-to",
         "pages": ["integrate-agent", "integrate-dataset"]
       },
       {
         "group": "Reference",
         "pages": [
+          "reference/public-api",
           "reference/architecture",
           "reference/cli"
         ]

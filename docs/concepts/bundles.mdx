@@ -12,7 +12,6 @@ deploy-ready bundle. The default output is a portable tar containing
 `manifest.json` and the complete `nix/` runtime tree.
 
 ```bash
-agentix build ./my-rollout --name my-rollout:0.1.0
 agentix build ./my-rollout --name my-rollout:0.1.0 --format oci-image
 ```
 
@@ -28,8 +27,8 @@ version = "0.1.0"
 dependencies = [
     "agentixx>=0.1.0",
     "agentix-runtime-basic>=0.1.0",
-    "agentix-claude-code>=0.1.0",
-    "agentix-swebench>=0.1.0",
+    "agentix-agent-claude-code>=0.1.0",
+    "agentix-dataset-swe>=0.1.0",
 ]
 ```
 
@@ -42,7 +41,7 @@ install into the runtime environment:
 
 That single install brings in user code, direct dependencies,
 transitive dependencies, and integration modules such as `agentix.bash`
-or `agentix.swebench`.
+or `agentix.plugins.datasets.swe`.
 
 ## Runtime Layout
 
@@ -55,7 +54,8 @@ or `agentix.swebench`.
 └── lib/python3.11/site-packages/
     ├── agentix/
     ├── agentix/bash/
-    ├── agentix/swebench/
+    ├── agentix/agents/claude_code/
+    ├── agentix/plugins/datasets/swe/
     └── app.py
 ```
 
@@ -93,8 +93,8 @@ coexist in one sandbox.
 | --- | --- | --- |
 | Framework | `agentixx` | Runtime client/server protocol and worker invocation |
 | Primitive | `agentix-runtime-basic` | Shell and file operations in the sandbox |
-| Agent wrapper | `agentix-claude-code` | CLI execution behind a typed Python function |
-| Scorer wrapper | `agentix-swebench` | Benchmark grading behind a typed Python function |
+| Agent wrapper | `agentix-agent-claude-code` | CLI execution behind a typed Python function |
+| Scorer wrapper | `agentix-dataset-swe` | Benchmark grading behind a typed Python function |
 | User project | `my-rollout` | Orchestration-specific functions and dependencies |
 
 ## Mental Model
