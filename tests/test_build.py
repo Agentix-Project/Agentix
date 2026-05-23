@@ -12,7 +12,9 @@ container is tested.
 
 from __future__ import annotations
 
+import io
 import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -344,6 +346,194 @@ class TestDockerBuild:
         assert cmd[:4] == ["docker", "buildx", "build", "--platform"]
         assert cmd[4] == "linux/amd64"
         assert "--load" in cmd
+        assert "-t" in cmd
+
+
+# ── build: tar bundle artifacts ────────────────────────────────────
+
+
+class TestTarBundle:
+    def test_default_tar_name_includes_platform(self) -> None:
+        assert build._default_tar_name("ghcr.io/acme/demo", "1.0.0", "linux/amd64") == (
+            "ghcr.io-acme-demo-1.0.0-linux-amd64.bundle.tar"
+        )
+
+    def test_output_directory_gets_default_name(self, tmp_path: Path) -> None:
+        out = build._tar_output_path(str(tmp_path / "dist"), name="demo", tag="1.0.0", platform="linux/arm64")
+        assert out == tmp_path / "dist" / "demo-1.0.0-linux-arm64.bundle.tar"
+
+    def test_output_file_used_verbatim(self, tmp_path: Path) -> None:
+        out = build._tar_output_path(str(tmp_path / "bundle.tar"), name="demo", tag="1.0.0", platform="linux/arm64")
+        assert out == tmp_path / "bundle.tar"
+
+    def test_write_bundle_tar_preserves_absolute_symlink(self, tmp_path: Path) -> None:
+        bundle = tmp_path / "bundle"
+        store = bundle / "nix" / "store" / "hash-python" / "bin"
+        runtime_bin = bundle / "nix" / "runtime" / "bin"
+        store.mkdir(parents=True)
+        runtime_bin.mkdir(parents=True)
+        (store / "python").write_text("#!/bin/sh\n")
+        (runtime_bin / "python").symlink_to("/nix/store/hash-python/bin/python")
+        (bundle / "manifest.json").write_text("{}\n")
+
+        tar_path = tmp_path / "demo.bundle.tar"
+        build._write_bundle_tar(bundle, tar_path)
+
+        with tarfile.open(tar_path) as tar:
+            members = {member.name: member for member in tar.getmembers()}
+        assert "manifest.json" in members
+        link = members["nix/runtime/bin/python"]
+        assert link.issym()
+        assert link.linkname == "/nix/store/hash-python/bin/python"
+
+    def test_validate_bundle_tree_accepts_absolute_nix_symlink(self, tmp_path: Path) -> None:
+        nix = tmp_path / "nix"
+        store = nix / "store" / "hash-agentix" / "bin"
+        entry_dir = nix / "runtime" / "venv" / "bin"
+        store.mkdir(parents=True)
+        entry_dir.mkdir(parents=True)
+        (store / "agentix-server").write_text("#!/bin/sh\n")
+        (entry_dir / "agentix-server").symlink_to("/nix/store/hash-agentix/bin/agentix-server")
+
+        build._validate_bundle_tree(nix)
+
+    def test_validate_bundle_tree_rejects_symlink_outside_nix(self, tmp_path: Path) -> None:
+        nix = tmp_path / "nix"
+        entry_dir = nix / "runtime" / "venv" / "bin"
+        entry_dir.mkdir(parents=True)
+        (entry_dir / "agentix-server").write_text("#!/bin/sh\n")
+        (entry_dir / "bad").symlink_to("/bin/sh")
+
+        with pytest.raises(SystemExit, match="outside /nix"):
+            build._validate_bundle_tree(nix)
+
+    def test_validate_bundle_tree_ignores_store_symlinks(self, tmp_path: Path) -> None:
+        nix = tmp_path / "nix"
+        entry_dir = nix / "runtime" / "venv" / "bin"
+        store_dir = nix / "store" / "hash-base-system" / "etc" / "ssl" / "certs"
+        entry_dir.mkdir(parents=True)
+        store_dir.mkdir(parents=True)
+        (entry_dir / "agentix-server").write_text("#!/bin/sh\n")
+        (store_dir / "ca-bundle.crt").symlink_to("/nix/var/nix/profiles/default/etc/ssl/certs/ca-bundle.crt")
+
+        build._validate_bundle_tree(nix)
+
+    def test_validate_bundle_tree_rejects_broken_absolute_nix_symlink(self, tmp_path: Path) -> None:
+        nix = tmp_path / "nix"
+        entry_dir = nix / "runtime" / "venv" / "bin"
+        entry_dir.mkdir(parents=True)
+        (entry_dir / "agentix-server").symlink_to("/nix/store/missing/bin/agentix-server")
+
+        with pytest.raises(SystemExit, match="broken symlink"):
+            build._validate_bundle_tree(nix)
+
+    def test_bundle_manifest_records_runtime_contract(self) -> None:
+        manifest = build._bundle_manifest(name="demo", tag="1.0.0", platform="linux/amd64", digest="abc123")
+        assert manifest["schema_version"] == 1
+        assert manifest["name"] == "demo"
+        assert manifest["tag"] == "1.0.0"
+        assert manifest["platform"] == "linux/amd64"
+        assert manifest["nix_system"] == "x86_64-linux"
+        assert manifest["digest"] == "sha256:abc123"
+        assert manifest["entrypoint"] == "/nix/runtime/venv/bin/agentix-server"
+        assert manifest["runtime_env"]["PATH"] == "/nix/runtime/venv/bin:/nix/runtime/bin"  # type: ignore[index]
+
+    def test_copy_nix_from_image_streams_tar_with_platform(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: list[list[str]] = []
+
+        payload = io.BytesIO()
+        with tarfile.open(fileobj=payload, mode="w") as tar:
+            for dirname in ("nix", "nix/runtime", "nix/runtime/venv", "nix/runtime/venv/bin"):
+                info = tarfile.TarInfo(dirname)
+                info.type = tarfile.DIRTYPE
+                info.mode = 0o555
+                tar.addfile(info)
+            data = b"#!/bin/sh\n"
+            info = tarfile.TarInfo("nix/runtime/venv/bin/agentix-server")
+            info.mode = 0o755
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+
+        class FakeProc:
+            def __init__(self, cmd: list[str], stdout: object, stderr: object) -> None:
+                del stdout, stderr
+                self.stdout = io.BytesIO(payload.getvalue())
+                self.returncode = 0
+                calls.append(cmd)
+
+            def wait(self) -> int:
+                return self.returncode
+
+        def fake_popen(cmd: list[str], *, stdout: object, stderr: object) -> FakeProc:
+            return FakeProc(cmd, stdout, stderr)
+
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+        build._copy_nix_from_image("tmp:latest", tmp_path, platform="linux/amd64")
+
+        create = calls[0]
+        assert create[:6] == ["docker", "run", "--rm", "--platform", "linux/amd64", "--entrypoint"]
+        assert create[-5:] == ["-C", "/", "-cf", "-", "nix"]
+        assert (tmp_path / "nix" / "runtime" / "venv" / "bin" / "agentix-server").is_file()
+        assert (tmp_path / "nix" / "runtime").stat().st_mode & 0o777 == 0o555
+
+    def test_copy_nix_from_image_rejects_tar_members_outside_nix(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        payload = io.BytesIO()
+        with tarfile.open(fileobj=payload, mode="w") as tar:
+            info = tarfile.TarInfo("etc/passwd")
+            info.size = 0
+            tar.addfile(info, io.BytesIO())
+
+        class FakeProc:
+            def __init__(self, cmd: list[str], stdout: object, stderr: object) -> None:
+                del cmd, stdout, stderr
+                self.stdout = io.BytesIO(payload.getvalue())
+                self.returncode = 0
+
+            def wait(self) -> int:
+                return self.returncode
+
+        def fake_popen(cmd: list[str], *, stdout: object, stderr: object) -> FakeProc:
+            return FakeProc(cmd, stdout, stderr)
+
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+        with pytest.raises(SystemExit, match="non-/nix tar member"):
+            build._copy_nix_from_image("tmp:latest", tmp_path, platform="linux/amd64")
+
+    def test_docker_build_removes_temp_image(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **_kwargs: object) -> subprocess.CompletedProcess:
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0)
+
+        monkeypatch.setattr(build, "_run", fake_run)
+        monkeypatch.setattr(build, "_docker_build_image", lambda *_args, **_kwargs: None)
+
+        def fake_copy_nix(_image_ref: str, bundle_root: Path, *, platform: str) -> None:
+            del platform
+            entry_dir = bundle_root / "nix" / "runtime" / "venv" / "bin"
+            entry_dir.mkdir(parents=True)
+            (entry_dir / "agentix-server").write_text("#!/bin/sh\n")
+
+        monkeypatch.setattr(build, "_copy_nix_from_image", fake_copy_nix)
+        build._build_tar_bundle(
+            tmp_path,
+            output_path=tmp_path / "bundle.tar",
+            name="demo",
+            tag="1.0.0",
+            project_subpath=Path("."),
+            platform="linux/amd64",
+        )
+
+        assert calls[-1][:4] == ["docker", "image", "rm", "-f"]
 
 
 # ── build: main / --dry-run ────────────────────────────────────────
@@ -386,6 +576,72 @@ class TestMainDryRun:
 
         monkeypatch.setattr("agentix.cli.build._docker_build", _boom)
         assert build.main([str(proj), "--dry-run"]) == 0
+
+    def test_output_rejected_for_oci_image(self, tmp_path: Path) -> None:
+        proj = _make_project(tmp_path / "proj")
+        with pytest.raises(SystemExit, match="--output"):
+            build.main([str(proj), "--format", "oci-image", "--output", str(tmp_path / "out.tar"), "--dry-run"])
+
+
+class TestMainBuildFormats:
+    def test_default_build_format_is_tar(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        proj = _make_project(tmp_path / "proj")
+        calls: list[Path] = []
+
+        def fake_tar_bundle(
+            stage: Path,
+            *,
+            output_path: Path,
+            name: str,
+            tag: str,
+            project_subpath: Path,
+            platform: str,
+        ) -> Path:
+            calls.append(output_path)
+            assert stage.is_dir()
+            assert name == "demo-agent"
+            assert tag == "0.1.0"
+            assert project_subpath == Path(".")
+            assert platform in {"linux/amd64", "linux/arm64"}
+            return output_path
+
+        def boom_docker(*_a: object, **_k: object) -> str:
+            raise AssertionError("default build format must not publish an OCI image")
+
+        monkeypatch.setattr(build, "_build_tar_bundle", fake_tar_bundle)
+        monkeypatch.setattr(build, "_docker_build", boom_docker)
+
+        assert build.main([str(proj), "--output", str(tmp_path / "bundle.tar")]) == 0
+        assert calls == [tmp_path / "bundle.tar"]
+
+    def test_oci_image_format_keeps_docker_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        proj = _make_project(tmp_path / "proj")
+        calls: list[str] = []
+
+        def fake_docker_build(
+            stage: Path,
+            *,
+            name: str,
+            tag: str,
+            project_subpath: Path,
+            platform: str,
+        ) -> str:
+            assert stage.is_dir()
+            assert name == "demo"
+            assert tag == "dev"
+            assert project_subpath == Path(".")
+            assert platform in {"linux/amd64", "linux/arm64"}
+            calls.append(f"{name}:{tag}")
+            return f"{name}:{tag}"
+
+        def boom_tar(*_a: object, **_k: object) -> Path:
+            raise AssertionError("oci-image format must not build a bundle tar")
+
+        monkeypatch.setattr(build, "_docker_build", fake_docker_build)
+        monkeypatch.setattr(build, "_build_tar_bundle", boom_tar)
+
+        assert build.main([str(proj), "--name", "demo:dev", "--format", "oci-image"]) == 0
+        assert calls == ["demo:dev"]
 
 
 # ── build: error paths ─────────────────────────────────────────────

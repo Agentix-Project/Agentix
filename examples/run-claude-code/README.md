@@ -23,7 +23,7 @@ Agentix plugin, so build and run this example as `linux/amd64`.
 ```bash
 cd examples/run-claude-code
 uv sync
-uv run agentix build . --name run-claude-code:0.1.0 --platform linux/amd64
+uv run agentix build . --name run-claude-code:0.1.0 --platform linux/amd64 --format oci-image
 ```
 
 ## Run

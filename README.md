@@ -5,7 +5,7 @@
 **Sandboxed rollouts you call like typed Python.**
 
 Turn agents, tools, and scorers into Python callables. Package their
-dependencies into bundle images. Call them from evaluators, trainers,
+dependencies into bundles. Call them from evaluators, trainers,
 and orchestration code without writing a new runner for every pairing.
 
 [![GitHub Stars](https://img.shields.io/github/stars/Agentiix/Agentix)](https://github.com/Agentiix/Agentix)
@@ -25,7 +25,7 @@ Agentix has two primitives:
   import-path `RemoteCallable`; args, kwargs, and return values travel
   as pickle blobs.
 - **Bundles**: `agentix build [path]` packages a Python project and its
-  declared dependencies into a deploy-ready bundle image.
+  declared dependencies into a deploy-ready bundle artifact.
 
 ```python
 from agentix import RuntimeClient, SandboxConfig, session
@@ -88,13 +88,13 @@ Run the smallest demo from
 ```bash
 cd examples/hello-agentix
 uv sync
-uv run agentix build . --name hello-agentix  # builds hello-agentix:0.1.0
+uv run agentix build . --name hello-agentix --format oci-image
 uv run python run.py
 ```
 
 When the sandbox runs on a different CPU architecture than your build
 host, build for the sandbox platform explicitly, for example
-`uv run agentix build . --name hello-agentix --platform linux/amd64`.
+`uv run agentix build . --name hello-agentix --format oci-image --platform linux/amd64`.
 
 The demo builds `hello-agentix:0.1.0`, overlays it onto
 `python:3.13-slim`, then calls `agentix.bash.run` inside the sandbox:

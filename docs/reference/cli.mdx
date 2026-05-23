@@ -1,12 +1,12 @@
 ---
 title: CLI reference
-description: Build bundle images.
+description: Build bundle artifacts.
 ---
 
 The Agentix CLI has one verb:
 
 - `agentix build` turns a Python project into a deploy-ready runtime
-  image.
+  bundle.
 
 ```bash
 agentix --help
@@ -15,24 +15,28 @@ agentix build --help
 
 ## `agentix build`
 
-Package one project root into a bundle image.
+Package one project root into a bundle artifact.
 
 ```bash
 agentix build
 agentix build path/to/project
 agentix build . --name my-rollout:0.1.0
 agentix build . --platform linux/amd64
+agentix build . --format oci-image
+agentix build . --format tar --output dist/
 agentix build . --dry-run
 ```
 
-The project root must contain `pyproject.toml`. The default image tag is
-derived from `[project].name` and `[project].version`; `-n` / `--name`
-overrides it.
+The project root must contain `pyproject.toml`. The default bundle name
+and tag are derived from `[project].name` and `[project].version`;
+`-n` / `--name` overrides them.
 
 | Option | Meaning |
 | --- | --- |
 | `path` | Project root, default `.` |
-| `-n`, `--name` | Image `NAME` or `NAME:TAG`; bare names use `[project].version` |
+| `-n`, `--name` | Bundle `NAME` or `NAME:TAG`; bare names use `[project].version` |
+| `--format` | `tar` (default) for `manifest.json + nix/`, or `oci-image` for Docker-compatible image output |
+| `-o`, `--output` | Output file or directory for `--format tar`; defaults to `dist/<name>-<tag>-<platform>.bundle.tar` |
 | `--platform` | Sandbox runtime platform, `linux/amd64` or `linux/arm64`; defaults to local CPU |
 | `--dry-run` | Stage the Dockerfile and build context without running Docker |
 
@@ -58,7 +62,7 @@ dependencies = [
 ]
 ```
 
-That project builds one image containing the framework, sandbox
+That project builds one bundle containing the framework, sandbox
 primitives, the agent wrapper, the scorer wrapper, transitive deps, and
 the project itself.
 
@@ -71,6 +75,24 @@ agentix build . --dry-run
 Dry run stages the generated Dockerfile and copied project tree under
 `./build/<tag>/`, prints what would be built, and exits without invoking
 Docker.
+
+### Formats
+
+`--format tar` is the default portable bundle format. The tar contains:
+
+```text
+manifest.json
+nix/
+```
+
+The `nix/` tree is the complete runtime closure and must appear at
+`/nix` inside a sandbox. Backends that stage bundles across machines can
+unpack this tar into their cache and bind it into task containers.
+
+`--format oci-image` preserves the Docker fast path. It loads a local
+Docker image tagged as `NAME:TAG` and `NAME:latest`, so
+`DockerDeployment` can mount the bundle's `/nix` through its carrier
+container.
 
 ## Configuration
 
