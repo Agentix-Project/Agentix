@@ -34,8 +34,8 @@ For each sandbox:
    `AGENTIX_BIND_PORT`.
 4. Spawn `apptainer exec` with:
    * `--bind <cache>/bundles/<digest>/nix:/nix:ro`
-   * `--userns --no-init --writable-tmpfs` (overridable via
-     `AGENTIX_APPTAINER_FLAGS`)
+   * `--userns --no-init --writable-tmpfs --cleanenv` (overridable
+     via `AGENTIX_APPTAINER_FLAGS`)
    * `--env AGENTIX_BIND_PORT=<port>` (+ any `config.env`)
    * `<sif>` as the rootfs
    * a `/bin/sh -c` bootstrap that prepends `/nix/runtime/{venv/bin,bin,…}`

@@ -93,14 +93,10 @@ version = "0.1.0"
 source = { editable = "plugins/deployments/apptainer" }
 dependencies = [
     { name = "agentixx" },
-    { name = "httpx" },
 ]
 
 [package.metadata]
-requires-dist = [
-    { name = "agentixx", editable = "." },
-    { name = "httpx", specifier = ">=0.27" },
-]
+requires-dist = [{ name = "agentixx", editable = "." }]
 
 [[package]]
 name = "agentix-deployment-daytona"

@@ -245,12 +245,14 @@ async def test_create_records_expected_apptainer_cli(env, tmp_path: Path) -> Non
     assert len(execs) == 1, log_lines
 
     exec_argv = execs[0]["argv"]
-    # Default isolation: --userns (works in capability-restricted hosts;
-    # see `_isolation_args()`). --containall is opt-in via
-    # AGENTIX_APPTAINER_FLAGS.
+    # Default isolation: --userns + --cleanenv (works in
+    # capability-restricted hosts; --cleanenv strips host LD_PRELOAD
+    # / GPU-runtime noise that the task image doesn't have libs for).
+    # --containall is opt-in via AGENTIX_APPTAINER_FLAGS.
     assert "--userns" in exec_argv
     assert "--no-init" in exec_argv
     assert "--writable-tmpfs" in exec_argv
+    assert "--cleanenv" in exec_argv
     assert "--bind" in exec_argv
     bind_target = exec_argv[exec_argv.index("--bind") + 1]
     assert bind_target.endswith(":/nix:ro")
