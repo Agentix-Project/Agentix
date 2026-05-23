@@ -16,9 +16,9 @@ Sandbox runtime server
         v
 Worker subprocess
   import module
-  validate args
+  unpickle args
   call function
-  encode result
+  pickle result
 ```
 
 Everything else supports that loop.
@@ -27,9 +27,9 @@ Everything else supports that loop.
 
 | System | Responsibility |
 | --- | --- |
-| `agentix.runtime.shared` | Wire models, msgpack codec, framing, Socket.IO event names, call-shape helpers |
-| `agentix.runtime.client` | `RuntimeClient.remote(fn, ...)` and transport-specific client behavior |
-| `agentix.runtime.server` | FastAPI and Socket.IO server, worker process management, callable invocation, call correlation |
+| `agentix.runtime.shared` | Wire models, msgpack codec, framing, `RemoteCallable` |
+| `agentix.runtime.client` | `RuntimeClient.remote(fn, ...)` and host-side namespace handlers |
+| `agentix.runtime.server` | FastAPI and Socket.IO server, worker process management, namespace forwarding |
 | `agentix.deployment` | Host-side sandbox lifecycle protocol and backend plugin lookup |
 | `agentix.cli` | `agentix build` |
 
@@ -43,40 +43,46 @@ from app import run
 result = await client.remote(run, input="hello")
 ```
 
-The client serializes the function object with stdlib pickle:
+The client encodes the callable as a `RemoteCallable` import path:
 
 ```python
-callable_payload = pickle.dumps(run)
+callable_ref = f"{run.__module__}::{run.__qualname__}"
+# e.g. "app::run"
 ```
 
-The runtime worker unpickles the callable inside the sandbox, validates
-the provided arguments, and invokes it.
+The worker imports the module inside the sandbox, resolves the function,
+unpickles `(args, kwargs)`, calls it, and pickles the return value.
+
+Only importable top-level functions and builtins are supported. Lambdas,
+partials, bound methods, and callable instances are rejected on the host.
 
 ## Call Flow
 
 ```text
 1. Host imports `app.run`.
 2. Host calls `client.remote(run, input="hello")`.
-3. Client inspects the signature and detects unary, stream, or bidi.
-4. Client encodes args and kwargs with the shared codec.
-5. Runtime server receives the call.
-6. Server forwards the request to the worker subprocess.
-7. Worker imports `app`, resolves `run`, validates args, and calls it.
-8. Worker encodes the return value or stream item.
-9. Client decodes the result into the function's annotated return type.
+3. Client builds `RemoteCallable("app::run")` and pickles `((), {"input": "hello"})`.
+4. Runtime server receives the `call` Socket.IO event.
+5. Server forwards the request to the worker subprocess over stdio frames.
+6. Worker imports `app`, resolves `run`, unpickles args, and calls it.
+7. Worker pickles the return value.
+8. Server emits `call:result`; client unpickles `value`.
 ```
 
 ## Transports
 
-| Call shape | Function shape | Transport | Client behavior |
-| --- | --- | --- | --- |
-| Unary | `async def f(...) -> T` or sync `def f(...) -> T` | Socket.IO | `await client.remote(f, ...)` |
-| Stream | `async def f(...) -> AsyncIterator[T]` | Socket.IO | `async for item in client.remote(f, ...)` |
-| Bidi | `async def f(..., inbox: Channel[I]) -> AsyncIterator[T]` | Socket.IO | send through `Channel`, receive with `async for` |
+| Path | Carries | Wire |
+| --- | --- | --- |
+| `GET /health` | health probe | HTTP JSON |
+| Socket.IO `/` | unary RPC | `call` / `call:result` / `call:error` / `cancel` |
+| Socket.IO `/trace`, `/log`, plugin paths | side channels | namespace events via worker pipe bridge |
+| worker stdin/stdout | runtime ↔ worker | length-prefixed msgpack frames |
 
-Unary responses are msgpack RPC envelopes with either `value` or
-`error`. Stream and bidi calls emit item, end, and error events keyed by
-`call_id`.
+Unary RPC is the only remote-call shape implemented today. Each call
+ends with one `call:result` or `call:error` keyed by `call_id`.
+
+For host↔sandbox streaming (LLM tokens, live logs, plugin events), use
+`agentix.sio` namespaces — not `client.remote`.
 
 ## Bundle Layout
 
@@ -110,13 +116,12 @@ and links binaries into `/nix/runtime/bin`.
 The runtime server owns one worker subprocess. The worker handles remote
 function invocation and keeps the runtime server isolated from user code.
 
-For each target, the worker prepares and caches invocation metadata:
+For each call, the worker:
 
-- module import
-- function lookup
-- signature inspection
-- pydantic argument adapters
-- return-value serialization metadata
+- resolves the `RemoteCallable` import path
+- unpickles `(args, kwargs)` with stdlib pickle
+- invokes the callable (awaiting coroutine results)
+- pickles the return value
 
 The worker uses the same `/nix/runtime` environment as the runtime
 server, so anything installed into the bundle can be imported on demand.
@@ -143,5 +148,6 @@ RuntimeClient(runtime_url)
 Bundle = what code and dependencies exist in the sandbox
 Remote call = which installed function to call
 Worker = where user code executes
+Side-channel namespace = host↔sandbox events beyond unary RPC
 Deployment = where the bundle image runs
 ```

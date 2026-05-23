@@ -33,9 +33,10 @@ import app
 result = await client.remote(app.run, input="hello")
 ```
 
-Both forms give Agentix the same callable object. Agentix transports
-callables with stdlib pickle, so module-level functions/classes and
-pickleable callable objects are the supported boundary.
+Both forms give Agentix the same callable object. The host encodes it as
+a `RemoteCallable` import path (`module::qualname`). Only importable
+top-level functions and builtins are supported — lambdas, partials,
+bound methods, and callable instances are rejected at the host.
 
 ## Bundle
 
@@ -93,7 +94,7 @@ At runtime, all installed modules live in the same Python environment:
 
 If the project includes `default.nix`, `agentix build` adds a Nix
 builder stage, copies the derivation closure into the final image, and
-symlinks `bin/*` into `/nix/runtime/bin/`.
+symlinks `bin/*` into `/nix/runtime/bin`.
 
 Worker processes inherit the runtime server environment, with the
 bundle venv and Nix runtime bins prepended to `PATH`:
@@ -111,9 +112,8 @@ await asyncio.create_subprocess_exec("claude", "-p", instruction)
 
 ## Remote Calls
 
-`RuntimeClient.remote(fn, ...)` serializes the callable with stdlib
-pickle and sends that callable payload plus args and kwargs to the
-runtime. Pickle is Python's native callable reference mechanism.
+`RuntimeClient.remote(fn, ...)` is a unary RPC: one request, one pickled
+return value.
 
 For example:
 
@@ -123,70 +123,70 @@ from agentix.swebench import run
 score = await client.remote(run, instance=inst, patch=patch)
 ```
 
-is sent as a callable payload with a display name like:
-
-```text
-agentix.swebench::run
-```
-
-The request body contains the callable payload plus serialized args and
-kwargs:
+The wire payload looks like:
 
 ```python
 {
-    "callable_payload": b"...pickle...",
-    "display_name": "agentix.swebench::run",
-    "shape": "unary",
-    "args": [],
-    "kwargs": {"instance": inst, "patch": patch},
+    "call_id": "uuid-hex",
+    "callable": "agentix.swebench::run",
+    "arguments": pickle.dumps(((), {"instance": inst, "patch": patch})),
 }
 ```
 
-The runtime worker unpickles the callable inside the sandbox and invokes
-it. For importable callables this resolves to the sandbox-installed
-module implementation.
+On the worker:
 
-Arguments are passed as msgpack payloads. Before sending, the client
-uses the local function signature and type annotations to serialize
-positional and keyword arguments. Inside the worker, the signature is
-resolved from the unpickled callable, and pydantic validates/coerces the
-received values before the callable is invoked. Return values and stream
-items are serialized the same way on the way back.
+1. `RemoteCallable.resolve()` imports `agentix.swebench` and looks up `run`.
+2. `pickle.loads(arguments)` yields `(args, kwargs)`.
+3. The invoker calls `run(*args, **kwargs)` (awaiting if the result is a
+   coroutine).
+4. The return value is pickled back into `value`.
 
-## Flow
+Args, kwargs, and return values travel as stdlib pickle blobs. There is
+no pydantic validation on the RPC path today. Socket.IO event envelopes
+use msgpack via `agentix.runtime.shared.codec`.
+
+Sync and async functions both work as call targets.
+
+For host↔sandbox traffic that doesn't fit `c.remote()`'s
+request/response shape (trace, logs, plugin events), use
+`agentix.sio` namespaces (see Side Channels below).
 
 ```text
 Host
   RuntimeClient.remote(fn, ...)
-    pickle callable
-    detect unary / stream / bidi
-    encode args and kwargs
+    RemoteCallable._resolve(fn)  ->  module::qualname
+    pickle.dumps((args, kwargs))
       |
-      v
+      v  Socket.IO call / call:result / call:error
 Sandbox
   agentix-server
       |
-      v
-Single runtime worker process
-  unpickle callable
+      v  length-prefixed msgpack frames
+Single runtime worker subprocess
+  RemoteCallable.resolve() -> fn
+  pickle.loads(arguments)
   call fn(*args, **kwargs)
+  pickle.dumps(result)
 ```
 
-## Call Shapes
+## Side Channels
 
-Agentix supports three call shapes:
+Unary RPC covers request/response. Streaming and host↔sandbox events
+use separate Socket.IO namespaces bridged through the worker pipe:
 
-| Function shape | Transport | Client usage |
-| --- | --- | --- |
-| normal async function | Socket.IO unary event | `await client.remote(fn, ...)` |
-| async generator | Socket.IO stream | `async for item in client.remote(fn, ...)` |
-| async generator with `Channel[T]` input | Socket.IO bidi | send through `Channel`, receive with `async for` |
+| Namespace | Purpose |
+| --- | --- |
+| `/` | unary RPC (`call`, `call:result`, `call:error`, `cancel`) |
+| `/trace` | Trace/Span lifecycle (`trace_start`, `span_end`, …) |
+| `/log` | stdlib `logging` records from the worker |
+| `/<plugin>` | plugin-defined events (e.g. abridge LLM proxy) |
 
-Shape detection is structural:
+Sandbox plugins subclass `agentix.Namespace` and call
+`agentix.register_namespace(...)`. Host plugins subclass
+`agentix.AsyncClientNamespace` and register via
+`RuntimeClient.register_namespace(...)` before connecting.
 
-- async generator -> stream
-- async generator with a `Channel[T]` parameter -> bidi
-- everything else -> unary
+See `agentix/runtime/PROTOCOL.md` for the full wire contract.
 
 ## Worker Model
 
@@ -197,11 +197,10 @@ without changing `RuntimeClient.remote(...)`.
 
 For each call, the worker:
 
-1. unpickles the callable payload
-2. detects and verifies the expected call shape
-3. validates args with pydantic
-4. calls the callable
-5. serializes the return value or stream items
+1. resolves the `RemoteCallable` import path
+2. unpickles `(args, kwargs)`
+3. calls the callable (awaiting coroutine results)
+4. pickles the return value
 
 The worker uses the same `/nix/runtime` venv as the runtime server, so
 anything installed into the bundle can be imported by the worker.
@@ -230,4 +229,5 @@ runtime environment.
 Bundle = what code and dependencies exist in the sandbox
 client.remote(fn) = which callable to call
 Worker = where the callable executes
+Side-channel namespaces = host↔sandbox events beyond unary RPC
 ```
