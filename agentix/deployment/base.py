@@ -53,8 +53,8 @@ class SandboxConfig(BaseModel):
     customer environment image) the workload actually runs against.
 
     The deployment makes the bundle's `/nix` tree appear at `/nix` in
-    the task sandbox, then runs `/nix/runtime/venv/bin/agentix-server`
-    inside `image`'s filesystem.
+    the task sandbox, then execs `/nix/runtime/bootstrap.sh` inside
+    `image`'s filesystem (see `BUNDLE_RUNTIME_ENTRYPOINT`).
     """
 
     image: str = Field(

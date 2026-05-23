@@ -34,7 +34,7 @@ The two-image model is the heart of Agentix:
   SWE-bench task image, a customer environment, plain Ubuntu, …).
 
 `DockerDeployment` mounts the runtime's `/nix` into the task container
-at sandbox-create time. The Python interpreter, agentix-server, your
+at sandbox-create time. The Python interpreter, the runtime server, your
 code, and the plugin binaries (bash, coreutils, …) all live under
 `/nix/runtime/bin/` and resolve regardless of the task image's
 distribution.
@@ -173,7 +173,7 @@ docker create --name agentix-runtime-<hash> hello-agentix:0.1.0
 docker run -d --name <sid> -p 127.0.0.1:<port>:<port> \
     -e AGENTIX_BIND_PORT=<port> \
     --volumes-from agentix-runtime-<hash>:ro \
-    --entrypoint /nix/runtime/bin/agentix-server \
+    --entrypoint /nix/runtime/bootstrap.sh \
     python:3.13-slim
 ```
 

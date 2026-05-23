@@ -87,7 +87,7 @@ official harness flow.
   `/testbed` cloned at `base_commit`. Runner constructs the tag from
   the instance row (the lowercase id with `__` rewritten to `_1776_`).
 - **Bundle image** (`SandboxConfig.bundle`): the bundle this
-  directory produces. Brings in `claude`, `git`, `agentix-server`, the
+  directory produces. Brings in `claude`, `git`, the runtime server, the
   Claude Code agent plugin, and the SWE dataset plugin, all under
   `/nix/runtime`.
 

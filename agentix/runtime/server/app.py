@@ -22,7 +22,6 @@ builtins are supported call targets.
 from __future__ import annotations
 
 import logging
-import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
@@ -97,53 +96,8 @@ app.fastapi = _fastapi_app  # type: ignore[attr-defined]
 app.state = _fastapi_app.state  # type: ignore[attr-defined]
 app.sio = _sio  # type: ignore[attr-defined]
 
-
-# ── Entry point (the bundle image's server command) ─────────
-
-
-def main() -> None:
-    """Entry point exposed as the `agentix-server` console script. Port
-    via AGENTIX_BIND_PORT (env, default 8000); dev shell can override via
-    --port.
-    """
-    import argparse
-
-    import uvicorn
-
-    parser = argparse.ArgumentParser(description="agentix runtime server")
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=int(os.environ.get("AGENTIX_BIND_PORT", "8000")),
-    )
-    parser.add_argument("--debug", action="store_true")
-    parser.add_argument("--debug-port", type=int, default=5678)
-    parser.add_argument("--debug-wait", action="store_true")
-    args = parser.parse_args()
-
-    if args.debug:
-        import debugpy  # type: ignore[reportMissingImports]
-
-        debugpy.listen(("0.0.0.0", args.debug_port))
-        print(f"debugpy listening on 0.0.0.0:{args.debug_port}")
-        if args.debug_wait:
-            print("Waiting for debugger to attach...")
-            debugpy.wait_for_client()
-
-    # `ws_max_size` lifts uvicorn's websocket frame cap to match the
-    # Socket.IO layer's `max_http_buffer_size` — otherwise uvicorn would
-    # be the bottleneck for a large `c.remote` payload / plugin event.
-    from agentix.runtime.shared import MAX_MESSAGE_BYTES
-
-    uvicorn.run(
-        "agentix.runtime.server:app",
-        host=args.host,
-        port=args.port,
-        ws="wsproto",
-        ws_max_size=MAX_MESSAGE_BYTES,
-    )
-
-
-if __name__ == "__main__":
-    main()
+# The process entry point lives in `agentix.runtime.server.entrypoint`
+# (invoked by the bundle's `/nix/runtime/bootstrap.sh` as `python -m`).
+# This module is library-only — import `app` to mount the ASGI app in a
+# different host (tests, embedded usage, ...) and run it however you
+# want.

@@ -49,4 +49,4 @@ ENV PATH="/nix/runtime/venv/bin:/nix/runtime/bin:${PATH}" \
     AGENTIX_BIND_PORT=8000
 EXPOSE 8000/tcp
 VOLUME ["/nix"]
-ENTRYPOINT ["/nix/runtime/venv/bin/agentix-server"]
+ENTRYPOINT ["/nix/runtime/bootstrap.sh"]

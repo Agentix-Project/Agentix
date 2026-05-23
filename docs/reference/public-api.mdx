@@ -106,7 +106,10 @@ These modules are public once their plugin package is installed:
 
 Public command-line entrypoints:
 
-- `agentix`
-- `agentix-server`
+- `agentix` — dev-side build CLI (`agentix build [PATH]`)
+
+The bundle's runtime server is *not* exposed as a console script; it is
+launched inside the sandbox container by `/nix/runtime/bootstrap.sh`,
+which ships with every bundle.
 
 Plugin entrypoints may add their own commands (for example, bridge tooling).

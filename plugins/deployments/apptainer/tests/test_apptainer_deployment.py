@@ -3,7 +3,7 @@
 The fake binary is a small shell script the test stages on PATH at the
 start of each test. It records every call to a file and acts as both
 the `apptainer pull` (creates an empty `.sif`) and `apptainer exec`
-(starts an `agentix-server` look-alike HTTP server on
+(starts a stand-in HTTP server with a `/health` endpoint on
 `AGENTIX_BIND_PORT`).
 
 The point of these tests is to lock in the CLI surface the deployment
@@ -36,9 +36,9 @@ def _write_bundle_tar(tmp_path: Path, *, digest: str = "sha256:abc") -> Path:
     """Build a minimal portable bundle tar containing manifest + nix/."""
     bundle_root = tmp_path / "bundle"
     nix_root = bundle_root / "nix"
-    runtime_bin = nix_root / "runtime" / "venv" / "bin"
-    runtime_bin.mkdir(parents=True, exist_ok=True)
-    (runtime_bin / "agentix-server").write_text("#!/bin/sh\necho fake\n")
+    runtime = nix_root / "runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    (runtime / "bootstrap.sh").write_text("#!/bin/sh\necho fake\n")
     manifest = {"digest": digest, "name": "test-bundle", "tag": "0.0.1"}
     (bundle_root / "manifest.json").write_text(json.dumps(manifest))
     tar_path = tmp_path / "bundle.tar"
@@ -197,10 +197,10 @@ def test_extract_bundle_skips_when_runtime_already_present(tmp_path: Path) -> No
     bundle = _write_bundle_tar(tmp_path)
     target = tmp_path / "out"
     nix = _extract_bundle(bundle, target)
-    assert (nix / "runtime" / "venv" / "bin" / "agentix-server").exists()
+    assert (nix / "runtime" / "bootstrap.sh").exists()
 
     # Mutate the file so the second extract would overwrite it if it ran.
-    sentinel = nix / "runtime" / "venv" / "bin" / "agentix-server"
+    sentinel = nix / "runtime" / "bootstrap.sh"
     sentinel.write_text("MUTATED")
     _extract_bundle(bundle, target)
     assert sentinel.read_text() == "MUTATED"
@@ -260,6 +260,10 @@ async def test_create_records_expected_apptainer_cli(env, tmp_path: Path) -> Non
     flat = " ".join(exec_argv)
     assert "AGENTIX_BIND_PORT=" in flat
     assert "HF_HOME=/tmp/hf" in flat
+    # Container entry point: the bundle's /nix/runtime/bootstrap.sh, not
+    # an inline `sh -c '...'` indirection.
+    assert exec_argv[-1] == "/nix/runtime/bootstrap.sh"
+    assert "-c" not in exec_argv
 
 
 @pytest.mark.anyio

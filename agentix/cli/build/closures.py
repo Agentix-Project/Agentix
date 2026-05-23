@@ -20,11 +20,18 @@ that point every plugin is installed and introspectable, so this step:
 Plugin discovery is import-free: `importlib.metadata.entry_points`
 reads `.dist-info/entry_points.txt`; `importlib.resources` locates the
 file. Neither imports plugin code — safe to run over an arbitrary venv.
+
+Invoked from `bundle-build.sh` as:
+
+    python -m agentix.cli.build.closures --project P --closures C
+
+There's no user-facing command for this — it's an internal step that
+just happens to be a Python module so it can use the same plugin-
+discovery code path the host build relies on.
 """
 
 from __future__ import annotations
 
-import argparse
 import importlib.metadata as md
 import json
 from collections.abc import Sequence
@@ -33,7 +40,9 @@ from importlib import resources
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from agentix.cli._resolve import project_nix, read_pyproject
+import click
+
+from agentix.cli.build.pyproject import project_nix, read_pyproject
 
 # Entry-point group a plugin registers to declare it ships a Nix
 # closure. The entry-point *value* is the module under which a
@@ -138,8 +147,9 @@ def stage_closures(closures: Sequence[Closure], closures_dir: Path) -> list[Path
 
 
 def assemble(project_dir: Path, closures_dir: Path) -> list[Closure]:
-    """Discover plugin + project closures and stage them. Returns the
-    closures staged, for the caller to log."""
+    """Discover plugin + project closures and stage them.
+
+    Returns the closures staged, for the caller to log."""
     closures = discover_plugin_closures()
     project = discover_project_closure(project_dir)
     if project is not None:
@@ -148,22 +158,32 @@ def assemble(project_dir: Path, closures_dir: Path) -> list[Closure]:
     return closures
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        prog="agentix._assemble",
-        description="collect system-deps Nix closures (internal build step)",
-    )
-    parser.add_argument("--project", required=True, type=Path, help="project root")
-    parser.add_argument("--closures", required=True, type=Path, help="output dir for staged .nix files")
-    args = parser.parse_args(argv)
-
-    closures = assemble(args.project.resolve(), args.closures.resolve())
-    if not closures:
+@click.command(
+    name="closures",
+    help="Collect system-deps Nix closures (internal build step).",
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
+@click.option(
+    "--project",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Project root.",
+)
+@click.option(
+    "--closures",
+    "closures_dir",
+    required=True,
+    type=click.Path(path_type=Path),
+    help="Output dir for staged .nix files.",
+)
+def main(project: Path, closures_dir: Path) -> None:
+    """Discover plugin + project closures and stage them into `closures_dir`."""
+    collected = assemble(project.resolve(), closures_dir.resolve())
+    if not collected:
         print("no system-deps closures — bundle is pure-Python")
-    for closure in closures:
+    for closure in collected:
         print(f"  closure: {closure.label}.nix  ←  {closure.origin}")
-    return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
