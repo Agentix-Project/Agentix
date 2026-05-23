@@ -117,7 +117,7 @@ is still moving quickly.
 Future directions, listed so the framework can avoid architectural
 dead-ends without expanding the current API prematurely.
 
-- **OpenTelemetry trace export** — ship `agentix.utils.trace` spans to a
+- **~~OpenTelemetry trace export~~ (shipped — `agentix-trace-otel`).** ship `agentix.utils.trace` spans to a
   production observability platform (Datadog, Jaeger, Tempo, Honeycomb,
   any OTLP-compatible backend). Implementation should not change the
   `agentix.utils.trace` public API. Plan:

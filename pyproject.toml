@@ -75,6 +75,7 @@ packages = ["agentix"]
 members = [
     "plugins/abridge",
     "plugins/runtime-basic",
+    "plugins/trace-otel",
     "plugins/agents/*",
     "plugins/datasets/*",
     "plugins/deployments/*",
@@ -109,6 +110,7 @@ include = [
     "plugins/deployments/daytona/agentix",
     "plugins/deployments/e2b/agentix",
     "plugins/runtime-basic/agentix",
+    "plugins/trace-otel/agentix",
 ]
 exclude = ["**/__pycache__", "**/.venv", ".venv", "**/build"]
 # `agentix` is a pkgutil namespace package — the core lives here, the
@@ -126,6 +128,7 @@ extraPaths = [
     "plugins/deployments/daytona",
     "plugins/deployments/e2b",
     "plugins/runtime-basic",
+    "plugins/trace-otel",
 ]
 typeCheckingMode = "basic"
 # venv lives on local disk (the repo is on a slow FUSE mount); `.venv`

@@ -42,11 +42,18 @@ import atexit as _atexit
 import contextlib
 import contextvars
 import logging
+import pkgutil
 import threading
 import time
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+
+# Make `agentix.trace` a namespace-aware regular package so plugins
+# can contribute siblings (e.g. `agentix.trace.otel` from
+# `agentix-trace-otel`). Mirrors what `agentix/__init__.py` does for
+# the top-level namespace.
+__path__ = pkgutil.extend_path(__path__, __name__)
 from typing import Any, Literal
 
 __all__ = [
