@@ -1,4 +1,10 @@
-"""`/log` SIO namespace — worker handler + host replayer."""
+"""`/log` SIO namespace — worker handler + host replayer.
+
+`/log` is a reconnect-safe stream: events carry monotonic `_seq`, the
+sandbox buffers them until the host acks, and on reconnect the host
+emits `_resume` to re-receive everything since its last ack. See
+`agentix.sio.ReliableStream` for the wire envelope and contract.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +17,7 @@ from agentix import sio as _sio
 from agentix.log._config import LOG_CONTEXT_ATTR
 
 NAMESPACE = "/log"
+RECORD_EVENT = "record"
 
 
 # ── worker side ───────────────────────────────────────────────────
@@ -21,18 +28,24 @@ class _WorkerLogNamespace(_sio.Namespace):
 
 
 _namespace_singleton: _WorkerLogNamespace | None = None
+_stream_singleton: _sio.ReliableStream | None = None
 
 
-def _get_worker_namespace() -> _WorkerLogNamespace:
-    global _namespace_singleton
+def _get_worker_stream() -> _sio.ReliableStream:
+    global _namespace_singleton, _stream_singleton
     if _namespace_singleton is None:
         _namespace_singleton = _WorkerLogNamespace()
         _sio.register_namespace(_namespace_singleton)
-    return _namespace_singleton
+    if _stream_singleton is None:
+        _stream_singleton = _sio.ReliableStream(_namespace_singleton)
+    return _stream_singleton
 
 
 class WorkerLogHandler(logging.Handler):
     """Translate `LogRecord`s into `/log:record` events.
+
+    Records ride a `ReliableStream` so the host receives every record
+    even across SIO disconnects, with FIFO ordering.
 
     Avoids self-recursion: `agentix.log` is excluded from forwarding to
     prevent feedback if our own debug logs were ever enabled.
@@ -47,8 +60,8 @@ class WorkerLogHandler(logging.Handler):
             return
         try:
             payload = _record_payload(record)
-            ns = _get_worker_namespace()
-            _sio._emit_nowait(ns.namespace, "record", payload)
+            stream = _get_worker_stream()
+            stream.emit_nowait(RECORD_EVENT, payload)
         except Exception:
             self.handleError(record)
 
@@ -117,22 +130,69 @@ class HostLogNamespace(socketio.AsyncClientNamespace):
     Each forwarded record is dispatched against the same logger name it
     had in the sandbox, so existing host-side handlers/formatters pick it
     up naturally.
+
+    Reconnect safety: tracks `_last_seq` per stream; on (re)connect emits
+    `_resume {since_seq}` so the sandbox replays anything missed; after
+    each delivery emits `_ack {seq}` so the sandbox can release its
+    buffer.
     """
 
     def __init__(self) -> None:
         super().__init__(NAMESPACE)
+        self._last_seq = 0
 
     async def trigger_event(self, event: str, *args: Any) -> Any:
-        if event in ("connect", "disconnect", "connect_error"):
+        if event == "connect":
+            # Initial connect AND every reconnect goes through here.
+            await self._emit_resume()
             return
-        if event != "record":
+        if event in ("disconnect", "connect_error"):
             return
+        if event != RECORD_EVENT:
+            return
+
         from agentix.runtime.client._sio_facade import _decode
 
-        payload = _decode(args[0]) if args else None
-        if not isinstance(payload, dict):
+        envelope = _decode(args[0]) if args else None
+        if not isinstance(envelope, dict):
             return
+
+        seq = envelope.get("_seq")
+        payload = envelope.get("data")
+        if not isinstance(seq, int) or not isinstance(payload, dict):
+            # Legacy / malformed payload — fall through without dedup.
+            if isinstance(envelope, dict) and isinstance(payload, dict):
+                _replay_record(payload)
+            return
+
+        if seq <= self._last_seq:
+            # Duplicate from a resume + already-delivered race. Re-ack
+            # so the sandbox can move on.
+            await self._emit_ack(seq)
+            return
+        self._last_seq = seq
         _replay_record(payload)
+        await self._emit_ack(seq)
+
+    async def _emit_resume(self) -> None:
+        with _suppress():
+            await self.emit(_sio._STREAM_RESUME_EVENT, _pack({"since_seq": self._last_seq}))
+
+    async def _emit_ack(self, seq: int) -> None:
+        with _suppress():
+            await self.emit(_sio._STREAM_ACK_EVENT, _pack({"seq": seq}))
+
+
+def _pack(data: Any) -> bytes:
+    from agentix.runtime.shared.codec import pack as _msgpack
+
+    return _msgpack(data)
+
+
+def _suppress():
+    import contextlib
+
+    return contextlib.suppress(BaseException)
 
 
 def _replay_record(payload: dict[str, Any]) -> None:

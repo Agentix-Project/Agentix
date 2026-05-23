@@ -99,6 +99,120 @@ async def test_client_remote_round_trip(use_inprocess_worker, live_server):
     assert result.msg == "echo:hello"
 
 
+async def test_client_remote_http_fast_path_falls_back_to_sio(use_inprocess_worker, live_server):
+    use_inprocess_worker()
+    base_url = await live_server()
+    async with RuntimeClient(base_url) as c:
+        # Exceeds the 1s HTTP sync budget, so result should arrive on SIO.
+        assert await c.remote(asyncio.sleep, 1.2) is None
+
+
+async def test_same_call_id_via_mixed_paths_runs_fn_exactly_once(use_inprocess_worker, live_server):
+    """The runtime must execute `fn` exactly once per `call_id`, even
+    when the same id is submitted through every path we expose:
+    HTTP fast-path, raw SIO `call`, and SIO `resume`.
+    """
+    use_inprocess_worker()
+    base_url = await live_server()
+
+    target._exec_counter = 0
+
+    call_id = "once-only-1"
+    req = request_for(target.count_exec_and_sleep, args=[0.6], call_id=call_id)
+    payload_bytes = pack(req.model_dump())
+
+    sio = socketio.AsyncClient()
+    results: asyncio.Queue = asyncio.Queue()
+
+    async def _on_result(data):
+        await results.put(unpack(data))
+
+    sio.on("call:result", _on_result)
+    await sio.connect(base_url)
+    try:
+        # Three submissions in quick succession on three paths.
+        async with httpx.AsyncClient(base_url=base_url) as http:
+            r = await http.post(
+                "/call",
+                content=pack({**req.model_dump(), "prefer_sync_ms": 50}),
+                headers={"content-type": "application/msgpack"},
+            )
+            r.raise_for_status()
+
+        await sio.emit("call", payload_bytes)
+        await sio.emit("resume", pack({"call_ids": [call_id]}))
+        # And a second SIO `call` for good measure.
+        await sio.emit("call", payload_bytes)
+
+        payload = await asyncio.wait_for(results.get(), timeout=5)
+    finally:
+        await sio.disconnect()
+
+    assert payload["call_id"] == call_id
+    import pickle as _pickle
+    assert _pickle.loads(payload["value"]) == 1, "fn must have run exactly once"
+
+
+async def test_runtime_replays_unacked_result_after_reconnect(use_inprocess_worker, live_server):
+    """A task whose result arrives while the host is disconnected
+    must be replayed on reconnect via the `resume` event, and `fn`
+    must run exactly once across the whole flow.
+    """
+    use_inprocess_worker()
+    base_url = await live_server()
+
+    target._exec_counter = 0
+
+    # First "session": submit a slow call, then drop the link before
+    # the result has time to arrive.
+    sio_a = socketio.AsyncClient()
+    await sio_a.connect(base_url)
+    call_id = "resume-test-1"
+    req = request_for(
+        target.count_exec_and_sleep,
+        args=[0.6],
+        call_id=call_id,
+    )
+    await sio_a.emit("call", pack(req.model_dump()))
+    # Give the server time to register the in-flight task.
+    await asyncio.sleep(0.1)
+    await sio_a.disconnect()
+
+    # Let the server task finish while nobody is connected.
+    await asyncio.sleep(1.0)
+
+    # Second "session": reconnect, ask the server to replay any results
+    # the host is still waiting for, and confirm receipt.
+    sio_b = socketio.AsyncClient()
+    results: asyncio.Queue = asyncio.Queue()
+
+    async def _on_result(data):
+        await results.put(unpack(data))
+
+    sio_b.on("call:result", _on_result)
+    await sio_b.connect(base_url)
+    try:
+        await sio_b.emit("resume", pack({"call_ids": [call_id]}))
+        payload = await asyncio.wait_for(results.get(), timeout=5)
+    finally:
+        await sio_b.disconnect()
+
+    assert payload["call_id"] == call_id
+    import pickle as _pickle
+    assert _pickle.loads(payload["value"]) == 1, "fn must run exactly once"
+
+
+async def test_client_remote_http_fallback_does_not_double_execute(use_inprocess_worker, live_server):
+    use_inprocess_worker()
+    base_url = await live_server()
+    async with RuntimeClient(base_url) as c:
+        await c.remote(target.reset_exec_counter)
+        # Must execute exactly once even when request returns 202 then
+        # completes via SIO.
+        result = await c.remote(target.count_exec_and_sleep, 1.2)
+    assert result == 1
+
+
 async def test_client_remote_large_payload(use_inprocess_worker, live_server):
     """A `c.remote` payload above the default 1 MB Socket.IO message cap
     must round-trip — not kill the websocket.

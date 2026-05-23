@@ -7,6 +7,10 @@ emitted on the `/trace` namespace (`trace_start`, `trace_end`,
 Host side: `HostTraceNamespace` receives those events and replays them
 against the host's local trace provider. `RuntimeClient` auto-registers
 it on connect.
+
+Reconnect safety: the bridge rides `agentix.sio.ReliableStream`, so
+events carry monotonic `_seq`, the sandbox buffers them, and the host
+emits `_resume` on (re)connect to recover anything missed.
 """
 
 from __future__ import annotations
@@ -42,6 +46,7 @@ class _ForwardProcessor(trace.Processor):
 
     def __init__(self, ns: _sio.Namespace) -> None:
         self._ns = ns
+        self._stream = _sio.ReliableStream(ns)
 
     def on_trace_start(self, t: trace.Trace) -> None:
         self._emit(
@@ -75,7 +80,7 @@ class _ForwardProcessor(trace.Processor):
         if not _sio._is_installed():
             return
         try:
-            _sio._emit_nowait(self._ns.namespace, event, payload)
+            self._stream.emit_nowait(event, payload)
         except RuntimeError:
             pass
 
@@ -124,20 +129,64 @@ def install_worker_bridge() -> _ForwardProcessor:
 
 
 class HostTraceNamespace(socketio.AsyncClientNamespace):
-    """Replays inbound `/trace` events into the host's local provider."""
+    """Replays inbound `/trace` events into the host's local provider.
+
+    Reconnect-safe: tracks last delivered `_seq`, emits `_ack` after
+    each delivery, and emits `_resume` on every (re)connect.
+    """
 
     def __init__(self) -> None:
         super().__init__(NAMESPACE)
+        self._last_seq = 0
 
     async def trigger_event(self, event: str, *args: Any) -> Any:
-        if event in ("connect", "disconnect", "connect_error"):
+        if event == "connect":
+            await self._emit_resume()
             return
+        if event in ("disconnect", "connect_error"):
+            return
+
         # Server forwards events as msgpack-bytes via `pack(...)`.
         from agentix.runtime.client._sio_facade import _decode
 
-        payload = _decode(args[0]) if args else None
-        if isinstance(payload, dict):
-            _dispatch(event, payload)
+        envelope = _decode(args[0]) if args else None
+        if not isinstance(envelope, dict):
+            return
+
+        seq = envelope.get("_seq")
+        payload = envelope.get("data")
+        if not isinstance(seq, int) or not isinstance(payload, dict):
+            # Legacy / malformed: best-effort dispatch, no ack.
+            if isinstance(envelope, dict):
+                _dispatch(event, envelope)
+            return
+
+        if seq <= self._last_seq:
+            await self._emit_ack(seq)
+            return
+        self._last_seq = seq
+        _dispatch(event, payload)
+        await self._emit_ack(seq)
+
+    async def _emit_resume(self) -> None:
+        with _suppress():
+            await self.emit(_sio._STREAM_RESUME_EVENT, _pack({"since_seq": self._last_seq}))
+
+    async def _emit_ack(self, seq: int) -> None:
+        with _suppress():
+            await self.emit(_sio._STREAM_ACK_EVENT, _pack({"seq": seq}))
+
+
+def _pack(data: Any) -> bytes:
+    from agentix.runtime.shared.codec import pack as _msgpack
+
+    return _msgpack(data)
+
+
+def _suppress():
+    import contextlib
+
+    return contextlib.suppress(BaseException)
 
 
 def _dispatch(event: str, frame: dict[str, Any]) -> None:

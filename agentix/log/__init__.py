@@ -13,6 +13,20 @@ the root logger that emits each `LogRecord` on the `/log` SIO
 namespace. The host's `RuntimeClient` auto-registers a consumer that
 forwards records into the host's own `logging` system, so they appear
 in host logs untouched.
+
+## Delivery contract
+
+`/log` is a side channel, separate from the `c.remote(...)` result
+path. The contract is:
+
+  - **Ordering**: records emitted on a single connection arrive in
+    FIFO order.
+  - **Eventual delivery**: under a healthy connection, every emitted
+    record reaches the host.
+  - **No happens-before with `remote()`**: a log record emitted from
+    inside `fn` may arrive on the host *after* `c.remote(fn, ...)`
+    has already returned. Treat side-channel observability as
+    eventually-consistent telemetry, not as a synchronization barrier.
 """
 
 from __future__ import annotations

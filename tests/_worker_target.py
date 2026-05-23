@@ -6,6 +6,8 @@ Lives in tests/ so the worker subprocess can import
 
 from __future__ import annotations
 
+import asyncio
+
 from pydantic import BaseModel
 
 
@@ -43,3 +45,17 @@ class Prefixer:
 
 
 prefixer = Prefixer("instance")
+
+_exec_counter = 0
+
+
+async def count_exec_and_sleep(delay: float) -> int:
+    global _exec_counter
+    _exec_counter += 1
+    await asyncio.sleep(delay)
+    return _exec_counter
+
+
+async def reset_exec_counter() -> None:
+    global _exec_counter
+    _exec_counter = 0

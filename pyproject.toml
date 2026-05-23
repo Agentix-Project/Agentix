@@ -26,6 +26,7 @@ dependencies = [
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
+    "pytest-cov>=7.1",
     "ruff>=0.6",
     "pyright>=1.1.380",
 ]
@@ -139,4 +140,36 @@ python_files = ["test_*.py"]
 # `addopts` excludes them by default — the `e2e` CI job runs them with
 # `-m e2e`, which overrides this.
 markers = ["e2e: builds a real bundle image — needs docker, slow"]
-addopts = ["-m", "not e2e"]
+# Coverage runs against `agentix` and the plugin packages; the
+# subprocess worker (`agentix/runtime/server/worker/process.py`) is
+# tracked separately because it executes in a child process and the
+# main pytest run cannot instrument it.
+addopts = [
+    "-m",
+    "not e2e",
+    "--cov=agentix",
+    "--cov-report=term-missing",
+]
+
+[tool.coverage.run]
+branch = true
+parallel = true
+# The subprocess worker boots into its own Python interpreter; without
+# explicit subprocess support coverage shows it as 0% even though the
+# subprocess tests do exercise it. Tracking it as a separate run keeps
+# the main report honest.
+omit = [
+    "agentix/runtime/server/worker/process.py",
+    "agentix/runtime/server/worker/__main__.py",
+    "agentix/cli/__main__.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]

@@ -81,11 +81,16 @@ top of pickle without changing the default path.
 ### Transport Strategy
 
 `c.remote()` and side channels share one Socket.IO connection. HTTP is
-kept only for `/health`.
+kept only for `/health` and the internal `/call` fast-path used by
+`RuntimeClient.remote` to skip a SIO round-trip for short-running
+calls.
 
 `c.remote()` uses the `/` namespace (`call`, `call:result`,
-`call:error`, `cancel`). Trace, log, and plugin traffic use dedicated
-namespaces bridged through the worker pipe via `agentix.sio`.
+`call:error`, `cancel`, plus `resume`/`ack` for reconnect-safe
+delivery). Trace, log, and plugin traffic use dedicated namespaces
+bridged through the worker pipe via `agentix.sio`; the core `/log`
+and `/trace` namespaces ride `agentix.sio.ReliableStream` for
+at-least-once delivery across reconnects.
 
 Remaining transport work:
 
@@ -111,6 +116,35 @@ is still moving quickly.
 
 Future directions, listed so the framework can avoid architectural
 dead-ends without expanding the current API prematurely.
+
+- **OpenTelemetry trace export** — ship `agentix.trace` spans to a
+  production observability platform (Datadog, Jaeger, Tempo, Honeycomb,
+  any OTLP-compatible backend). Implementation should not change the
+  `agentix.trace` public API. Plan:
+
+  - Keep `agentix.trace` (`Trace`, `Span`, `Processor`) as the user
+    surface. Sandbox code stays unchanged.
+  - The sandbox already streams `/trace` via `ReliableStream`; the host
+    receives via `HostTraceNamespace` and fans out through the existing
+    provider, so a new `Processor` is the right plug-in point.
+  - Ship as a separate plugin package `agentix-trace-otel` to keep
+    `opentelemetry-*` out of core dependencies (matches the current
+    plugin-axis style of deployments / runtime-basic / agents).
+  - Map `agentix.Span` → OTel `ReadableSpan`: `trace_id` / `span_id` /
+    `parent_id` / `attrs` / `started_at` / `ended_at` / `status` /
+    `events` are 1:1; only the id-length normalization and timestamp
+    units (ns) need adapters.
+  - Export from the **host** by default (sandboxes are ephemeral; host
+    owns the long-lived collector connection). A sandbox-side exporter
+    is possible later for cases where the sandbox can reach the
+    collector directly.
+  - User surface remains:
+    ```python
+    from agentix import trace
+    from agentix.trace.otel import OTelExporter
+
+    trace.add_processor(OTelExporter(endpoint="...", headers={...}))
+    ```
 
 - **Trace pub/sub** — remote functions emit structured rollout events;
   subscribers receive rollout-scoped fan-out.

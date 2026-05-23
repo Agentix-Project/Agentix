@@ -22,9 +22,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import pickle
 import uuid
-from typing import Any
+from collections.abc import Awaitable, Callable
+from typing import Any, Literal, ParamSpec, TypeVar, cast
 
 import httpx
 import socketio
@@ -33,6 +35,11 @@ from agentix.runtime.shared import MAX_MESSAGE_BYTES
 from agentix.runtime.shared.callables import RemoteCallable, display_name_for
 from agentix.runtime.shared.codec import pack, unpack
 from agentix.runtime.shared.models import HealthResponse, RemoteError
+
+logger = logging.getLogger("agentix.runtime.client")
+
+P = ParamSpec("P")
+R = TypeVar("R")
 
 
 class RemoteCallError(RuntimeError):
@@ -60,6 +67,10 @@ def _decode_payload(raw: Any) -> dict[str, Any]:
     return raw
 
 
+def _unpickle_value(raw: Any) -> Any:
+    return pickle.loads(raw) if raw is not None else None
+
+
 class RuntimeClient:
     """Async client for the agentix runtime server."""
 
@@ -74,6 +85,7 @@ class RuntimeClient:
         # Namespaces queued for registration on connect.
         self._namespaces: list[socketio.AsyncClientNamespace] = []
         self._register_core_namespaces()
+        self._http_sync_budget_ms = 1000
 
     def _register_core_namespaces(self) -> None:
         """Register agentix-core's built-in `/trace` and `/log` handlers."""
@@ -126,7 +138,45 @@ class RuntimeClient:
                 raise ValueError(f"namespace {path!r} already registered")
         self._namespaces.append(ns)
 
-    async def remote(self, fn, *args, **kwargs):
+    async def _try_http_fast_path(
+        self,
+        *,
+        sio: socketio.AsyncClient,
+        payload: dict[str, Any],
+    ) -> tuple[Literal["fallback", "accepted", "result", "error"], Any]:
+        sid = getattr(sio, "sid", None)
+        if not (isinstance(sid, str) and sid):
+            return "fallback", None
+
+        http_payload = {
+            **payload,
+            "prefer_sync_ms": self._http_sync_budget_ms,
+        }
+        r = await self._client.post(
+            "/call",
+            content=pack(http_payload),
+            headers={"content-type": "application/msgpack"},
+        )
+        r.raise_for_status()
+        reply = unpack(r.content) if r.content else {}
+        if not isinstance(reply, dict):
+            raise RuntimeError("invalid /call reply payload")
+
+        if reply.get("accepted") is True:
+            return "accepted", None
+        if reply.get("ok") is True:
+            return "result", _unpickle_value(reply.get("value"))
+        if reply.get("ok") is False:
+            err = RemoteError.model_validate(reply.get("error") or {})
+            return "error", err
+        raise RuntimeError("invalid /call reply fields")
+
+    async def remote(
+        self,
+        fn: Callable[P, R] | Callable[P, Awaitable[R]],
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> R:
         """Execute `fn(*args, **kwargs)` in the sandbox and return its result."""
         display_name = display_name_for(fn)
         callable_ref = RemoteCallable._resolve(fn)
@@ -143,13 +193,23 @@ class RuntimeClient:
         }
         terminated = False
         try:
-            await sio.emit("call", pack(payload))
+            # Fast path: try HTTP first for short-running calls. If the
+            # call exceeds the sync budget, the server returns `accepted`
+            # and completes via the normal SIO result channel.
+            kind, value = await self._try_http_fast_path(sio=sio, payload=payload)
+            if kind == "fallback":
+                await sio.emit("call", pack(payload))
+            elif kind == "result":
+                terminated = True
+                return cast(R, value)
+            elif kind == "error":
+                terminated = True
+                _raise_remote_error(display_name, cast(RemoteError, value))
             while True:
                 kind, data = await q.get()
                 if kind == "result":
                     terminated = True
-                    raw = data.get("value")
-                    return pickle.loads(raw) if raw is not None else None
+                    return cast(R, _unpickle_value(data.get("value")))
                 if kind == "error":
                     err = RemoteError.model_validate(data["error"])
                     terminated = True
@@ -185,13 +245,23 @@ class RuntimeClient:
             sio.on("call:result", _on_call_result)
             sio.on("call:error", _on_call_error)
 
-            async def _on_disconnect(*_args):
-                # The server keys in-flight calls by session id; once
-                # the connection drops, any pending `c.remote` can never
-                # receive its result. Fail them loudly instead of
-                # hanging forever.
-                self._fail_pending("runtime connection lost")
+            async def _on_connect(*_args):
+                # Fires on initial connect and on every reconnect. Tell
+                # the server which call_ids we still expect results for;
+                # any cached unacked results get replayed.
+                pending_ids = list(self._pending.keys())
+                if not pending_ids:
+                    return
+                with contextlib.suppress(BaseException):
+                    await sio.emit("resume", pack({"call_ids": pending_ids}))
 
+            async def _on_disconnect(*_args):
+                # Tasks survive on the server side; results are buffered
+                # until ack. We rely on socketio's auto-reconnect to come
+                # back, then `_on_connect` will re-emit `resume`.
+                logger.debug("sio disconnect; will resume after reconnect")
+
+            sio.on("connect", _on_connect)
             sio.on("disconnect", _on_disconnect)
 
             namespaces = ["/"]
@@ -204,21 +274,30 @@ class RuntimeClient:
             self._sio = sio
             return sio
 
-    def _fail_pending(self, reason: str) -> None:
-        """Push an error onto every in-flight call's queue. Used when the
-        connection drops — a pending call's result is unrecoverable."""
-        for q in list(self._pending.values()):
-            q.put_nowait((
-                "error",
-                {"call_id": "", "error": {"type": "Disconnected", "message": reason}},
-            ))
-
     async def _route_event(self, kind: str, raw: Any) -> None:
         data = _decode_payload(raw)
         call_id = data.get("call_id")
-        q = self._pending.get(call_id) if isinstance(call_id, str) else None
-        if q is not None:
-            await q.put((kind, data))
+        if not isinstance(call_id, str):
+            return
+        q = self._pending.get(call_id)
+        if q is None:
+            # Either a duplicate replay or an event for a call_id we
+            # already retired. Ack defensively so the server can free
+            # the slot.
+            await self._ack(call_id)
+            return
+        await q.put((kind, data))
+        # The event has landed in this process; the server can drop it
+        # from its replay buffer regardless of whether `remote()` ends
+        # up returning it to user code.
+        await self._ack(call_id)
+
+    async def _ack(self, call_id: str) -> None:
+        sio = self._sio
+        if sio is None or not sio.connected:
+            return
+        with contextlib.suppress(BaseException):
+            await sio.emit("ack", pack({"call_id": call_id}))
 
 
 __all__ = ["RemoteCallError", "RuntimeClient"]

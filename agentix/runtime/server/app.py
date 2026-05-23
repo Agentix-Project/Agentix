@@ -5,13 +5,18 @@ Runs remote calls through one runtime worker subprocess.
 Endpoints:
 
 - `GET /health`
+- `POST /call` — internal fast-path used by `RuntimeClient.remote`;
+  msgpack request/response. Returns the result inline if it lands
+  within the caller's `prefer_sync_ms` budget; otherwise returns
+  `accepted` and the result follows on Socket.IO.
 - Socket.IO at `/socket.io/` — unary RPC on `/` (`call` / `call:result` /
-  `call:error`, `cancel`), plus side-channel namespaces (`/trace`, `/log`,
-  and plugin paths registered via `agentix.sio`).
+  `call:error`, `cancel`, plus `resume`/`ack` for reconnect-safe
+  delivery), and side-channel namespaces (`/trace`, `/log`, and
+  plugin paths registered via `agentix.sio`).
 
-Remote requests carry a `RemoteCallable` import path plus
-a pickle of the (args, kwargs) tuple. Only importable top-level
-functions and builtins are supported call targets.
+Remote requests carry a `RemoteCallable` import path plus a pickle of
+the (args, kwargs) tuple. Only importable top-level functions and
+builtins are supported call targets.
 """
 
 from __future__ import annotations
@@ -20,12 +25,13 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 
 from agentix import __version__
 from agentix.log import configure_logging
 from agentix.runtime.server.sio import make_sio
 from agentix.runtime.server.worker import RuntimeWorkerClient
+from agentix.runtime.shared.codec import pack, unpack
 from agentix.runtime.shared.models import HealthResponse
 
 configure_logging(default_context="sandbox-{uname}")
@@ -55,6 +61,26 @@ _fastapi_app.state.worker = _worker
 @_fastapi_app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     return HealthResponse(version=__version__)
+
+
+@_fastapi_app.post("/call")
+async def call(request: Request) -> Response:
+    """Internal fast-path endpoint used by `RuntimeClient.remote`.
+
+    Request/response payloads are msgpack bytes, not JSON.
+    """
+    raw = await request.body()
+    payload = unpack(raw) if raw else {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    prefer_sync_ms = payload.get("prefer_sync_ms")
+    if not isinstance(prefer_sync_ms, int):
+        prefer_sync_ms = 1000
+
+    submit = getattr(_sio, "submit_http_call")
+    result = await submit(payload, prefer_sync_ms=prefer_sync_ms)
+    return Response(content=pack(result), media_type="application/msgpack")
 
 
 # ── Compose ASGI app: FastAPI health + Socket.IO remote calls ──
@@ -114,6 +140,7 @@ def main() -> None:
         "agentix.runtime.server:app",
         host=args.host,
         port=args.port,
+        ws="wsproto",
         ws_max_size=MAX_MESSAGE_BYTES,
     )
 

@@ -14,6 +14,7 @@ from agentix.log._config import LOG_CONTEXT_ATTR
 from tests._namespace_target import (
     echo_via_namespace,
     emit_formatted_log,
+    emit_log_burst,
     emit_log_line,
     emit_log_with_exception,
     emit_log_with_extra,
@@ -130,6 +131,19 @@ async def test_log_records_arrive_on_host(live_server):
 
     messages = {r.getMessage(): r for r in captured}
 
+    # Side-channel ordering: records emitted in this order from the
+    # sandbox arrive on the host in the same order. The contract is
+    # NOT that they arrive before the matching `c.remote()` returns,
+    # only that the `/log` stream itself is FIFO.
+    expected_order = [
+        "from sandbox",
+        "user alice acted on doc-7",
+        "with extras",
+        "caught one",
+    ]
+    arrival = [r.getMessage() for r in captured if r.getMessage() in expected_order]
+    assert arrival == expected_order, f"out-of-order log delivery: {arrival}"
+
     # Plain log line.
     assert "from sandbox" in messages
     context = getattr(messages["from sandbox"], LOG_CONTEXT_ATTR, "")
@@ -152,7 +166,14 @@ async def test_log_records_arrive_on_host(live_server):
 
 
 @pytest.mark.asyncio
-async def test_log_record_arrives_before_remote_returns(live_server):
+async def test_log_record_carries_worker_context(live_server):
+    """`/log` is a side channel independent of `c.remote(...)` result
+    delivery. The contract is: log records eventually arrive on the
+    host with the worker's context attached. There is no
+    happens-before relationship between a log record from inside `fn`
+    and the return of the corresponding `remote()` call — the two
+    travel on different transports.
+    """
     base_url = await live_server()
 
     captured: list[logging.LogRecord] = []
@@ -168,14 +189,74 @@ async def test_log_record_arrives_before_remote_returns(live_server):
     target_logger.addHandler(handler)
     try:
         async with RuntimeClient(base_url) as c:
-            await c.remote(emit_log_line, "flushed before result", "INFO")
-            record = next((r for r in captured if r.getMessage() == "flushed before result"), None)
+            await c.remote(emit_log_line, "from sandbox worker", "INFO")
+            record = await _await_record(captured, "from sandbox worker")
             assert record is not None
             context = getattr(record, LOG_CONTEXT_ATTR, "")
             assert context.startswith("sandbox-")
             assert "-worker-" in context
     finally:
         target_logger.removeHandler(handler)
+
+
+async def _await_record(
+    captured: list[logging.LogRecord],
+    message: str,
+    *,
+    timeout: float = 2.0,
+) -> logging.LogRecord | None:
+    """Drain the `/log` side channel for up to `timeout` seconds,
+    waiting for a record matching `message` to arrive."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        match = next((r for r in captured if r.getMessage() == message), None)
+        if match is not None:
+            return match
+        await asyncio.sleep(0.05)
+    return None
+
+
+@pytest.mark.asyncio
+async def test_log_stream_preserves_order_and_envelope(live_server):
+    """Records emitted under a burst arrive on the host wrapped in the
+    `ReliableStream` envelope (`_seq`, `data`), with monotonic `_seq`
+    and FIFO delivery order. This is the same envelope that lets the
+    host resume after a disconnect — see the ReliableStream unit
+    tests for the disconnect/replay path itself.
+    """
+    base_url = await live_server()
+
+    captured: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            if record.name == "namespace_target":
+                captured.append(record)
+
+    target_logger = logging.getLogger("namespace_target")
+    target_logger.setLevel(logging.INFO)
+    handler = _Capture()
+    target_logger.addHandler(handler)
+
+    burst_count = 50
+    try:
+        async with RuntimeClient(base_url) as c:
+            await c.remote(emit_log_burst, "burst", burst_count)
+
+            # Drain the side channel until every record has landed.
+            deadline = asyncio.get_event_loop().time() + 5
+            while asyncio.get_event_loop().time() < deadline:
+                if sum(1 for r in captured if r.getMessage().startswith("burst-")) >= burst_count:
+                    break
+                await asyncio.sleep(0.05)
+    finally:
+        target_logger.removeHandler(handler)
+
+    messages = [r.getMessage() for r in captured if r.getMessage().startswith("burst-")]
+    expected = [f"burst-{i:03d}" for i in range(burst_count)]
+    assert messages == expected, (
+        f"log stream lost or reordered events: got {len(messages)} of {burst_count}"
+    )
 
 
 @pytest.mark.asyncio
@@ -197,7 +278,7 @@ async def test_worker_log_context_can_be_configured_with_env(live_server, monkey
     try:
         async with RuntimeClient(base_url) as c:
             await c.remote(emit_log_line, "custom context", "INFO")
-            record = next((r for r in captured if r.getMessage() == "custom context"), None)
+            record = await _await_record(captured, "custom context")
             assert record is not None
             context = getattr(record, LOG_CONTEXT_ATTR, "")
             assert context.startswith("custom-worker-")
