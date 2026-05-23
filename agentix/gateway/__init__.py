@@ -1,7 +1,6 @@
 """Agentix gateway — sandbox sessions, dispatch, capture, rollouts.
 
-The gateway is Agentix's answer to ProRL-Agent-Server's
-`polar.gateway`: a small HTTP service that
+A small HTTP service that
 
   * accepts session dispatches from a coordinator (a rollout server,
     a notebook, a CI job — anything that wants to drive sandboxed
@@ -16,7 +15,7 @@ The gateway is Agentix's answer to ProRL-Agent-Server's
   * supports `pause()` / `resume()` so a training bridge can stop new
     generation while weights are being updated.
 
-Module layout mirrors `polar.gateway` for ease of cross-reference:
+Module layout:
 
 ```
 agentix.gateway/

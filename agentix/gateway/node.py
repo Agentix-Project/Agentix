@@ -1,9 +1,8 @@
 """Gateway node lifecycle — boots the dispatcher, serves the API, heartbeats.
 
-Polar's `polar.gateway.node` registers with a remote rollout server
-and sends periodic heartbeats; we keep the same shape but make the
-heartbeat target optional, since Agentix gateways also run
-standalone (notebook driver, CI eval harness, etc.).
+A `GatewayNode` can register with a remote rollout server and send
+periodic heartbeats, but the heartbeat target is optional — Agentix
+gateways also run standalone (notebook driver, CI eval harness, etc.).
 """
 
 from __future__ import annotations
@@ -33,8 +32,6 @@ logger = logging.getLogger("agentix.gateway.node")
 @dataclass
 class NodeConfig:
     """How the node identifies itself + optionally talks to a coordinator.
-
-    Mirrors `polar.gateway.node.NodeConfig`:
 
       * `node_id`     — stable id for this gateway process; defaults
                         to `<hostname>-<short-uuid>`.

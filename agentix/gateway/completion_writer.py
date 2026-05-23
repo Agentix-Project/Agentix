@@ -1,8 +1,8 @@
 """Pluggable sink for captured completion records.
 
-Mirrors `polar.gateway.completion_writer`: keep the in-memory
-`RecordStore` as the source of truth, then optionally tee every
-record into durable storage via a `CompletionWriter`.
+The in-memory `RecordStore` is the source of truth; a
+`CompletionWriter` optionally tees every captured record into durable
+storage.
 
 The protocol is intentionally minimal — `write(record)` and `close()`.
 That covers jsonl, parquet, kafka, ClickHouse, HF datasets, an OTel

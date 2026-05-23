@@ -1,11 +1,9 @@
 """Stage orchestration for a single gateway session.
 
-Polar's `polar.gateway.dispatcher` runs each session through four
-ordered stages — INIT, READY, RUNNING, POSTRUN — with separate worker
-pools so a slow runtime preparation can't starve an active
-generation step. We model the same shape here, but with a single-
-worker-per-session executor backed by `asyncio.Task` instead of a
-process pool — Agentix's runtime already isolates per-sandbox state.
+Each session runs through four ordered stages — INIT, READY, RUNNING,
+POSTRUN — with a single-worker-per-session executor backed by
+`asyncio.Task`. Agentix's runtime already isolates per-sandbox state,
+so we don't need a separate process pool per stage.
 
 Stages:
 

@@ -1,8 +1,7 @@
 # `agentix.gateway` Roadmap
 
-`agentix.gateway` is Agentix's coordinated sandbox-session service —
-the same shape ProRL-Agent-Server exposes as `polar.gateway`, adapted
-to Agentix's two-concept model (`c.remote(...)` + bundles).
+`agentix.gateway` is Agentix's coordinated sandbox-session service,
+built on Agentix's two-concept model (`c.remote(...)` + bundles).
 
 This document tracks what's in this PR vs. what's planned. Items are
 intentionally additive: nothing here should require a breaking change
@@ -93,11 +92,11 @@ errors with the new code in place.
    an opt-in disk-backed eviction store so the gateway never loses a
    terminal result when callers haven't drained results yet.
 
-5. **Process-pool stage isolation.** Polar's gateway uses separate
-   worker pools so a slow INIT can't starve a hot RUNNING. Today
-   we rely on Agentix's per-sandbox isolation; revisit if CPU-bound
-   POSTRUN work (trajectory scoring, large records writes) starts
-   competing with active generations.
+5. **Process-pool stage isolation.** Today we rely on Agentix's
+   per-sandbox isolation to keep a slow INIT from starving a hot
+   RUNNING. Revisit with dedicated worker pools per stage if
+   CPU-bound POSTRUN work (trajectory scoring, large records
+   writes) starts competing with active generations.
 
 ## Medium-term
 
@@ -111,12 +110,11 @@ errors with the new code in place.
    captured `RecordStore` snapshot — useful for offline eval, RL
    buffer regression checks, and deterministic test runs.
 
-3. **Session API for grouped rollouts.** Mirror
-   `polar.gateway.session.SessionSpec` group ids: one parent
-   `rollout_id`, many child sessions, so coordinators can ask "give
-   me the records for rollout R" in one shot. Maps onto a new
-   `SessionSpec.rollout_id` plus a `RecordStore.for_rollout(...)`
-   accessor.
+3. **Session API for grouped rollouts.** Add a parent `rollout_id`
+   on `SessionSpec` with many child sessions, so coordinators can
+   ask "give me the records for rollout R" in one shot. Maps onto
+   a new `SessionSpec.rollout_id` plus a
+   `RecordStore.for_rollout(...)` accessor.
 
 4. **Pluggable per-call upstream routing.** The host today binds one
    `OpenAICompatibleClient` per gateway. Add a `route(spec) ->

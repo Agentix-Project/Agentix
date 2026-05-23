@@ -1,9 +1,9 @@
 """Session state, status accounting, result envelope.
 
-Mirrors `polar.gateway.session`: each `Session` represents one run of
-an agent callable inside a freshly-provisioned sandbox. The session
-moves through a fixed lifecycle managed by `Dispatcher`; downstream
-consumers see the immutable `SessionResult` once it ends.
+Each `Session` represents one run of an agent callable inside a
+freshly-provisioned sandbox. The session moves through a fixed
+lifecycle managed by `Dispatcher`; downstream consumers see the
+immutable `SessionResult` once it ends.
 """
 
 from __future__ import annotations
@@ -18,10 +18,8 @@ from typing import Any
 class SessionStatus(enum.StrEnum):
     """Where a session is in its lifecycle.
 
-    Mirrors `polar.gateway.session.SessionStatus` 1:1 so a coordinator
-    written for either system can drive both. Terminal states are
-    `succeeded`, `failed`, and `cancelled`; everything else is
-    in-flight.
+    Terminal states are `succeeded`, `failed`, and `cancelled`;
+    everything else is in-flight.
     """
 
     QUEUED = "queued"
