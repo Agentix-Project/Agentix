@@ -66,11 +66,26 @@ async def main() -> None:
                 print(f"{type(exc).__name__}: {exc}", flush=True)
                 await print_verification(client, args.workdir)
                 return
-            print(f"mini_exit_status={result.get('exit_status', 'unknown')}", flush=True)
-            submission = str(result.get("submission", ""))
+            print(f"mini_exit_status={result.exit_status}", flush=True)
+            submission = result.submission
             if submission:
                 print("mini_submission:", flush=True)
                 print(submission.rstrip(), flush=True)
+            if result.usage:
+                print(
+                    "mini_usage: "
+                    f"input={result.usage.get('n_input_tokens', 0)} "
+                    f"output={result.usage.get('n_output_tokens', 0)} "
+                    f"cached={result.usage.get('n_cache_tokens', 0)} "
+                    f"cost=${result.usage.get('cost_usd', 0):.4f}",
+                    flush=True,
+                )
+            if result.trajectory is not None:
+                print(
+                    f"mini_trajectory_steps={len(result.trajectory.steps)} "
+                    f"schema={result.trajectory.schema_version}",
+                    flush=True,
+                )
             await print_verification(client, args.workdir)
 
 
