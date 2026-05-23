@@ -126,9 +126,9 @@ server, so anything installed into the bundle can be imported on demand.
 
 ## Deployment Boundary
 
-Deployments are host-side plugins that start bundle images. They return a
-`runtime_url`; after that, the runtime protocol is the same regardless of
-where the sandbox is running.
+Deployments are host-side plugins that stage a bundle and start the
+sandbox. They return a `runtime_url`; after that, the runtime protocol
+is the same regardless of where the sandbox is running.
 
 ```text
 Deployment.create(SandboxConfig(image="python:3.13-slim", bundle="my-rollout:0.1.0"))
@@ -147,5 +147,5 @@ Bundle = what code and dependencies exist in the sandbox
 Remote call = which importable function to call
 Worker = where user code executes
 agentix.sio = sandbox ↔ host side channels (trace, log, plugins)
-Deployment = where the bundle image runs
+Deployment = where the bundle is staged and run
 ```

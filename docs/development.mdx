@@ -54,13 +54,14 @@ Rebuild the base image when runtime code or dependency versions change.
 
 ```bash
 agentix build
-agentix build path/to/project -o my-rollout:dev
+agentix build path/to/project --name my-rollout:dev
+agentix build path/to/project --name my-rollout:dev --format oci-image
 agentix build path/to/project --dry-run
 ```
 
 The build installs the project and its dependency closure into
 `/nix/runtime`. If the project includes `default.nix`, the build also
-splices system binaries into the final image.
+splices system binaries into the final bundle.
 
 ## Smoke Test a Sandbox
 

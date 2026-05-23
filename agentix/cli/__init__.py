@@ -1,7 +1,7 @@
 """`agentix` command-line interface.
 
 The core CLI intentionally stays narrow: `agentix build` packages a
-project into a bundle image. Other workflows should expose their own
+project into a bundle artifact. Other workflows should expose their own
 `console_scripts` entry instead of expanding the central CLI.
 
 The CLI deliberately doesn't use argparse subparsers — argparse
