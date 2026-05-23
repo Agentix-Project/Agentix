@@ -3,8 +3,8 @@
 Agentix keeps two user-facing concepts:
 
 - **Remote calls.** `c.remote(fn, ...)` calls a callable target inside a
-  sandbox. The host encodes the target as a `RemoteCallable` import path
-  (`module::qualname`); args and kwargs travel as a pickle blob.
+  sandbox. The callable is encoded as an import-path `RemoteCallable`;
+  args and kwargs travel as a pickle blob.
 - **Bundle.** `agentix build [path]` packages one project root and its
   declared dependencies into a deploy-ready runtime image.
 
@@ -16,13 +16,12 @@ downstream users of the library.
 
 Current architecture:
 
-- [x] `RuntimeClient.remote(fn, ...)` for **unary** calls (sync or async).
-- [x] Host↔sandbox **side channels** via Socket.IO namespaces (`/trace`,
-      `/log`, plugin paths) bridged through the worker pipe.
+- [x] `RuntimeClient.remote(fn, ...)` runs an importable callable in the
+      sandbox and returns its value.
 - [x] One runtime server per sandbox image.
 - [x] One worker subprocess per runtime server.
-- [x] `RemoteCallable` import-path identity for remote targets.
-- [x] Pickle blobs for args, kwargs, and return values.
+- [x] Import-path `RemoteCallable` for function identity; pickle for
+      args, kwargs, and return values.
 - [x] Callable invocation inside `agentix.runtime.server`; targets are not
       required to be pure functions. If Python can resolve the callable
       from the requested target, Agentix should be able to invoke it.
@@ -31,6 +30,8 @@ Current architecture:
 - [x] One merged `/nix/runtime` venv containing the framework, user
       project, integrations, and transitive dependencies.
 - [x] Deployment backend plugin axis via `agentix.deployment`.
+- [x] Side channels over the same Socket.IO connection: `/trace`, `/log`,
+      and plugin namespaces via `agentix.sio`.
 
 The single-worker model is intentional for now. It keeps runtime state
 and debugging simple while the public API is still being shaped.
@@ -69,28 +70,32 @@ or integration concern, not a framework constraint.
 
 The framework's responsibility is narrower:
 
-- encode callable identity as an importable `RemoteCallable` path
+- encode importable callables as `RemoteCallable`
 - unpickle args/kwargs and invoke the target inside the sandbox
 - pickle the return value back
 - surface errors in-band through the runtime protocol
 
-Future work may add optional pydantic validation/coercion when type
-annotations are present.
+Future work may add optional annotation-driven validation/coercion on
+top of pickle without changing the default path.
 
 ### Transport Strategy
 
-Unary RPC and side-channel namespaces share one Socket.IO connection.
-HTTP is kept only for `/health`.
+`c.remote()` and side channels share one Socket.IO connection. HTTP is
+kept only for `/health` and the internal `/call` fast-path used by
+`RuntimeClient.remote` to skip a SIO round-trip for short-running
+calls.
+
+`c.remote()` uses the `/` namespace (`call`, `call:result`,
+`call:error`, `cancel`, plus `resume`/`ack` for reconnect-safe
+delivery). Trace, log, and plugin traffic use dedicated namespaces
+bridged through the worker pipe via `agentix.sio`; the core `/log`
+and `/trace` namespaces ride `agentix.sio.ReliableStream` for
+at-least-once delivery across reconnects.
 
 Remaining transport work:
 
-- **Stream / bidi RPC** — `async for item in client.remote(f, ...)` and
-  `Channel`-based bidirectional calls over the `/` namespace (not
-  implemented yet; use `agentix.sio` namespaces for streaming today).
-- collapse event naming into a single `call:*` family if the current
-  naming becomes noisy
-- let the worker classify actual return values at runtime instead of
-  relying only on pre-call shape detection
+- optional annotation-driven msgpack codec path alongside pickle
+- collapse event naming if the current `call:*` family becomes noisy
 
 ## Sibling Repos
 

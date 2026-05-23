@@ -97,8 +97,8 @@ official harness flow.
 # host-side: installs the example plus local agent/dataset plugins
 uv sync
 
-# package the project + every declared dep into one image
-uv run agentix build . --name eval-cc-swe:0.2.0
+# package the project + every declared dep into one Docker-compatible image
+uv run agentix build . --name eval-cc-swe:0.2.0 --format oci-image
 
 # (optional) pre-pull the SWE-bench eval images you plan to score
 docker pull swebench/sweb.eval.x86_64.django_1776_django-11099:latest

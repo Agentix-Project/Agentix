@@ -11,7 +11,7 @@ gets `rg` from `default.nix`, which `agentix build` merges into
 
 ```bash
 uv sync
-uv run agentix build .
+uv run agentix build . --format oci-image
 uv run main.py
 ```
 
@@ -19,9 +19,10 @@ uv run main.py
 
 1. `uv sync` installs this example plus the local Agentix packages from
    `[tool.uv.sources]`.
-2. `uv run agentix build .` builds the runtime bundle image from this
-   project. It installs `main.py` into the bundle and applies
-   `default.nix`, so `rg` is available in the sandbox runtime.
+2. `uv run agentix build . --format oci-image` builds the runtime
+   bundle image from this project. It installs `main.py` into the
+   bundle and applies `default.nix`, so `rg` is available in the
+   sandbox runtime.
 3. `uv run main.py` starts a local Docker sandbox using the built
    `hello-world` bundle, then prints the host result and sandbox result.
 

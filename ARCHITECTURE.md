@@ -1,5 +1,17 @@
 # Agentix Architecture
 
+## Audience
+
+Agentix is a user-friendly framework for **agent evaluation**, **RL
+rollout execution**, and **training data collection**. Host-side trainers
+and eval scripts orchestrate sandboxes; sandbox-side code is ordinary
+Python (agents, bash, scorers). [`abridge`](plugins/abridge/README.md)
+correlates traces into rollout logs for RL buffers. The design goal is
+lower integration tax than bespoke rollout servers—see the README
+comparison with [ProRL-Agent-Server](https://github.com/NVIDIA-NeMo/ProRL-Agent-Server).
+
+## Core pieces
+
 Agentix has two core pieces:
 
 1. **Bundle**: build one runtime image containing the framework, user
@@ -34,9 +46,9 @@ result = await client.remote(app.run, input="hello")
 ```
 
 Both forms give Agentix the same callable object. The host encodes it as
-a `RemoteCallable` import path (`module::qualname`). Only importable
-top-level functions and builtins are supported — lambdas, partials,
-bound methods, and callable instances are rejected at the host.
+an import-path `RemoteCallable` (`module::qualname`). Lambdas, bound
+methods, partials, and other non-importable callables are rejected at
+the host before the call leaves.
 
 ## Bundle
 
@@ -112,8 +124,12 @@ await asyncio.create_subprocess_exec("claude", "-p", instruction)
 
 ## Remote Calls
 
-`RuntimeClient.remote(fn, ...)` is a unary RPC: one request, one pickled
-return value.
+`RuntimeClient.remote(fn, ...)` runs one Python callable in the sandbox
+and returns its value. The host:
+
+1. builds a `RemoteCallable` from `fn.__module__` and `fn.__qualname__`
+2. pickles `(args, kwargs)` with stdlib pickle
+3. sends both over Socket.IO on the `/` namespace
 
 For example:
 
@@ -123,33 +139,26 @@ from agentix.swebench import run
 score = await client.remote(run, instance=inst, patch=patch)
 ```
 
-The wire payload looks like:
+becomes a wire payload like:
 
 ```python
 {
-    "call_id": "uuid-hex",
+    "call_id": "…uuid…",
     "callable": "agentix.swebench::run",
     "arguments": pickle.dumps(((), {"instance": inst, "patch": patch})),
 }
 ```
 
-On the worker:
+The runtime server forwards the request to one worker subprocess. The
+worker imports the module, resolves the function, unpickles args/kwargs,
+calls it (awaiting when the return value is awaitable), and pickles the
+result back.
 
-1. `RemoteCallable.resolve()` imports `agentix.swebench` and looks up `run`.
-2. `pickle.loads(arguments)` yields `(args, kwargs)`.
-3. The invoker calls `run(*args, **kwargs)` (awaiting if the result is a
-   coroutine).
-4. The return value is pickled back into `value`.
+Sync and async functions both work as targets. Args and return values
+round-trip as pickle blobs; the runtime does not run pydantic
+validation on the wire today.
 
-Args, kwargs, and return values travel as stdlib pickle blobs. There is
-no pydantic validation on the RPC path today. Socket.IO event envelopes
-use msgpack via `agentix.runtime.shared.codec`.
-
-Sync and async functions both work as call targets.
-
-For host↔sandbox traffic that doesn't fit `c.remote()`'s
-request/response shape (trace, logs, plugin events), use
-`agentix.sio` namespaces (see Side Channels below).
+## Flow
 
 ```text
 Host
@@ -157,36 +166,23 @@ Host
     RemoteCallable._resolve(fn)  ->  module::qualname
     pickle.dumps((args, kwargs))
       |
-      v  Socket.IO call / call:result / call:error
+      v  Socket.IO `/` — call / call:result / call:error / cancel
 Sandbox
   agentix-server
       |
-      v  length-prefixed msgpack frames
-Single runtime worker subprocess
-  RemoteCallable.resolve() -> fn
+      v  length-prefixed msgpack frames on a private pipe
+Single runtime worker process
+  RemoteCallable.resolve()  ->  import fn
   pickle.loads(arguments)
   call fn(*args, **kwargs)
   pickle.dumps(result)
 ```
 
-## Side Channels
+Side channels on the same Socket.IO connection:
 
-Unary RPC covers request/response. Streaming and host↔sandbox events
-use separate Socket.IO namespaces bridged through the worker pipe:
-
-| Namespace | Purpose |
-| --- | --- |
-| `/` | unary RPC (`call`, `call:result`, `call:error`, `cancel`) |
-| `/trace` | Trace/Span lifecycle (`trace_start`, `span_end`, …) |
-| `/log` | stdlib `logging` records from the worker |
-| `/<plugin>` | plugin-defined events (e.g. abridge LLM proxy) |
-
-Sandbox plugins subclass `agentix.Namespace` and call
-`agentix.register_namespace(...)`. Host plugins subclass
-`agentix.AsyncClientNamespace` and register via
-`RuntimeClient.register_namespace(...)` before connecting.
-
-See `agentix/runtime/PROTOCOL.md` for the full wire contract.
+- `/trace` — span lifecycle from sandbox to host
+- `/log` — stdlib logging records from sandbox to host
+- `/<plugin>` — plugin namespaces registered via `agentix.sio`
 
 ## Worker Model
 
@@ -199,7 +195,7 @@ For each call, the worker:
 
 1. resolves the `RemoteCallable` import path
 2. unpickles `(args, kwargs)`
-3. calls the callable (awaiting coroutine results)
+3. calls the callable (awaiting when needed)
 4. pickles the return value
 
 The worker uses the same `/nix/runtime` venv as the runtime server, so
@@ -227,7 +223,8 @@ runtime environment.
 
 ```text
 Bundle = what code and dependencies exist in the sandbox
-client.remote(fn) = which callable to call
-Worker = where the callable executes
-Side-channel namespaces = host↔sandbox events beyond unary RPC
+client.remote(fn) = which importable function to call
+Worker = where user code executes
+agentix.sio = host ↔ sandbox side channels (trace, log, plugins)
+Deployment = where the bundle image runs
 ```

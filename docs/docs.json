@@ -2,7 +2,7 @@
   "$schema": "https://mintlify.com/docs.json",
   "theme": "mint",
   "name": "Agentix",
-  "description": "Sandboxed rollouts you call like typed Python.",
+  "description": "The universal bridge between agents and environments.",
   "colors": {
     "primary": "#cc785c",
     "light": "#e08a6d",
@@ -15,7 +15,7 @@
         "pages": ["index", "quickstart"]
       },
       {
-        "group": "Core model",
+        "group": "Concepts",
         "pages": [
           "concepts/remote-calls",
           "concepts/bundles",
@@ -23,12 +23,13 @@
         ]
       },
       {
-        "group": "Integrations",
+        "group": "How-to",
         "pages": ["integrate-agent", "integrate-dataset"]
       },
       {
         "group": "Reference",
         "pages": [
+          "reference/public-api",
           "reference/architecture",
           "reference/cli"
         ]

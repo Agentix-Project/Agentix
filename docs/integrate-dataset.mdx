@@ -8,7 +8,7 @@ function. The agent does the work, the scorer judges the result, and the
 caller composes both pieces in one rollout.
 
 ```python
-from agentix.swebench import score
+from agentix.plugins.datasets.swe import score
 
 report = await client.remote(score, instance=inst, patch=model_patch)
 ```
@@ -42,16 +42,17 @@ with many agents.
 ```text
 agentix-swebench/
 ├── pyproject.toml
-└── src/agentix/
-    └── swebench/
-        └── __init__.py
+└── src/
+    ├── __init__.py
+    ├── env.py
+    └── score.py
 ```
 
 ## 2. Result Type
 
 Return a type the training or evaluation loop can consume directly.
 
-```python title="src/agentix/swebench/__init__.py"
+```python title="src/__init__.py"
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -73,7 +74,7 @@ serialize it through the shared codec.
 
 ## 3. Scoring Function
 
-```python title="src/agentix/swebench/__init__.py"
+```python title="src/score.py"
 from __future__ import annotations
 
 from typing import Any
@@ -111,21 +112,22 @@ for a full working scorer.
 
 ```toml title="pyproject.toml"
 [project]
-name = "agentix-swebench"
+name = "agentix-dataset-swe"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = ["swebench>=4.0"]
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/agentix"]
+[tool.setuptools]
+package-dir = { "agentix.plugins.datasets.swe" = "src" }
+packages = ["agentix.plugins.datasets.swe"]
 ```
 
-When a rollout bundle depends on `agentix-swebench`, the worker can
-import `agentix.swebench` and call `score`.
+When a rollout bundle depends on `agentix-dataset-swe`, the worker can
+import `agentix.plugins.datasets.swe` and call `score`.
 
 ## 5. Sandbox Requirements
 
@@ -147,8 +149,8 @@ swappable: dataset row, repo setup, agent, patch extraction, scorer.
 from datasets import load_dataset
 from agentix import RuntimeClient
 from agentix.bash import run as bash_run
-from agentix.claude_code import run as run_claude
-from agentix.swebench import score
+from agentix.agents.claude_code import run as run_claude
+from agentix.plugins.datasets.swe import score
 
 inst = dict(load_dataset("princeton-nlp/SWE-bench_Verified", split="test")[0])
 

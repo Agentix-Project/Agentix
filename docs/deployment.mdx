@@ -1,10 +1,9 @@
 ---
 title: Deployments
-description: Start bundle images as sandboxes and hand RuntimeClient a runtime URL.
+description: Start bundles as sandboxes and hand RuntimeClient a runtime URL.
 ---
 
-A deployment backend answers one question: where should this bundle image
-run?
+A deployment backend answers one question: where should this bundle run?
 
 Remote calls decide which function runs. Bundles decide what code exists
 in the sandbox. Deployments decide where the image is started and how it
@@ -22,8 +21,7 @@ In code, create a deployment, pass a `SandboxConfig`, and use the
 returned `runtime_url` with `RuntimeClient`.
 
 ```python
-from agentix import RuntimeClient
-from agentix.deployment.base import SandboxConfig, session
+from agentix import RuntimeClient, SandboxConfig, session
 from agentix.deployment.docker import DockerDeployment
 
 deployment = DockerDeployment()
@@ -68,7 +66,7 @@ After installation, the backend name becomes available to
 `load_deployment`:
 
 ```python
-from agentix.deployment.base import load_deployment
+from agentix import load_deployment
 
 FlyDeployment = load_deployment("fly")
 ```
@@ -81,7 +79,7 @@ three async methods.
 ```python title="my_deploy/__init__.py"
 import os
 
-from agentix.deployment.base import Sandbox, SandboxConfig, SandboxId, SandboxInfo
+from agentix import Sandbox, SandboxConfig, SandboxId, SandboxInfo
 
 
 class FlyDeployment:
@@ -116,5 +114,5 @@ error should surface before the backend starts creating infrastructure.
 ## Boundary
 
 Deployment backends should not know about agent wrappers, dataset
-scorers, or remote-call targets. They only start bundle images and return
-the runtime endpoint.
+scorers, or remote-call targets. They only stage bundles, start
+sandboxes, and return the runtime endpoint.

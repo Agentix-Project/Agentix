@@ -5,12 +5,18 @@ Runs remote calls through one runtime worker subprocess.
 Endpoints:
 
 - `GET /health`
-- Socket.IO at `/socket.io/` — `call` / `call:result` / `call:error`,
-  `cancel`, plus namespace side channels (`/trace`, `/log`, plugins).
+- `POST /call` — internal fast-path used by `RuntimeClient.remote`;
+  msgpack request/response. Returns the result inline if it lands
+  within the caller's `prefer_sync_ms` budget; otherwise returns
+  `accepted` and the result follows on Socket.IO.
+- Socket.IO at `/socket.io/` — unary RPC on `/` (`call` / `call:result` /
+  `call:error`, `cancel`, plus `resume`/`ack` for reconnect-safe
+  delivery), and side-channel namespaces (`/trace`, `/log`, and
+  plugin paths registered via `agentix.sio`).
 
-Remote requests carry a `RemoteCallable` import path plus
-a pickle of the (args, kwargs) tuple. Remote targets must be importable
-top-level callables.
+Remote requests carry a `RemoteCallable` import path plus a pickle of
+the (args, kwargs) tuple. Only importable top-level functions and
+builtins are supported call targets.
 """
 
 from __future__ import annotations
