@@ -9,10 +9,12 @@ description = "Apptainer (Singularity) deployment backend for Agentix (registers
 requires-python = ">=3.11"
 dependencies = [
     # Protocol + dataclasses (`Deployment`, `Sandbox`, `SandboxConfig`,
-    # `SandboxInfo`, `SandboxId`) all live in core agentix.
+    # `SandboxInfo`, `SandboxId`) all live in core agentix. The
+    # backend's loopback health check uses raw asyncio sockets, so we
+    # don't pull in httpx here — it would otherwise honor environment
+    # proxy vars and hang the localhost probe on hosts behind a corp
+    # proxy.
     "agentixx",
-    # Health-check the runtime server inside the apptainer container.
-    "httpx>=0.27",
 ]
 
 [tool.uv.sources]

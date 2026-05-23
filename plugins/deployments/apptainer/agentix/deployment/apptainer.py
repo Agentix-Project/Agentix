@@ -34,6 +34,7 @@ you can swap in the stricter `--containall` family via the
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -42,10 +43,7 @@ import shutil
 import socket
 import tarfile
 from pathlib import Path
-from typing import Any
 from uuid import uuid4
-
-import httpx
 
 from agentix.deployment.base import Deployment, Sandbox, SandboxConfig, SandboxId, SandboxInfo
 
@@ -286,21 +284,40 @@ class ApptainerDeployment(Deployment):
 
     async def _wait_healthy(self, port: int, proc: asyncio.subprocess.Process) -> None:
         base_url = f"http://localhost:{port}"
-        async with httpx.AsyncClient(base_url=base_url, timeout=60) as client:
-            for _ in range(240):
-                if proc.returncode is not None:
-                    stderr = (await proc.stderr.read()) if proc.stderr else b""
-                    raise RuntimeError(
-                        f"apptainer exec exited rc={proc.returncode} before runtime came up: "
-                        f"{stderr.decode(errors='replace')}"
-                    )
-                try:
-                    r = await client.get("/health")
-                    if r.status_code == 200:
-                        return
-                except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError):
-                    pass
+        # Health probe MUST not go through any HTTP client that
+        # consults environment proxy vars — on hosts behind a corp
+        # proxy, an `http_proxy=...` leaks into loopback requests and
+        # hangs them. Use a raw TCP connect + tiny HTTP request so we
+        # only ever talk to `127.0.0.1` directly.
+        for _ in range(240):
+            if proc.returncode is not None:
+                stderr = (await proc.stderr.read()) if proc.stderr else b""
+                raise RuntimeError(
+                    f"apptainer exec exited rc={proc.returncode} before runtime came up: "
+                    f"{stderr.decode(errors='replace')}"
+                )
+            try:
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection("127.0.0.1", port), timeout=2
+                )
+            except (TimeoutError, OSError):
                 await asyncio.sleep(0.5)
+                continue
+            try:
+                writer.write(b"GET /health HTTP/1.0\r\nHost: localhost\r\n\r\n")
+                await writer.drain()
+                status_line = await asyncio.wait_for(reader.readline(), timeout=2)
+                if status_line.startswith(b"HTTP/1.") and b" 200 " in status_line:
+                    return
+            except (TimeoutError, OSError):
+                pass
+            finally:
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except OSError:
+                    pass
+            await asyncio.sleep(0.5)
         raise TimeoutError(f"Runtime server not alive at {base_url}")
 
     async def get(self, sandbox_id: SandboxId) -> SandboxInfo:
@@ -332,16 +349,8 @@ class ApptainerDeployment(Deployment):
         except TimeoutError:
             logger.warning("apptainer exec %s did not exit after SIGTERM; SIGKILL", sandbox_id)
             proc.kill()
-            with _suppress_async():
-                await proc.wait()
-
-
-class _suppress_async:
-    async def __aenter__(self) -> None:
-        return None
-
-    async def __aexit__(self, *exc_info: Any) -> bool:
-        return True
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
 
 
 def _diagnostics() -> dict[str, str]:
