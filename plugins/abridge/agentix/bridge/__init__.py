@@ -49,11 +49,19 @@ from .storage import (
     extract_usage,
     make_record,
 )
+from .transform import (
+    AnthropicCountTokens,
+    anthropic_messages_to_openai,
+    anthropic_sse,
+    count_anthropic_tokens,
+    openai_to_anthropic_messages,
+)
 
 __version__ = "0.3.0"
 
 __all__ = [
     "ApiFamily",
+    "AnthropicCountTokens",
     "CompletionRecord",
     "InMemoryStore",
     "NAMESPACE",
@@ -64,10 +72,14 @@ __all__ = [
     "TokenUsage",
     "UpstreamHook",
     "__version__",
+    "anthropic_messages_to_openai",
+    "anthropic_sse",
+    "count_anthropic_tokens",
     "detect",
     "export_environ",
     "extract_usage",
     "make_record",
+    "openai_to_anthropic_messages",
     "start_proxy",
     "stop_proxy",
 ]
