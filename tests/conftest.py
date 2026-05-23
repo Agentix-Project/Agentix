@@ -112,6 +112,7 @@ async def live_server(runtime_module):
             port=port,
             log_level="error",
             lifespan="on",
+            ws="wsproto",
         )
         srv = uvicorn.Server(config)
         state["srv"] = srv

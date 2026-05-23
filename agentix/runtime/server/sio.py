@@ -8,8 +8,8 @@ Two responsibilities:
 2. Dynamic namespace forwarding. When a worker-side `agentix.Namespace`
    registers via the pipe (`sio_open` frame), this layer registers a
    matching SIO server namespace that forwards inbound events back to
-   the worker. Outbound `sio_emit` frames become real SIO broadcasts on
-   the corresponding namespace.
+   the worker. Outbound `sio_emit` frames become real SIO emits on the
+   corresponding namespace.
 
 Reserved namespace paths (claimed by agentix-core): `/`, `/trace`,
 `/log`. Plugins use their own paths (typically `/<package-name>`).
@@ -20,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from dataclasses import dataclass, field
 from typing import Any
 
 import socketio
@@ -52,14 +51,25 @@ def _decode(raw: Any) -> Any:
     return raw
 
 
-@dataclass
-class _CallState:
-    task: asyncio.Task
+def _missing_call_id() -> tuple[str, dict[str, Any]]:
+    return (
+        "call:error",
+        {
+            "call_id": "",
+            "error": {"type": "BadRequest", "message": "missing call_id"},
+        },
+    )
 
 
-@dataclass
-class _SessionState:
-    calls: dict[str, _CallState] = field(default_factory=dict)
+def _cancelled_error(call_id: str) -> dict[str, Any]:
+    return {
+        "call_id": call_id,
+        "error": RemoteError(
+            type="Cancelled",
+            message="remote call cancelled",
+            cancelled=True,
+        ).model_dump(),
+    }
 
 
 def make_sio(
@@ -89,106 +99,178 @@ def make_sio(
         ping_timeout=300,
         max_http_buffer_size=MAX_MESSAGE_BYTES,
     )
-    sessions: dict[str, _SessionState] = {}
+    # ── execution-once invariant ─────────────────────────────────
+    # `_start_call` is the only place a task is created. Every site
+    # that may call it (`on_call`, `submit_http_call`) gates on
+    # `call_id in calls or call_id in pending_results` first, so a
+    # given call_id starts at most one task. Combined with the host
+    # generating a fresh call_id per `c.remote(...)`, this guarantees
+    # the user-facing contract: each `c.remote(fn, ...)` runs `fn` at
+    # most once on the runtime, even across reconnects, replays, and
+    # mixed HTTP/SIO submission paths.
+    calls: dict[str, asyncio.Task] = {}
+    # Completed tasks waiting for the host to ack receipt. The host
+    # acks via the `ack` SIO event after consuming the result; only
+    # then does the entry leave this dict. This is what makes events
+    # survive a connection drop: a reconnecting host emits `resume`
+    # and we replay any unacked results for the call_ids it cares
+    # about — without ever re-running `fn`.
+    pending_results: dict[str, tuple[str, dict[str, Any]]] = {}
     opened_namespaces: set[str] = set()  # paths the worker has opened
+
+    async def _execute_call(payload: dict[str, Any], call_id: str) -> tuple[str, dict[str, Any]]:
+        try:
+            request = RemoteRequest(
+                callable=RemoteCallable(payload["callable"]),
+                arguments=payload["arguments"],
+                call_id=CallId(call_id),
+            )
+        except (KeyError, ValidationError) as exc:
+            return (
+                "call:error",
+                {
+                    "call_id": call_id,
+                    "error": RemoteError(type=type(exc).__name__, message=str(exc)).model_dump(),
+                },
+            )
+
+        resp = await worker.call(request)
+        if resp.ok:
+            return "call:result", {"call_id": call_id, "value": resp.value}
+        error = (resp.error or RemoteError(type="Unknown", message="")).model_dump()
+        return "call:error", {"call_id": call_id, "error": error}
+
+    async def _emit_task_result(task: asyncio.Task, call_id: str) -> None:
+        if task.cancelled():
+            return
+        with contextlib.suppress(BaseException):
+            event, frame = task.result()
+            # Store first, emit second. If the host is currently
+            # disconnected the emit is a no-op and the cached entry
+            # carries the result through to the next `resume`.
+            pending_results[call_id] = (event, frame)
+            await sio.emit(event, pack(frame))
+
+    def _track_call(call_id: str, task: asyncio.Task) -> None:
+        calls[call_id] = task
+        task.add_done_callback(lambda _t: calls.pop(call_id, None))
+
+    def _start_call(payload: dict[str, Any], call_id: str) -> asyncio.Task:
+        task = asyncio.create_task(_execute_call(payload, call_id))
+        _track_call(call_id, task)
+        return task
+
+    async def submit_http_call(payload: dict[str, Any], *, prefer_sync_ms: int = 1000) -> dict[str, Any]:
+        call_id = payload.get("call_id")
+        if not isinstance(call_id, str):
+            _event, frame = _missing_call_id()
+            return {"accepted": False, "ok": False, **frame}
+
+        if call_id in calls or call_id in pending_results:
+            # Already in flight or sitting unacked. The host will pick
+            # the result up via SIO (either fresh emit or `resume`).
+            return {"accepted": True, "call_id": call_id}
+
+        task = _start_call(payload, call_id)
+
+        timeout_s = max(prefer_sync_ms, 0) / 1000
+        try:
+            event, frame = await asyncio.wait_for(asyncio.shield(task), timeout=timeout_s)
+        except TimeoutError:
+            task.add_done_callback(
+                lambda t, cid=call_id: asyncio.create_task(_emit_task_result(t, cid))
+            )
+            return {"accepted": True, "call_id": call_id}
+
+        if event == "call:result":
+            return {"accepted": False, "ok": True, **frame}
+        return {"accepted": False, "ok": False, **frame}
+
+    # Runtime internal hook used by the HTTP fast-path endpoint.
+    setattr(sio, "submit_http_call", submit_http_call)
 
     @sio.event
     async def connect(sid: str, environ: dict, auth: Any = None) -> None:
-        sessions[sid] = _SessionState()
         logger.debug("sio connect %s", sid)
 
     @sio.event
     async def disconnect(sid: str) -> None:
-        sess = sessions.pop(sid, None)
-        if sess is None:
-            return
-        for call in sess.calls.values():
-            call.task.cancel()
-        await _drain_tasks([c.task for c in sess.calls.values()])
+        # Tasks intentionally outlive the connection. Their results
+        # land in `pending_results` and will be replayed on the next
+        # `resume`. The host may also cancel explicitly via `cancel`.
         logger.debug("sio disconnect %s", sid)
 
     # ── RPC on `/` ───────────────────────────────────────────────
 
     async def on_call(sid: str, data: Any) -> None:
-        sess = sessions.get(sid)
-        if sess is None:
-            return
         payload = _u(data)
         call_id = payload.get("call_id")
         if not isinstance(call_id, str):
+            event, frame = _missing_call_id()
             await sio.emit(
-                "call:error",
-                pack(
-                    {
-                        "call_id": "",
-                        "error": {"type": "BadRequest", "message": "missing call_id"},
-                    }
-                ),
+                event,
+                pack(frame),
                 to=sid,
             )
             return
 
-        async def _drive() -> None:
-            try:
-                request = RemoteRequest(
-                    callable=RemoteCallable(payload["callable"]),
-                    arguments=payload["arguments"],
-                    call_id=CallId(call_id),
-                )
-            except (KeyError, ValidationError) as exc:
-                await sio.emit(
-                    "call:error",
-                    pack(
-                        {
-                            "call_id": call_id,
-                            "error": RemoteError(type=type(exc).__name__, message=str(exc)).model_dump(),
-                        }
-                    ),
-                    to=sid,
-                )
-                return
-            resp = await worker.call(request)
-            if resp.ok:
-                await sio.emit("call:result", pack({"call_id": call_id, "value": resp.value}), to=sid)
-            else:
-                error = (resp.error or RemoteError(type="Unknown", message="")).model_dump()
-                await sio.emit("call:error", pack({"call_id": call_id, "error": error}), to=sid)
+        if call_id in calls or call_id in pending_results:
+            # Already running, or already completed and awaiting ack.
+            # `on_resume` is the path that delivers cached results.
+            return
 
-        task = asyncio.create_task(_drive())
-        sess.calls[call_id] = _CallState(task=task)
-        task.add_done_callback(lambda _t: sess.calls.pop(call_id, None))
+        task = _start_call(payload, call_id)
+        task.add_done_callback(
+            lambda t, cid=call_id: asyncio.create_task(_emit_task_result(t, cid))
+        )
 
     async def on_cancel(sid: str, data: Any) -> None:
-        sess = sessions.get(sid)
-        if sess is None:
-            return
         payload = _u(data)
         call_id = payload.get("call_id")
-        call = sess.calls.pop(call_id, None) if isinstance(call_id, str) else None
-        if call is not None:
-            call.task.cancel()
-            await sio.emit(
-                "call:error",
-                pack(
-                    {
-                        "call_id": call_id,
-                        "error": RemoteError(
-                            type="Cancelled",
-                            message="remote call cancelled",
-                            cancelled=True,
-                        ).model_dump(),
-                    }
-                ),
-                to=sid,
-            )
+        if not isinstance(call_id, str):
+            return
+        # Cancel is a terminal explicit signal: drop the task AND any
+        # cached unacked result so the call_id is fully retired.
+        pending_results.pop(call_id, None)
+        call = calls.pop(call_id, None)
+        if call is None:
+            return
+        call.cancel()
+        await sio.emit(
+            "call:error",
+            pack(_cancelled_error(call_id)),
+            to=sid,
+        )
+
+    async def on_resume(sid: str, data: Any) -> None:
+        """Replay cached results for the call_ids the host is still
+        waiting on. Called by the host right after (re)connect."""
+        payload = _u(data)
+        ids = payload.get("call_ids")
+        if not isinstance(ids, list):
+            return
+        for cid in ids:
+            if not isinstance(cid, str):
+                continue
+            cached = pending_results.get(cid)
+            if cached is None:
+                continue
+            event, frame = cached
+            await sio.emit(event, pack(frame), to=sid)
+
+    async def on_ack(sid: str, data: Any) -> None:
+        """Host confirms it has consumed the result. Free the slot."""
+        payload = _u(data)
+        call_id = payload.get("call_id")
+        if isinstance(call_id, str):
+            pending_results.pop(call_id, None)
 
     # ── dynamic namespace forwarding ─────────────────────────────
     #
     # `sio_open`  — worker tells us a namespace exists; we register a
     #               catch-all SIO handler that forwards every inbound
     #               event on that namespace back to the worker.
-    # `sio_emit`  — worker wants to broadcast an event on a namespace;
-    #               we pack the payload and call sio.emit there.
+    # `sio_emit`  — worker wants to emit an event on a namespace.
 
     async def _on_worker_sio_frame(frame: dict[str, Any]) -> None:
         kind = frame.get("type")
@@ -229,6 +311,8 @@ def make_sio(
     # function is still usable.
     sio.on("call", on_call)
     sio.on("cancel", on_cancel)
+    sio.on("resume", on_resume)
+    sio.on("ack", on_ack)
 
     # Pre-register core namespaces so the host can connect to them
     # immediately — the worker subscribes lazily, but the SIO server
@@ -239,13 +323,3 @@ def make_sio(
 
     asgi_app = socketio.ASGIApp(sio, socketio_path="/socket.io")
     return sio, asgi_app
-
-
-async def _drain_tasks(tasks: list[asyncio.Task]) -> None:
-    if not tasks:
-        return
-    for t in tasks:
-        if not t.done():
-            t.cancel()
-    with contextlib.suppress(BaseException):
-        await asyncio.gather(*tasks, return_exceptions=True)
