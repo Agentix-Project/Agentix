@@ -55,7 +55,7 @@ async def main() -> None:
                     api_base=os.environ["OPENAI_BASE_URL"],
                     workdir=args.workdir,
                 )
-                result = await client.remote(
+                await client.remote(
                     mini_swe.run,
                     task=args.task,
                     workdir=args.workdir,
@@ -66,11 +66,6 @@ async def main() -> None:
                 print(f"{type(exc).__name__}: {exc}", flush=True)
                 await print_verification(client, args.workdir)
                 return
-            print(f"mini_exit_status={result.get('exit_status', 'unknown')}", flush=True)
-            submission = str(result.get("submission", ""))
-            if submission:
-                print("mini_submission:", flush=True)
-                print(submission.rstrip(), flush=True)
             await print_verification(client, args.workdir)
 
 
@@ -131,6 +126,7 @@ def build_agent(
     agent_raw = dict(base_cfg.get("agent", {}))
     agent_raw.pop("mode", None)
     agent_raw.pop("confirm_exit", None)
+    agent_raw.pop("output_path", None)
     agent_config = AgentConfig.model_validate(agent_raw)
     return DefaultAgent(
         LitellmModel(**model_config.model_dump(mode="python")),
