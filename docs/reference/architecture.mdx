@@ -24,6 +24,43 @@ Worker subprocess
 Everything else supports that loop or rides side channels on the same
 Socket.IO connection.
 
+```mermaid placement="top-right"
+flowchart LR
+    App["Host app<br/>trainer / evaluator / script"]
+    Client["RuntimeClient"]
+    Server["Runtime server<br/>FastAPI + Socket.IO"]
+    Worker["Worker subprocess"]
+    Code["User callable<br/>module::qualname"]
+
+    App -->|client.remote(fn, args)| Client
+    Client -->|RPC on /rpc| Server
+    Server -->|worker frame| Worker
+    Worker -->|import and invoke| Code
+    Code -->|return or raise| Worker
+    Worker -->|result frame| Server
+    Server -->|call:result or call:error| Client
+    Client -->|unpickle result| App
+
+    Worker -.->|/log records| Server
+    Worker -.->|/trace spans| Server
+    Worker <-->|plugin namespace events| Server
+    Server -.->|side-channel events| Client
+```
+
+## Core Namespaces
+
+Agentix core owns three reserved Socket.IO namespaces:
+
+| Namespace | System | Public API |
+| --- | --- | --- |
+| `/rpc` | RPC | `RuntimeClient.remote(fn, *args, **kwargs)` |
+| `/log` | logging | standard `logging` records forwarded sandbox -> host |
+| `/trace` | tracing | `agentix.trace.trace(...)`, `agentix.trace.span(...)`, `trace.Processor` |
+
+Plugin-specific protocols use their own namespace, conventionally
+`/<package-name>`. See [Plugins and Side Channels](/concepts/plugins) for the
+extension model.
+
 ## Systems
 
 | System | Responsibility |
@@ -123,6 +160,11 @@ For each call, the worker:
 The worker also hosts the sandbox-side `agentix.sio` bridge. Plugin
 namespaces register inside the worker and forward events through
 `sio_emit` / `sio_open` / `sio_inbound` frames on the worker pipe.
+
+The runtime server does not implement plugin business logic. It accepts
+namespace connections, dynamically registers generic forwarders, and relays
+events between host-side `AsyncClientNamespace` handlers and worker-side
+`Namespace` handlers.
 
 The worker uses the same `/nix/runtime` environment as the runtime
 server, so anything installed into the bundle can be imported on demand.
