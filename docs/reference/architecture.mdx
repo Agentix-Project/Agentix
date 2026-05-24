@@ -62,7 +62,7 @@ blobs inside `call:result`.
 1. Host imports `app.run`.
 2. Host calls `client.remote(run, input="hello")`.
 3. Client builds `RemoteCallable("app::run")` and pickles `((), {"input": "hello"})`.
-4. Client emits `call` on Socket.IO `/`.
+4. Client emits `call` on Socket.IO `/rpc`.
 5. Runtime server forwards the request to the worker subprocess.
 6. Worker imports `app`, resolves `run`, unpickles args, and calls it.
 7. Worker pickles the return value.
@@ -74,7 +74,8 @@ blobs inside `call:result`.
 | Path | Carries | Wire |
 | --- | --- | --- |
 | `GET /health` | health probe | HTTP JSON |
-| Socket.IO `/` | `c.remote()` RPC | `call` / `call:result` / `call:error` / `cancel` |
+| `POST /call` | internal short-call fast path | HTTP msgpack |
+| Socket.IO `/rpc` | `c.remote()` RPC | `call` / `call:result` / `call:error` / `cancel` |
 | Socket.IO `/trace`, `/log`, `/<plugin>` | side channels | plugin-defined events (msgpack payloads) |
 | worker private pipe | runtime ↔ worker | length-prefixed msgpack frames |
 

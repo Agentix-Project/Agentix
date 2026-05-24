@@ -57,8 +57,9 @@ becomes this wire payload:
 runtime uses it to correlate `call:result` / `call:error` responses and
 to support cancellation.
 
-Remote calls use Socket.IO events on the `/` namespace. HTTP is only
-used for `/health`.
+Remote calls use Socket.IO events on the `/rpc` namespace. `RuntimeClient`
+may use the internal HTTP `/call` fast path for short calls; accepted
+long-running calls still complete over `/rpc`.
 
 ## Example
 
@@ -83,7 +84,7 @@ ride their own namespaces, separate from `c.remote()`:
 
 | Namespace | Direction | Purpose |
 | --- | --- | --- |
-| `/` | host ↔ sandbox | `c.remote()` |
+| `/rpc` | host ↔ sandbox | `c.remote()` |
 | `/trace` | sandbox → host | span lifecycle (auto-registered) |
 | `/log` | sandbox → host | stdlib logging records (auto-registered) |
 | `/<plugin>` | both | plugin-defined events via `agentix.sio` |

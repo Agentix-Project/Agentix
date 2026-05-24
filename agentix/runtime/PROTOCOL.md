@@ -35,15 +35,19 @@ await client.remote(run, seed=42)
 | Path | Carries | Wire |
 | --- | --- | --- |
 | `GET /health` | health probe | HTTP JSON |
-| Socket.IO `/` | `c.remote()` RPC | msgpack-wrapped `call` / `call:result` / `call:error` / `cancel` |
+| `POST /call` | internal short-call fast path | HTTP msgpack |
+| Socket.IO `/rpc` | `c.remote()` RPC | msgpack-wrapped `call` / `call:result` / `call:error` / `cancel` |
 | Socket.IO `/trace`, `/log`, `/<plugin>` | side channels | plugin-defined events (msgpack payloads) |
 | worker private pipe | runtime ↔ worker | length-prefixed msgpack frames |
 
-HTTP is only for `/health`. Socket.IO is the host-to-runtime edge.
-The worker pipe is the runtime-to-worker edge inside the sandbox.
-The current implementation uses one worker subprocess per runtime.
+HTTP covers health plus the internal `/call` fast path for short
+remote calls. Socket.IO `/rpc` remains the RPC event channel when a
+call is submitted over SIO or an accepted HTTP call completes
+asynchronously. The worker pipe is the runtime-to-worker edge inside
+the sandbox. The current implementation uses one worker subprocess per
+runtime.
 
-## Socket.IO Events (RPC on `/`)
+## Socket.IO Events (RPC on `/rpc`)
 
 ```text
 call          {call_id, callable, arguments}

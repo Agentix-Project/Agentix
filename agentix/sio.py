@@ -7,7 +7,7 @@ real SIO server.
 
 Three reserved namespace paths are owned by agentix-core:
 
-  - `/`       — RPC (call / cancel / call:result / call:error)
+  - `/rpc`    — RPC (call / cancel / call:result / call:error)
   - `/trace`  — Trace/Span lifecycle
   - `/log`    — stdlib `logging` records
 
@@ -48,7 +48,7 @@ logger = logging.getLogger("agentix.sio")
 Handler = Callable[[Any], Any]
 
 
-RESERVED_NAMESPACES = frozenset({"/", "/trace", "/log"})
+RESERVED_NAMESPACES = frozenset({"/rpc", "/trace", "/log"})
 
 
 class RemoteSioError(RuntimeError):
@@ -125,7 +125,7 @@ class Namespace:
     be registered explicitly via `self.on("fetch:result", handler)`.
     """
 
-    namespace: str = "/"  # subclass MUST override
+    namespace: str = ""  # subclass MUST override
 
     def __init__(self, namespace: str | None = None) -> None:
         if namespace is not None:

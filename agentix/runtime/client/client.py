@@ -15,7 +15,7 @@ the async context:
         await c.remote(abridge.start_service, ...)
 
 Core auto-registers `/trace` and `/log` namespaces so trace + log
-records flow from the sandbox without setup. `/` carries RPC.
+records flow from the sandbox without setup. `/rpc` carries RPC.
 """
 
 from __future__ import annotations
@@ -40,6 +40,7 @@ logger = logging.getLogger("agentix.runtime.client")
 
 P = ParamSpec("P")
 R = TypeVar("R")
+RPC_NAMESPACE = "/rpc"
 
 
 class RemoteCallError(RuntimeError):
@@ -198,7 +199,7 @@ class RuntimeClient:
             # and completes via the normal SIO result channel.
             kind, value = await self._try_http_fast_path(sio=sio, payload=payload)
             if kind == "fallback":
-                await sio.emit("call", pack(payload))
+                await sio.emit("call", pack(payload), namespace=RPC_NAMESPACE)
             elif kind == "result":
                 terminated = True
                 return cast(R, value)
@@ -218,7 +219,11 @@ class RuntimeClient:
             self._pending.pop(call_id, None)
             if not terminated:
                 with contextlib.suppress(BaseException):
-                    await sio.emit("cancel", pack({"call_id": call_id}))
+                    await sio.emit(
+                        "cancel",
+                        pack({"call_id": call_id}),
+                        namespace=RPC_NAMESPACE,
+                    )
 
     # ── Socket.IO connection management ─────────────────────────
 
@@ -242,8 +247,8 @@ class RuntimeClient:
             async def _on_call_error(data):
                 await self._route_event("error", data)
 
-            sio.on("call:result", _on_call_result)
-            sio.on("call:error", _on_call_error)
+            sio.on("call:result", _on_call_result, namespace=RPC_NAMESPACE)
+            sio.on("call:error", _on_call_error, namespace=RPC_NAMESPACE)
 
             async def _on_connect(*_args):
                 # Fires on initial connect and on every reconnect. Tell
@@ -253,7 +258,11 @@ class RuntimeClient:
                 if not pending_ids:
                     return
                 with contextlib.suppress(BaseException):
-                    await sio.emit("resume", pack({"call_ids": pending_ids}))
+                    await sio.emit(
+                        "resume",
+                        pack({"call_ids": pending_ids}),
+                        namespace=RPC_NAMESPACE,
+                    )
 
             async def _on_disconnect(*_args):
                 # Tasks survive on the server side; results are buffered
@@ -261,10 +270,10 @@ class RuntimeClient:
                 # back, then `_on_connect` will re-emit `resume`.
                 logger.debug("sio disconnect; will resume after reconnect")
 
-            sio.on("connect", _on_connect)
-            sio.on("disconnect", _on_disconnect)
+            sio.on("connect", _on_connect, namespace=RPC_NAMESPACE)
+            sio.on("disconnect", _on_disconnect, namespace=RPC_NAMESPACE)
 
-            namespaces = ["/"]
+            namespaces = [RPC_NAMESPACE]
             for ns in self._namespaces:
                 sio.register_namespace(ns)
                 if ns.namespace not in namespaces:
@@ -297,7 +306,7 @@ class RuntimeClient:
         if sio is None or not sio.connected:
             return
         with contextlib.suppress(BaseException):
-            await sio.emit("ack", pack({"call_id": call_id}))
+            await sio.emit("ack", pack({"call_id": call_id}), namespace=RPC_NAMESPACE)
 
 
 __all__ = ["RemoteCallError", "RuntimeClient"]

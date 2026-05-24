@@ -21,6 +21,7 @@ from tests import _worker_target as target
 from tests._rpc_helpers import request_for
 
 pytestmark = pytest.mark.asyncio
+RPC_NAMESPACE = "/rpc"
 
 
 # ── basics ─────────────────────────────────────────────────────────────
@@ -44,11 +45,11 @@ async def test_socketio_call_serialized_callable(use_inprocess_worker, live_serv
     async def _on_result(data):
         await results.put(unpack(data))
 
-    sio.on("call:result", _on_result)
-    await sio.connect(base_url)
+    sio.on("call:result", _on_result, namespace=RPC_NAMESPACE)
+    await sio.connect(base_url, namespaces=[RPC_NAMESPACE])
     try:
         req = request_for(target.echo, kwargs={"msg": "hi"}, call_id="call-ok")
-        await sio.emit("call", pack(req.model_dump()))
+        await sio.emit("call", pack(req.model_dump()), namespace=RPC_NAMESPACE)
         payload = await asyncio.wait_for(results.get(), timeout=5)
     finally:
         await sio.disconnect()
@@ -69,8 +70,8 @@ async def test_socketio_bad_callable_returns_error(use_inprocess_worker, live_se
     async def _on_error(data):
         await errors.put(unpack(data))
 
-    sio.on("call:error", _on_error)
-    await sio.connect(base_url)
+    sio.on("call:error", _on_error, namespace=RPC_NAMESPACE)
+    await sio.connect(base_url, namespaces=[RPC_NAMESPACE])
     try:
         import pickle
 
@@ -82,7 +83,7 @@ async def test_socketio_bad_callable_returns_error(use_inprocess_worker, live_se
             arguments=pickle.dumps(((), {})),
             call_id="call-bad",
         )
-        await sio.emit("call", pack(req.model_dump()))
+        await sio.emit("call", pack(req.model_dump()), namespace=RPC_NAMESPACE)
         payload = await asyncio.wait_for(errors.get(), timeout=5)
     finally:
         await sio.disconnect()
@@ -127,8 +128,8 @@ async def test_same_call_id_via_mixed_paths_runs_fn_exactly_once(use_inprocess_w
     async def _on_result(data):
         await results.put(unpack(data))
 
-    sio.on("call:result", _on_result)
-    await sio.connect(base_url)
+    sio.on("call:result", _on_result, namespace=RPC_NAMESPACE)
+    await sio.connect(base_url, namespaces=[RPC_NAMESPACE])
     try:
         # Three submissions in quick succession on three paths.
         async with httpx.AsyncClient(base_url=base_url) as http:
@@ -139,10 +140,14 @@ async def test_same_call_id_via_mixed_paths_runs_fn_exactly_once(use_inprocess_w
             )
             r.raise_for_status()
 
-        await sio.emit("call", payload_bytes)
-        await sio.emit("resume", pack({"call_ids": [call_id]}))
+        await sio.emit("call", payload_bytes, namespace=RPC_NAMESPACE)
+        await sio.emit(
+            "resume",
+            pack({"call_ids": [call_id]}),
+            namespace=RPC_NAMESPACE,
+        )
         # And a second SIO `call` for good measure.
-        await sio.emit("call", payload_bytes)
+        await sio.emit("call", payload_bytes, namespace=RPC_NAMESPACE)
 
         payload = await asyncio.wait_for(results.get(), timeout=5)
     finally:
@@ -166,14 +171,14 @@ async def test_runtime_replays_unacked_result_after_reconnect(use_inprocess_work
     # First "session": submit a slow call, then drop the link before
     # the result has time to arrive.
     sio_a = socketio.AsyncClient()
-    await sio_a.connect(base_url)
+    await sio_a.connect(base_url, namespaces=[RPC_NAMESPACE])
     call_id = "resume-test-1"
     req = request_for(
         target.count_exec_and_sleep,
         args=[0.6],
         call_id=call_id,
     )
-    await sio_a.emit("call", pack(req.model_dump()))
+    await sio_a.emit("call", pack(req.model_dump()), namespace=RPC_NAMESPACE)
     # Give the server time to register the in-flight task.
     await asyncio.sleep(0.1)
     await sio_a.disconnect()
@@ -189,10 +194,14 @@ async def test_runtime_replays_unacked_result_after_reconnect(use_inprocess_work
     async def _on_result(data):
         await results.put(unpack(data))
 
-    sio_b.on("call:result", _on_result)
-    await sio_b.connect(base_url)
+    sio_b.on("call:result", _on_result, namespace=RPC_NAMESPACE)
+    await sio_b.connect(base_url, namespaces=[RPC_NAMESPACE])
     try:
-        await sio_b.emit("resume", pack({"call_ids": [call_id]}))
+        await sio_b.emit(
+            "resume",
+            pack({"call_ids": [call_id]}),
+            namespace=RPC_NAMESPACE,
+        )
         payload = await asyncio.wait_for(results.get(), timeout=5)
     finally:
         await sio_b.disconnect()
@@ -320,8 +329,8 @@ async def test_socketio_cancel_returns_cancelled_error(use_inprocess_worker, liv
     async def _on_error(data):
         await errors.put(unpack(data))
 
-    sio.on("call:error", _on_error)
-    await sio.connect(base_url)
+    sio.on("call:error", _on_error, namespace=RPC_NAMESPACE)
+    await sio.connect(base_url, namespaces=[RPC_NAMESPACE])
     try:
         # Use a slow remote call. asyncio.sleep is convenient — it's
         # importable and async; we just need it to outlast the cancel.
@@ -335,9 +344,13 @@ async def test_socketio_cancel_returns_cancelled_error(use_inprocess_worker, liv
             arguments=pickle.dumps(((5.0,), {})),
             call_id="cancel-me",
         )
-        await sio.emit("call", pack(req.model_dump()))
+        await sio.emit("call", pack(req.model_dump()), namespace=RPC_NAMESPACE)
         await asyncio.sleep(0.1)
-        await sio.emit("cancel", pack({"call_id": "cancel-me"}))
+        await sio.emit(
+            "cancel",
+            pack({"call_id": "cancel-me"}),
+            namespace=RPC_NAMESPACE,
+        )
         payload = await asyncio.wait_for(errors.get(), timeout=5)
     finally:
         await sio.disconnect()

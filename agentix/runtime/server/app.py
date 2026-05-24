@@ -9,7 +9,7 @@ Endpoints:
   msgpack request/response. Returns the result inline if it lands
   within the caller's `prefer_sync_ms` budget; otherwise returns
   `accepted` and the result follows on Socket.IO.
-- Socket.IO at `/socket.io/` — unary RPC on `/` (`call` / `call:result` /
+- Socket.IO at `/socket.io/` — unary RPC on `/rpc` (`call` / `call:result` /
   `call:error`, `cancel`, plus `resume`/`ack` for reconnect-safe
   delivery), and side-channel namespaces (`/trace`, `/log`, and
   plugin paths registered via `agentix.sio`).

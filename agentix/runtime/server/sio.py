@@ -2,7 +2,7 @@
 
 Two responsibilities:
 
-1. The RPC protocol on the default `/` namespace — `call` / `cancel`
+1. The RPC protocol on the `/rpc` namespace — `call` / `cancel`
    / `call:result` / `call:error`.
 
 2. Dynamic namespace forwarding. When a worker-side `agentix.Namespace`
@@ -11,7 +11,7 @@ Two responsibilities:
    the worker. Outbound `sio_emit` frames become real SIO emits on the
    corresponding namespace.
 
-Reserved namespace paths (claimed by agentix-core): `/`, `/trace`,
+Reserved namespace paths (claimed by agentix-core): `/rpc`, `/trace`,
 `/log`. Plugins use their own paths (typically `/<package-name>`).
 """
 
@@ -33,6 +33,7 @@ from agentix.runtime.shared.idents import CallId
 from agentix.runtime.shared.models import RemoteError, RemoteRequest
 
 logger = logging.getLogger("agentix.runtime.sio")
+RPC_NAMESPACE = "/rpc"
 
 
 def _u(data: Any) -> dict:
@@ -149,7 +150,7 @@ def make_sio(
             # disconnected the emit is a no-op and the cached entry
             # carries the result through to the next `resume`.
             pending_results[call_id] = (event, frame)
-            await sio.emit(event, pack(frame))
+            await sio.emit(event, pack(frame), namespace=RPC_NAMESPACE)
 
     def _track_call(call_id: str, task: asyncio.Task) -> None:
         calls[call_id] = task
@@ -189,18 +190,16 @@ def make_sio(
     # Runtime internal hook used by the HTTP fast-path endpoint.
     setattr(sio, "submit_http_call", submit_http_call)
 
-    @sio.event
-    async def connect(sid: str, environ: dict, auth: Any = None) -> None:
+    async def on_connect(sid: str, environ: dict, auth: Any = None) -> None:
         logger.debug("sio connect %s", sid)
 
-    @sio.event
-    async def disconnect(sid: str) -> None:
+    async def on_disconnect(sid: str) -> None:
         # Tasks intentionally outlive the connection. Their results
         # land in `pending_results` and will be replayed on the next
         # `resume`. The host may also cancel explicitly via `cancel`.
         logger.debug("sio disconnect %s", sid)
 
-    # ── RPC on `/` ───────────────────────────────────────────────
+    # ── RPC on `/rpc` ────────────────────────────────────────────
 
     async def on_call(sid: str, data: Any) -> None:
         payload = _u(data)
@@ -211,6 +210,7 @@ def make_sio(
                 event,
                 pack(frame),
                 to=sid,
+                namespace=RPC_NAMESPACE,
             )
             return
 
@@ -240,6 +240,7 @@ def make_sio(
             "call:error",
             pack(_cancelled_error(call_id)),
             to=sid,
+            namespace=RPC_NAMESPACE,
         )
 
     async def on_resume(sid: str, data: Any) -> None:
@@ -256,7 +257,7 @@ def make_sio(
             if cached is None:
                 continue
             event, frame = cached
-            await sio.emit(event, pack(frame), to=sid)
+            await sio.emit(event, pack(frame), to=sid, namespace=RPC_NAMESPACE)
 
     async def on_ack(sid: str, data: Any) -> None:
         """Host confirms it has consumed the result. Free the slot."""
@@ -283,7 +284,7 @@ def make_sio(
                 return
             await sio.emit(event, pack(frame.get("data")), namespace=namespace)
         elif kind == "sio_open":
-            if namespace in opened_namespaces or namespace == "/":
+            if namespace in opened_namespaces or namespace in {"/", RPC_NAMESPACE}:
                 return
             opened_namespaces.add(namespace)
             _register_namespace(namespace)
@@ -306,13 +307,15 @@ def make_sio(
 
     worker.set_sio_handler(_on_worker_sio_frame)
 
-    # Register RPC handlers on `/` non-decorator-style — `@sio.on(name)`
+    # Register RPC handlers on `/rpc` non-decorator-style — `@sio.on(name)`
     # decorates by side effect and pyright can't tell that the wrapped
     # function is still usable.
-    sio.on("call", on_call)
-    sio.on("cancel", on_cancel)
-    sio.on("resume", on_resume)
-    sio.on("ack", on_ack)
+    sio.on("connect", on_connect, namespace=RPC_NAMESPACE)
+    sio.on("disconnect", on_disconnect, namespace=RPC_NAMESPACE)
+    sio.on("call", on_call, namespace=RPC_NAMESPACE)
+    sio.on("cancel", on_cancel, namespace=RPC_NAMESPACE)
+    sio.on("resume", on_resume, namespace=RPC_NAMESPACE)
+    sio.on("ack", on_ack, namespace=RPC_NAMESPACE)
 
     # Pre-register core namespaces so the host can connect to them
     # immediately — the worker subscribes lazily, but the SIO server
