@@ -91,16 +91,17 @@ dependencies, and integration packages declared in `pyproject.toml`.
 
 ```text
 /nix/runtime/
+├── bootstrap.sh           # container entry point (deployment backends exec this)
 ├── bin/
 │   ├── python
-│   ├── pip
-│   └── agentix-server
-└── lib/python3.11/site-packages/
-    ├── agentix/
-    ├── agentix/bash/
-    ├── agentix/agents/claude_code/
-    ├── agentix/plugins/datasets/swe/
-    └── app.py
+│   └── pip
+└── venv/
+    └── lib/python3.11/site-packages/
+        ├── agentix/
+        ├── agentix/bash/
+        ├── agentix/agents/claude_code/
+        ├── agentix/plugins/datasets/swe/
+        └── app.py
 ```
 
 If the project includes `default.nix`, the build adds a Nix builder stage

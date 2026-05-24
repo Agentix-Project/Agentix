@@ -1,4 +1,4 @@
-"""Read a project's pyproject.toml and derive build metadata.
+"""Read a project's `pyproject.toml` and derive build metadata.
 
 `agentix build` takes one project root — a directory containing
 `pyproject.toml` + `uv.lock`. Plugins (other `agentix-*` packages) are
@@ -6,6 +6,7 @@ pulled in transitively via the lock; neither the CLI nor the user
 enumerates them on the command line.
 
 This module owns the small bit of metadata extraction the build needs:
+
   * `read_pyproject(path)` — parse the project's pyproject.toml.
   * `short_name(pyproject)` — display/tag short name.
   * `derive_tag(pyproject)` — `<short>:<version>`.
@@ -22,7 +23,7 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 # Python minor versions Nixpkgs ships an attribute for. The build can
 # only materialize an interpreter that exists as `pkgs.python3<minor>`.
@@ -93,7 +94,7 @@ def project_nix(pyproject: dict) -> str | None:
     `{ pkgs }: drv` file. Returns None when not declared.
 
     This is the *only* place a bundle author touches Nix. Plugin Nix
-    files are discovered automatically (see `agentix.cli._assemble`)
+    files are discovered automatically (see `agentix.cli.build.closures`)
     and never surface to the project author.
     """
     value = pyproject.get("tool", {}).get("agentix", {}).get("nix")

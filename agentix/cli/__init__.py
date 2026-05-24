@@ -4,64 +4,54 @@ The core CLI intentionally stays narrow: `agentix build` packages a
 project into a bundle artifact. Other workflows should expose their own
 `console_scripts` entry instead of expanding the central CLI.
 
-The CLI deliberately doesn't use argparse subparsers — argparse
-intercepts `--help` greedily at the root level, so `agentix build --help`
-would never reach `build`'s parser. Manual routing keeps each
-subcommand's `--help` intact.
+Argument parsing is delegated to click — each subcommand is a
+`click.Command` registered on the `agentix` group. Click owns `--help`,
+error formatting, and option validation; the CLI modules stay free of
+routing boilerplate.
 """
 
 from __future__ import annotations
 
-import importlib
-import inspect
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 
-# Built-in subcommands. Each value names the submodule under
-# `agentix.cli` whose `main(argv)` handles the verb.
-_COMMANDS: tuple[tuple[str, str], ...] = (("build", "agentix.cli.build"),)
+import click
 
+from agentix.cli.build import build as _build
 
-def _first_doc_line(obj: object) -> str:
-    """First non-empty line of an object's docstring, or empty."""
-    doc = inspect.getdoc(obj) or ""
-    return next((line.strip() for line in doc.splitlines() if line.strip()), "")
+_HELP_OPTIONS = {"help_option_names": ["-h", "--help"]}
 
 
-def _load(module_name: str) -> Callable[[list[str]], int]:
-    return importlib.import_module(module_name).main  # type: ignore[no-any-return]
+@click.group(name="agentix", help="Agentix developer CLI.", context_settings=_HELP_OPTIONS)
+def cli() -> None:
+    """Agentix developer CLI."""
 
 
-def _describe(module_name: str) -> str:
-    """Description for help output. main() docstring → module docstring → empty."""
-    mod = importlib.import_module(module_name)
-    desc = _first_doc_line(getattr(mod, "main", None))
-    return desc or _first_doc_line(mod)
-
-
-def _print_root_help() -> None:
-    print("usage: agentix <command> [args...]\n")
-    print("Agentix developer CLI\n")
-    print("commands:")
-    width = max(len(name) for name, _ in _COMMANDS) + 2
-    for name, mod in _COMMANDS:
-        print(f"  {name.ljust(width)}{_describe(mod)}")
-    print("\nRun `agentix <command> --help` for command-specific options.")
+cli.add_command(_build)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    if argv is None:
-        argv = sys.argv[1:]
-    if not argv or argv[0] in ("-h", "--help"):
-        _print_root_help()
-        return 0
-    cmd, *rest = argv
-    for name, mod in _COMMANDS:
-        if name == cmd:
-            return _load(mod)(rest)
-    print(f"unknown command: {cmd!r}\n", file=sys.stderr)
-    _print_root_help()
-    return 2
+    """`agentix` console-script entry point — returns the exit code.
+
+    `standalone_mode=False` keeps click from calling `sys.exit` itself,
+    so this function composes cleanly from tests and other in-process
+    callers. Two failure paths reach here:
+
+      * Click's own usage errors (`UsageError`, including missing
+        arguments and `BadParameter`) — we render them to stderr and
+        raise `SystemExit(2)`.
+      * Command bodies that signal failure with `raise SystemExit(...)`
+        — they propagate through untouched.
+
+    Both cases land at Python's default `SystemExit` handling in the
+    console-script wrapper, which yields the right process exit code.
+    """
+    try:
+        cli.main(args=argv, prog_name="agentix", standalone_mode=False)
+    except click.exceptions.UsageError as exc:
+        exc.show(file=sys.stderr)
+        raise SystemExit(exc.exit_code) from exc
+    return 0
 
 
 if __name__ == "__main__":

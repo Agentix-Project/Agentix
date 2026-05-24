@@ -28,11 +28,14 @@ The PyPI distribution is named `agentixx`; the import package is
 ## Run the Runtime Locally
 
 You can run the runtime server without Docker while iterating on client,
-server, or worker code.
+server, or worker code. There's no console script — the bundle starts
+it via `/nix/runtime/bootstrap.sh`, but during dev you can launch the
+ASGI app directly with uvicorn:
 
 ```bash
-agentix-server
-agentix-server --port 9000
+uvicorn agentix.runtime.server.app:app --host 0.0.0.0 --port 8000
+# Or override the port:
+AGENTIX_BIND_PORT=9000 uvicorn agentix.runtime.server.app:app --port 9000
 ```
 
 The server exposes `/health`; remote calls use `/socket.io/`.

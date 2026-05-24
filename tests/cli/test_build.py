@@ -2,7 +2,7 @@
 
 Covered: pyproject metadata extraction, image name/tag parsing, git
 context-root resolution, build-context staging, `--dry-run`, error
-paths, and the in-container `_assemble` closure discovery.
+paths, and the in-container closure discovery (`agentix.cli.build.closures`).
 
 NOT covered here: the actual `docker buildx build` + `nix build`
 execution — that needs Docker + Nix and is exercised by a real
@@ -19,8 +19,22 @@ from pathlib import Path
 
 import pytest
 
-from agentix.cli import _assemble, build
-from agentix.cli._resolve import (
+from agentix.cli import build
+from agentix.cli.build import bundle, context, docker
+from agentix.cli.build.bundle import (
+    _bundle_manifest,
+    _validate_bundle_tree,
+    _write_bundle_tar,
+)
+from agentix.cli.build.closures import (
+    Closure,
+    assemble,
+    discover_plugin_closures,
+    discover_project_closure,
+    stage_closures,
+)
+from agentix.cli.build.naming import _default_tar_name, _tar_cache_image_ref
+from agentix.cli.build.pyproject import (
     derive_tag,
     detect_python_version,
     project_nix,
@@ -261,7 +275,7 @@ class TestResolveContext:
         assert subpath == Path(".")
 
     def test_git_toplevel_outside_repo_is_none(self, tmp_path: Path) -> None:
-        assert build.git_toplevel(tmp_path) is None
+        assert context.git_toplevel(tmp_path) is None
 
 
 # ── build: stage_context ───────────────────────────────────────────
@@ -290,9 +304,36 @@ class TestStageContext:
         assert not (stage / "repo" / ".venv").exists()
         assert not (stage / "repo" / "__pycache__").exists()
 
+    def test_nested_build_dir_not_skipped(self, tmp_path: Path) -> None:
+        """The repo-root `build/` dir is a `python -m build` / dry-run
+        output that's correctly skipped — but a *nested* `build/` like
+        `agentix/cli/build/` is a real package that must survive into
+        the build context. `shutil.ignore_patterns` would strip both;
+        the staging copy uses a path-aware ignore instead.
+        """
+        repo = _make_project(tmp_path / "repo")
+        _git_init(repo)
+        (repo / "build").mkdir()
+        (repo / "build" / "stale_output.txt").write_text("dry-run leftovers")
+        nested = repo / "agentix" / "cli" / "build"
+        nested.mkdir(parents=True)
+        (nested / "__init__.py").write_text("# the click command lives here\n")
+        (nested / "context.py").write_text("# real source\n")
+
+        stage = tmp_path / "stage"
+        build.stage_context(stage, context_root=repo, python_version="311", platform="linux/amd64")
+
+        # Top-level `build/` skipped — same as before.
+        assert not (stage / "repo" / "build").exists()
+        # Nested `build/` package preserved — the bug we're regressing
+        # against would have stripped it, leaving the in-container
+        # `uv sync` unable to install `agentix.cli.build.closures`.
+        assert (stage / "repo" / "agentix" / "cli" / "build" / "__init__.py").is_file()
+        assert (stage / "repo" / "agentix" / "cli" / "build" / "context.py").is_file()
+
     def test_builder_files_staged(self, tmp_path: Path) -> None:
         stage = self._staged(tmp_path)
-        for name in ("flake.nix", "flake.lock", "Dockerfile", "bundle-build.sh"):
+        for name in ("flake.nix", "flake.lock", "Dockerfile", "bundle-build.sh", "bootstrap.sh"):
             assert (stage / name).is_file(), f"{name} missing from stage"
 
     def test_python_version_file(self, tmp_path: Path) -> None:
@@ -331,7 +372,7 @@ class TestDockerBuild:
             calls.append(cmd)
             return subprocess.CompletedProcess(cmd, 0)
 
-        monkeypatch.setattr(build, "_run", _fake_run)
+        monkeypatch.setattr(docker, "_run", _fake_run)
 
         ref = build._docker_build(
             tmp_path,
@@ -354,19 +395,19 @@ class TestDockerBuild:
 
 class TestTarBundle:
     def test_default_tar_name_includes_platform(self) -> None:
-        assert build._default_tar_name("ghcr.io/acme/demo", "1.0.0", "linux/amd64") == (
+        assert _default_tar_name("ghcr.io/acme/demo", "1.0.0", "linux/amd64") == (
             "ghcr.io-acme-demo-1.0.0-linux-amd64.bundle.tar"
         )
 
     def test_tar_cache_image_ref_is_stable_across_output_tags(self) -> None:
-        ref = build._tar_cache_image_ref(
+        ref = _tar_cache_image_ref(
             name="ghcr.io/acme/Demo Agent",
             project_subpath=Path("examples/demo"),
             platform="linux/amd64",
         )
 
         assert ref.startswith("agentix-bundle-cache:ghcr.io-acme-demo-agent-linux-amd64-")
-        assert ref == build._tar_cache_image_ref(
+        assert ref == _tar_cache_image_ref(
             name="ghcr.io/acme/Demo Agent",
             project_subpath=Path("examples/demo"),
             platform="amd64",
@@ -381,17 +422,17 @@ class TestTarBundle:
         assert out == tmp_path / "bundle.tar"
 
     def test_write_bundle_tar_preserves_absolute_symlink(self, tmp_path: Path) -> None:
-        bundle = tmp_path / "bundle"
-        store = bundle / "nix" / "store" / "hash-python" / "bin"
-        runtime_bin = bundle / "nix" / "runtime" / "bin"
+        bundle_root = tmp_path / "bundle"
+        store = bundle_root / "nix" / "store" / "hash-python" / "bin"
+        runtime_bin = bundle_root / "nix" / "runtime" / "bin"
         store.mkdir(parents=True)
         runtime_bin.mkdir(parents=True)
         (store / "python").write_text("#!/bin/sh\n")
         (runtime_bin / "python").symlink_to("/nix/store/hash-python/bin/python")
-        (bundle / "manifest.json").write_text("{}\n")
+        (bundle_root / "manifest.json").write_text("{}\n")
 
         tar_path = tmp_path / "demo.bundle.tar"
-        build._write_bundle_tar(bundle, tar_path)
+        _write_bundle_tar(bundle_root, tar_path)
 
         with tarfile.open(tar_path) as tar:
             members = {member.name: member for member in tar.getmembers()}
@@ -402,54 +443,65 @@ class TestTarBundle:
 
     def test_validate_bundle_tree_accepts_absolute_nix_symlink(self, tmp_path: Path) -> None:
         nix = tmp_path / "nix"
-        store = nix / "store" / "hash-agentix" / "bin"
-        entry_dir = nix / "runtime" / "venv" / "bin"
+        store = nix / "store" / "hash-python" / "bin"
+        runtime = nix / "runtime"
+        runtime_bin = runtime / "bin"
         store.mkdir(parents=True)
-        entry_dir.mkdir(parents=True)
-        (store / "agentix-server").write_text("#!/bin/sh\n")
-        (entry_dir / "agentix-server").symlink_to("/nix/store/hash-agentix/bin/agentix-server")
+        runtime_bin.mkdir(parents=True)
+        (store / "python").write_text("#!/bin/sh\n")
+        # Bundle entry point: a regular file installed at /nix/runtime/.
+        (runtime / "bootstrap.sh").write_text("#!/bin/sh\nexec python\n")
+        # Absolute /nix/store/... symlink the validator must accept.
+        (runtime_bin / "python").symlink_to("/nix/store/hash-python/bin/python")
 
-        build._validate_bundle_tree(nix)
+        _validate_bundle_tree(nix)
 
     def test_validate_bundle_tree_rejects_symlink_outside_nix(self, tmp_path: Path) -> None:
         nix = tmp_path / "nix"
-        entry_dir = nix / "runtime" / "venv" / "bin"
-        entry_dir.mkdir(parents=True)
-        (entry_dir / "agentix-server").write_text("#!/bin/sh\n")
-        (entry_dir / "bad").symlink_to("/bin/sh")
+        runtime = nix / "runtime"
+        runtime.mkdir(parents=True)
+        (runtime / "bootstrap.sh").write_text("#!/bin/sh\n")
+        (runtime / "bad").symlink_to("/bin/sh")
 
         with pytest.raises(SystemExit, match="outside /nix"):
-            build._validate_bundle_tree(nix)
+            _validate_bundle_tree(nix)
 
     def test_validate_bundle_tree_ignores_store_symlinks(self, tmp_path: Path) -> None:
         nix = tmp_path / "nix"
-        entry_dir = nix / "runtime" / "venv" / "bin"
+        runtime = nix / "runtime"
         store_dir = nix / "store" / "hash-base-system" / "etc" / "ssl" / "certs"
-        entry_dir.mkdir(parents=True)
+        runtime.mkdir(parents=True)
         store_dir.mkdir(parents=True)
-        (entry_dir / "agentix-server").write_text("#!/bin/sh\n")
+        (runtime / "bootstrap.sh").write_text("#!/bin/sh\n")
+        # Symlinks under /nix/store/ are validator-ignored (they're
+        # store-internal). A target outside /nix/ would be fine here.
         (store_dir / "ca-bundle.crt").symlink_to("/nix/var/nix/profiles/default/etc/ssl/certs/ca-bundle.crt")
 
-        build._validate_bundle_tree(nix)
+        _validate_bundle_tree(nix)
 
     def test_validate_bundle_tree_rejects_broken_absolute_nix_symlink(self, tmp_path: Path) -> None:
         nix = tmp_path / "nix"
-        entry_dir = nix / "runtime" / "venv" / "bin"
-        entry_dir.mkdir(parents=True)
-        (entry_dir / "agentix-server").symlink_to("/nix/store/missing/bin/agentix-server")
+        runtime = nix / "runtime"
+        runtime_bin = runtime / "bin"
+        runtime.mkdir(parents=True)
+        runtime_bin.mkdir(parents=True)
+        (runtime / "bootstrap.sh").write_text("#!/bin/sh\n")
+        # Broken /nix/store/... symlink inside /nix/runtime/ — validator
+        # must surface this as a build defect.
+        (runtime_bin / "python").symlink_to("/nix/store/missing/bin/python")
 
         with pytest.raises(SystemExit, match="broken symlink"):
-            build._validate_bundle_tree(nix)
+            _validate_bundle_tree(nix)
 
     def test_bundle_manifest_records_runtime_contract(self) -> None:
-        manifest = build._bundle_manifest(name="demo", tag="1.0.0", platform="linux/amd64", digest="abc123")
+        manifest = _bundle_manifest(name="demo", tag="1.0.0", platform="linux/amd64", digest="abc123")
         assert manifest["schema_version"] == 1
         assert manifest["name"] == "demo"
         assert manifest["tag"] == "1.0.0"
         assert manifest["platform"] == "linux/amd64"
         assert manifest["nix_system"] == "x86_64-linux"
         assert manifest["digest"] == "sha256:abc123"
-        assert manifest["entrypoint"] == "/nix/runtime/venv/bin/agentix-server"
+        assert manifest["entrypoint"] == "/nix/runtime/bootstrap.sh"
         assert manifest["runtime_env"]["PATH"] == "/nix/runtime/venv/bin:/nix/runtime/bin"  # type: ignore[index]
 
     def test_copy_nix_from_image_streams_tar_with_platform(
@@ -461,13 +513,13 @@ class TestTarBundle:
 
         payload = io.BytesIO()
         with tarfile.open(fileobj=payload, mode="w") as tar:
-            for dirname in ("nix", "nix/runtime", "nix/runtime/venv", "nix/runtime/venv/bin"):
+            for dirname in ("nix", "nix/runtime"):
                 info = tarfile.TarInfo(dirname)
                 info.type = tarfile.DIRTYPE
                 info.mode = 0o555
                 tar.addfile(info)
             data = b"#!/bin/sh\n"
-            info = tarfile.TarInfo("nix/runtime/venv/bin/agentix-server")
+            info = tarfile.TarInfo("nix/runtime/bootstrap.sh")
             info.mode = 0o755
             info.size = len(data)
             tar.addfile(info, io.BytesIO(data))
@@ -486,12 +538,12 @@ class TestTarBundle:
             return FakeProc(cmd, stdout, stderr)
 
         monkeypatch.setattr(subprocess, "Popen", fake_popen)
-        build._copy_nix_from_image("tmp:latest", tmp_path, platform="linux/amd64")
+        bundle._copy_nix_from_image("tmp:latest", tmp_path, platform="linux/amd64")
 
         create = calls[0]
         assert create[:6] == ["docker", "run", "--rm", "--platform", "linux/amd64", "--entrypoint"]
         assert create[-5:] == ["-C", "/", "-cf", "-", "nix"]
-        assert (tmp_path / "nix" / "runtime" / "venv" / "bin" / "agentix-server").is_file()
+        assert (tmp_path / "nix" / "runtime" / "bootstrap.sh").is_file()
         assert (tmp_path / "nix" / "runtime").stat().st_mode & 0o777 == 0o555
 
     def test_copy_nix_from_image_rejects_tar_members_outside_nix(
@@ -519,7 +571,7 @@ class TestTarBundle:
 
         monkeypatch.setattr(subprocess, "Popen", fake_popen)
         with pytest.raises(SystemExit, match="non-/nix tar member"):
-            build._copy_nix_from_image("tmp:latest", tmp_path, platform="linux/amd64")
+            bundle._copy_nix_from_image("tmp:latest", tmp_path, platform="linux/amd64")
 
     def test_tar_build_keeps_cache_image(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         built_tags: list[list[str]] = []
@@ -535,16 +587,16 @@ class TestTarBundle:
             del project_subpath, platform
             built_tags.append(tags)
 
-        monkeypatch.setattr(build, "_docker_build_image", fake_build_image)
+        monkeypatch.setattr(bundle, "_docker_build_image", fake_build_image)
 
         def fake_copy_nix(_image_ref: str, bundle_root: Path, *, platform: str) -> None:
             del platform
             copied_refs.append(_image_ref)
-            entry_dir = bundle_root / "nix" / "runtime" / "venv" / "bin"
-            entry_dir.mkdir(parents=True)
-            (entry_dir / "agentix-server").write_text("#!/bin/sh\n")
+            runtime = bundle_root / "nix" / "runtime"
+            runtime.mkdir(parents=True)
+            (runtime / "bootstrap.sh").write_text("#!/bin/sh\n")
 
-        monkeypatch.setattr(build, "_copy_nix_from_image", fake_copy_nix)
+        monkeypatch.setattr(bundle, "_copy_nix_from_image", fake_copy_nix)
         build._build_tar_bundle(
             tmp_path,
             output_path=tmp_path / "bundle.tar",
@@ -554,7 +606,7 @@ class TestTarBundle:
             platform="linux/amd64",
         )
 
-        cache_ref = build._tar_cache_image_ref(name="demo", project_subpath=Path("."), platform="linux/amd64")
+        cache_ref = _tar_cache_image_ref(name="demo", project_subpath=Path("."), platform="linux/amd64")
         assert built_tags == [[cache_ref]]
         assert copied_refs == [cache_ref]
 
@@ -687,44 +739,44 @@ class TestMainErrors:
             build.main([str(proj), "--dry-run"])
 
 
-# ── _assemble: plugin closure discovery ────────────────────────────
+# ── closures: plugin closure discovery ─────────────────────────────
 
 
 class TestDiscoverPluginClosures:
     def test_finds_runtime_basic(self) -> None:
         """`agentix-runtime-basic` registers the `agentix.nix` group and
         ships `default.nix` files — it must be discovered in this venv."""
-        closures = _assemble.discover_plugin_closures()
-        labels = {c.label for c in closures}
+        found = discover_plugin_closures()
+        labels = {c.label for c in found}
         # bash + files both ship a default.nix.
         assert any("runtime-basic" in label for label in labels), labels
 
     def test_closures_carry_content_and_origin(self) -> None:
-        closures = _assemble.discover_plugin_closures()
-        assert closures, "expected at least the runtime-basic closures"
-        for c in closures:
+        found = discover_plugin_closures()
+        assert found, "expected at least the runtime-basic closures"
+        for c in found:
             assert c.content, f"{c.label} has empty content"
             assert b"pkgs" in c.content  # a `{ pkgs }: drv`
             assert c.origin
 
     def test_labels_are_unique(self) -> None:
-        closures = _assemble.discover_plugin_closures()
-        labels = [c.label for c in closures]
+        found = discover_plugin_closures()
+        labels = [c.label for c in found]
         assert len(labels) == len(set(labels))
 
 
-# ── _assemble: project closure ─────────────────────────────────────
+# ── closures: project closure ──────────────────────────────────────
 
 
 class TestDiscoverProjectClosure:
     def test_no_tool_agentix_nix_returns_none(self, tmp_path: Path) -> None:
         proj = _make_project(tmp_path / "proj")
-        assert _assemble.discover_project_closure(proj) is None
+        assert discover_project_closure(proj) is None
 
     def test_declared_closure_collected(self, tmp_path: Path) -> None:
         proj = _make_project(tmp_path / "proj", nix="system.nix")
         (proj / "system.nix").write_text("{ pkgs }: pkgs.hello\n")
-        closure = _assemble.discover_project_closure(proj)
+        closure = discover_project_closure(proj)
         assert closure is not None
         assert closure.label == "project"
         assert b"pkgs.hello" in closure.content
@@ -732,26 +784,26 @@ class TestDiscoverProjectClosure:
     def test_missing_declared_file_errors(self, tmp_path: Path) -> None:
         proj = _make_project(tmp_path / "proj", nix="absent.nix")
         with pytest.raises(SystemExit):
-            _assemble.discover_project_closure(proj)
+            discover_project_closure(proj)
 
     def test_escaping_path_rejected(self, tmp_path: Path) -> None:
         proj = _make_project(tmp_path / "proj", nix="../escape.nix")
         (tmp_path / "escape.nix").write_text("{ pkgs }: pkgs.hello\n")
         with pytest.raises(SystemExit):
-            _assemble.discover_project_closure(proj)
+            discover_project_closure(proj)
 
 
-# ── _assemble: staging + end-to-end ────────────────────────────────
+# ── closures: staging + end-to-end ─────────────────────────────────
 
 
 class TestStageClosures:
     def test_writes_each_closure(self, tmp_path: Path) -> None:
-        closures = [
-            _assemble.Closure(label="a", origin="x", content=b"{ pkgs }: 1\n"),
-            _assemble.Closure(label="b", origin="y", content=b"{ pkgs }: 2\n"),
+        items = [
+            Closure(label="a", origin="x", content=b"{ pkgs }: 1\n"),
+            Closure(label="b", origin="y", content=b"{ pkgs }: 2\n"),
         ]
         out = tmp_path / "closures"
-        written = _assemble.stage_closures(closures, out)
+        written = stage_closures(items, out)
         assert {p.name for p in written} == {"a.nix", "b.nix"}
         assert (out / "a.nix").read_bytes() == b"{ pkgs }: 1\n"
 
@@ -759,7 +811,7 @@ class TestStageClosures:
         proj = _make_project(tmp_path / "proj", nix="sys.nix")
         (proj / "sys.nix").write_text("{ pkgs }: pkgs.git\n")
         out = tmp_path / "closures"
-        collected = _assemble.assemble(proj, out)
+        collected = assemble(proj, out)
 
         labels = {c.label for c in collected}
         assert "project" in labels
@@ -773,5 +825,5 @@ class TestStageClosures:
         closures — assemble never returns empty when plugins are present."""
         proj = _make_project(tmp_path / "proj")
         out = tmp_path / "closures"
-        collected = _assemble.assemble(proj, out)
+        collected = assemble(proj, out)
         assert all(c.label != "project" for c in collected)

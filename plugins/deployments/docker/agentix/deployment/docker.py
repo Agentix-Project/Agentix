@@ -6,9 +6,9 @@ Design:
   Agentix bundle from `agentix build` (carries `/nix/runtime/bin/` and
   the full Python closure under `/nix/store/...`). `config.image` is
   the task-specific base the workload runs against. The runtime is
-  overlaid onto the task container's `/nix` so the agentix-server
-  entrypoint and its store paths resolve regardless of the task
-  image's distribution.
+  overlaid onto the task container's `/nix` so the
+  `/nix/runtime/bootstrap.sh` entry point and its store paths resolve
+  regardless of the task image's distribution.
 
   Overlay mechanism: a per-bundle stopped "carrier" container
   declares the runtime's `/nix` as a VOLUME (set in the image's config
@@ -27,12 +27,13 @@ Design:
          -p 127.0.0.1:<port>:<port> \\
          -e AGENTIX_BIND_PORT=<port> \\
          --volumes-from <carrier>:ro \\
-         --entrypoint /bin/sh \\
-         <image> -c '<inject runtime env; exec agentix-server>'
+         --entrypoint /nix/runtime/bootstrap.sh \\
+         <image>
 
-  `agentix-server` binds to the port from `AGENTIX_BIND_PORT`. We pick
-  a free host port, publish the same port to loopback, and health-check
-  `/health` on it.
+  The bundle's `/nix/runtime/bootstrap.sh` preps the runtime PATHs and
+  launches the runtime server. We pick a free host port, publish the
+  same port to loopback, pass it via `AGENTIX_BIND_PORT`, and
+  health-check `/health` on it.
 """
 
 from __future__ import annotations
@@ -46,39 +47,9 @@ from uuid import uuid4
 import httpx
 
 from agentix.deployment.base import Deployment, Sandbox, SandboxConfig, SandboxId, SandboxInfo
+from agentix.runtime import BIND_PORT_ENV, BUNDLE_RUNTIME_ENTRYPOINT
 
 logger = logging.getLogger("agentix.deployment.docker")
-
-_RUNTIME_ENTRYPOINT = "/bin/sh"
-_RUNTIME_BOOTSTRAP = r"""
-set -eu
-agentix_prepend_path() {
-  name="$1"
-  added="$2"
-  tracking="AGENTIX_ADDED_${name}"
-  eval "current=\${$name-}"
-  eval "tracked=\${$tracking-}"
-  if [ -n "$current" ]; then
-    export "$name=$added:$current"
-  else
-    export "$name=$added"
-  fi
-  if [ -n "$tracked" ]; then
-    export "$tracking=$tracked:$added"
-  else
-    export "$tracking=$added"
-  fi
-}
-agentix_prepend_path PATH "/nix/runtime/venv/bin:/nix/runtime/bin"
-agentix_prepend_path LD_LIBRARY_PATH "/nix/runtime/lib"
-agentix_prepend_path LIBRARY_PATH "/nix/runtime/lib"
-agentix_prepend_path CPATH "/nix/runtime/include"
-agentix_prepend_path C_INCLUDE_PATH "/nix/runtime/include"
-agentix_prepend_path CPLUS_INCLUDE_PATH "/nix/runtime/include"
-agentix_prepend_path PKG_CONFIG_PATH "/nix/runtime/lib/pkgconfig:/nix/runtime/share/pkgconfig"
-agentix_prepend_path CMAKE_PREFIX_PATH "/nix/runtime"
-exec /nix/runtime/venv/bin/agentix-server
-""".strip()
 
 
 async def _docker(*args: str, check: bool = True, retries: int = 0) -> tuple[int, bytes, bytes]:
@@ -169,7 +140,7 @@ class DockerDeployment(Deployment):
         sandbox_id = SandboxId(f"agentix-{uuid4().hex[:8]}")
         port = self._allocate_port()
 
-        env_args: list[str] = ["-e", f"AGENTIX_BIND_PORT={port}"]
+        env_args: list[str] = ["-e", f"{BIND_PORT_ENV}={port}"]
         if config.env:
             for k, v in config.env.items():
                 env_args.extend(["-e", f"{k}={v}"])
@@ -188,10 +159,8 @@ class DockerDeployment(Deployment):
             "--volumes-from",
             f"{carrier}:ro",
             "--entrypoint",
-            _RUNTIME_ENTRYPOINT,
+            BUNDLE_RUNTIME_ENTRYPOINT,
             config.image,
-            "-c",
-            _RUNTIME_BOOTSTRAP,
             retries=3,
         )
 

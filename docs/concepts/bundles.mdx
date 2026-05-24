@@ -47,16 +47,17 @@ or `agentix.plugins.datasets.swe`.
 
 ```text
 /nix/runtime/
+├── bootstrap.sh           # container entry point (deployment backends exec this)
 ├── bin/
 │   ├── python
-│   ├── pip
-│   └── agentix-server
-└── lib/python3.11/site-packages/
-    ├── agentix/
-    ├── agentix/bash/
-    ├── agentix/agents/claude_code/
-    ├── agentix/plugins/datasets/swe/
-    └── app.py
+│   └── pip
+└── venv/
+    └── lib/python3.11/site-packages/
+        ├── agentix/
+        ├── agentix/bash/
+        ├── agentix/agents/claude_code/
+        ├── agentix/plugins/datasets/swe/
+        └── app.py
 ```
 
 The runtime server and worker use this same environment. If the worker

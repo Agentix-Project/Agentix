@@ -155,11 +155,11 @@ One line per system:
   pydantic wire models, branded wire ids.
 - **runtime.client** — `RuntimeClient.remote(fn, ...)` over Socket.IO
   `/`. `register_namespace(ns)` attaches plugin handlers.
-- **runtime.server** — `agentix-server`; owns one worker subprocess,
+- **runtime.server** — ASGI app launched by the bundle's `/nix/runtime/bootstrap.sh`; owns one worker subprocess,
   resolves import-path callables, dynamic namespace forwarding for
   `/trace`, `/log`, and any plugin `/<package-name>`.
 - **deployment** — host-side `Deployment` Protocol and backend lookup.
-- **cli** — `agentix build [path]` (host) + `agentix.cli._assemble`
+- **cli** — `agentix build [path]` (host) + `agentix.cli.build.closures`
   (in-container closure discovery).
 - **builder** — `flake.nix`, `flake.lock`, `Dockerfile`,
   `bundle-build.sh` shipped as wheel data; `agentix build` stages them
@@ -247,7 +247,7 @@ Inside the container (`agentix/builder/bundle-build.sh`):
    the full dependency closure (non-editable). This is a plain uv
    venv; uv natively handles path / git / registry sources, so there
    is no staging puzzle and no build-backend fragility.
-3. **System closures** — `python -m agentix.cli._assemble` discovers
+3. **System closures** — `python -m agentix.cli.build.closures` discovers
    every system-deps `{ pkgs }: drv` (see below) and stages them into
    `closures/`.
 4. **Runtime** — `nix build .#runtime` `symlinkJoin`s the toolchain +

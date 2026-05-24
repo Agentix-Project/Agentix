@@ -39,13 +39,13 @@ For each sandbox:
    * `--env AGENTIX_BIND_PORT=<port>` (+ any `config.env`)
    * `<sif>` as the rootfs
    * a `/bin/sh -c` bootstrap that prepends `/nix/runtime/{venv/bin,bin,…}`
-     to `PATH`/`LD_LIBRARY_PATH`/etc. and execs
-     `/nix/runtime/venv/bin/agentix-server`.
+     execs `/nix/runtime/bootstrap.sh`, which preps
+     `PATH`/`LD_LIBRARY_PATH`/etc. and hands off to uvicorn.
 5. Poll `http://127.0.0.1:<port>/health` until it returns 200.
 6. Return a `Sandbox` whose `runtime_url` points at that port.
 
 `delete()` signals the spawned `apptainer exec` process, which in turn
-takes down `agentix-server` and the container kernel.
+takes down the runtime server and the container kernel.
 
 Apptainer shares the host network namespace by default, so the runtime
 server's port is directly reachable on `localhost` without `-p` style

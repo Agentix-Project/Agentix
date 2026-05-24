@@ -17,7 +17,8 @@ What it proves end to end:
   * the project's remote target imports and runs
   * plugin and project system closures (`bash` and `ripgrep`) are
     merged into `/nix/runtime`
-  * the `agentix-server` entry point is wired
+  * the bundle's `/nix/runtime/bootstrap.sh` entry point is wired and
+    the runtime ASGI app it ultimately launches can be imported
 """
 
 from __future__ import annotations
@@ -108,4 +109,14 @@ def test_system_closures_merged(bundle: str) -> None:
 
 
 def test_entrypoint_wired(bundle: str) -> None:
-    assert "agentix-server" in _sh(bundle, "/nix/runtime/venv/bin/agentix-server --help")
+    # Bundle entry point: /nix/runtime/bootstrap.sh, exec'd by every
+    # deployment backend. Verify the script exists + is executable, and
+    # that the ASGI app it ultimately launches can be imported from the
+    # bundle venv (catches dep-resolution bugs without actually starting
+    # uvicorn, which would block forever).
+    assert "ok" in _sh(bundle, "test -x /nix/runtime/bootstrap.sh && echo ok")
+    assert "ok" in _sh(
+        bundle,
+        "/nix/runtime/venv/bin/python -c "
+        "'from agentix.runtime.server.app import app; print(\"ok\")'",
+    )

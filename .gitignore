@@ -8,7 +8,11 @@ __pycache__/
 
 # Distribution / packaging
 .Python
-build/
+# Anchored to repo root so we keep ignoring the `python -m build` /
+# `agentix build --dry-run` output directory at the top of the repo,
+# while still tracking the `agentix/cli/build/` package that ships the
+# `agentix build` command. The unanchored default would ignore both.
+/build/
 develop-eggs/
 dist/
 downloads/

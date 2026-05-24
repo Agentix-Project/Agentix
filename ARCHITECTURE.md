@@ -93,15 +93,16 @@ At runtime, all installed modules live in the same Python environment:
 
 ```text
 /nix/runtime/
+├── bootstrap.sh           # container entry point (deployment backends exec this)
 ├── bin/
 │   ├── python
-│   ├── pip
-│   └── agentix-server
-└── lib/python3.11/site-packages/
-    ├── agentix/
-    ├── agentix/bash/
-    ├── agentix/swebench/
-    └── app.py
+│   └── pip
+└── venv/
+    └── lib/python3.11/site-packages/
+        ├── agentix/
+        ├── agentix/bash/
+        ├── agentix/swebench/
+        └── app.py
 ```
 
 If the project includes `default.nix`, `agentix build` adds a Nix
@@ -168,7 +169,7 @@ Host
       |
       v  Socket.IO `/` — call / call:result / call:error / cancel
 Sandbox
-  agentix-server
+  /nix/runtime/bootstrap.sh -> uvicorn -> agentix.runtime.server.app:app
       |
       v  length-prefixed msgpack frames on a private pipe
 Single runtime worker process

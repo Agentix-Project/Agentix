@@ -20,6 +20,11 @@ dependencies = [
     # Cross-language, no base64 overhead, native bytes, extension types
     # for ndarray + pydantic models.
     "msgpack>=1.0",
+    # Dev-side CLI (`agentix build`). Click owns argument parsing and
+    # per-subcommand `--help`; the CLI modules stay free of routing
+    # boilerplate. Already a transitive dep of uvicorn[standard], so the
+    # explicit pin only documents intent.
+    "click>=8.1",
 ]
 
 [project.optional-dependencies]
@@ -35,8 +40,11 @@ dev = [
 # Subcommands live in `agentix.cli`. The CLI is intentionally thin —
 # most logic is in the submodules so they can also be imported directly.
 agentix = "agentix.cli:main"
-# Runtime server entrypoint — the bundle image's Docker ENTRYPOINT.
-agentix-server = "agentix.runtime.server:main"
+# Runtime entry point is NOT a console_script: bundles are booted by
+# `/nix/runtime/bootstrap.sh` (shipped from `agentix/builder/bootstrap.sh`).
+# Some task images (e.g. swebench) inject their own Python-related env;
+# bootstrap.sh scrubs `sys.path` inside an inline `python -c` *before*
+# importing uvicorn / agentix, so the bundle venv isn't shadowed.
 
 # Deployment backends, agents, datasets, and runtime integrations ship
 # in their own wheels. Runtime integrations are normal Python dependencies
