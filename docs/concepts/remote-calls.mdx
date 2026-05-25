@@ -58,8 +58,8 @@ runtime uses it to correlate `call:result` / `call:error` responses and
 to support cancellation.
 
 Remote calls use Socket.IO events on the `/rpc` namespace. `RuntimeClient`
-may use the internal HTTP `/call` fast path for short calls; accepted
-long-running calls still complete over `/rpc`.
+may use the internal HTTP `/call` fast path for short calls, but accepted
+long-running calls and replayed results still complete over `/rpc`.
 
 ## Example
 
