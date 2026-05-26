@@ -1,6 +1,6 @@
-"""Length-prefixed msgpack framing for worker stdio.
+"""Length-prefixed msgpack framing for the worker control pipe.
 
-Each frame on a worker's stdin/stdout is:
+Each frame on a worker's private runtime pipe is:
 
   +--------+-------------------+
   | u32 LE | n bytes msgpack   |
@@ -21,7 +21,12 @@ Frame schemas (`{"type": "...", ...}` — extra fields per type):
     boot_error   {error}                          — sent once if startup fails
     result       {call_id, value}                 — call succeeded (value is pickle bytes)
     error        {call_id, error}                 — call failed
-    trace        {frame}                          — opaque side-channel payload (forwarded as-is)
+    sio_open     {namespace}                      — open a side-channel namespace
+    sio_emit     {namespace, event, data}         — emit side-channel data
+
+User stdout is intentionally not part of this byte stream. The worker runtime
+captures fd 1 separately and forwards those lines as `/log` records so
+`print()` cannot corrupt control framing.
 
 `call_id` correlates request frames with their response frames.
 

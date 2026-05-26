@@ -59,3 +59,8 @@ async def count_exec_and_sleep(delay: float) -> int:
 async def reset_exec_counter() -> None:
     global _exec_counter
     _exec_counter = 0
+
+
+def print_stdout(message: str) -> str:
+    print(message)
+    return "printed"

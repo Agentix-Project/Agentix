@@ -66,6 +66,18 @@ class WorkerLogHandler(logging.Handler):
             self.handleError(record)
 
 
+def emit_worker_record(payload: dict[str, Any]) -> None:
+    """Emit a pre-built log payload on the worker `/log` stream.
+
+    This is for runtime-owned sources such as captured stdout where routing
+    through stdlib logging would recurse back into stderr/stdout handlers.
+    """
+    if not _sio._is_installed():
+        return
+    stream = _get_worker_stream()
+    stream.emit_nowait(RECORD_EVENT, payload)
+
+
 # Fields LogRecord defines natively; everything else on `record.__dict__`
 # is treated as a user-provided `extra={...}` field and forwarded.
 _STD_RECORD_KEYS = frozenset(
@@ -230,4 +242,4 @@ def _replay_record(payload: dict[str, Any]) -> None:
     logger.handle(record)
 
 
-__all__ = ["HostLogNamespace", "WorkerLogHandler"]
+__all__ = ["HostLogNamespace", "WorkerLogHandler", "emit_worker_record"]

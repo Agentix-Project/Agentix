@@ -1,18 +1,21 @@
-"""agentix.utils.log — sandbox-side `logging` records ferried to the host.
+"""agentix.utils.log — sandbox-side logs ferried to the host.
 
 This module is a thin bridge for the *third* observability pillar
-(distinct from `agentix.utils.trace`). Workers don't need a custom API: just
-use stdlib `logging`:
+(distinct from `agentix.utils.trace`). Workers don't need a custom API:
+stdout is captured by the runtime, and stdlib logging is bridged directly:
 
     import logging
     logger = logging.getLogger(__name__)
     logger.info("hello from sandbox")
 
+    print("hello from stdout")
+
 At worker boot, `install_worker_bridge()` adds a `logging.Handler` to
 the root logger that emits each `LogRecord` on the `/log` SIO
 namespace. The host's `RuntimeClient` auto-registers a consumer that
 forwards records into the host's own `logging` system, so they appear
-in host logs untouched.
+in host logs untouched. The worker runtime also captures stdout and sends
+each line through the same `/log` stream as `agentix.sandbox.stdout`.
 
 ## Delivery contract
 

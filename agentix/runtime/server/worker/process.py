@@ -10,9 +10,11 @@ generic `sio_*` frames.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import sys
+import time
 import traceback
 from typing import Any
 
@@ -23,6 +25,8 @@ from agentix.runtime.shared.framing import read_frame, write_frame
 from agentix.runtime.shared.idents import CallId
 from agentix.runtime.shared.models import RemoteError, RemoteRequest
 from agentix.utils import log as _log
+from agentix.utils.log._bridge import emit_worker_record
+from agentix.utils.log._config import LOG_CONTEXT_ATTR, get_log_context
 from agentix.utils.trace._bridge import DISPATCH_CALL_ID, install_worker_bridge
 
 logger = logging.getLogger("agentix.runtime.server.worker.process")
@@ -47,6 +51,7 @@ class Worker:
         self._shutdown = asyncio.Event()
         self._outbound_q: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._drainer: asyncio.Task | None = None
+        self._stdio_tasks: list[asyncio.Task] = []
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
@@ -57,16 +62,20 @@ class Worker:
         # child reading stdin (claude does) would steal frame bytes,
         # desyncing the protocol and hanging every later call.
         #
-        # Move the framing onto private fds and point 0/1 at /dev/null,
-        # so any inherited stdio is harmless. `sys.stdout` still wraps
-        # the old fd-1 buffer, so stray `print()`s now land in
-        # /dev/null instead of corrupting frames.
+        # Move the framing onto private fds and point fd 0 at /dev/null, so
+        # inherited stdin is harmless. fd 1 becomes a user-output pipe:
+        # `print()` and child-process stdout are drained separately and
+        # forwarded through the `/log` side channel instead of corrupting
+        # the control frame stream.
         frame_in_fd = os.dup(0)
         frame_out_fd = os.dup(1)
+        stdout_read_fd, stdout_write_fd = os.pipe()
         devnull = os.open(os.devnull, os.O_RDWR)
         os.dup2(devnull, 0)
-        os.dup2(devnull, 1)
+        os.dup2(stdout_write_fd, 1)
+        os.close(stdout_write_fd)
         os.close(devnull)
+        _make_stdout_eager()
 
         reader = asyncio.StreamReader()
         await loop.connect_read_pipe(
@@ -89,6 +98,7 @@ class Worker:
         # extensions registered on top of agentix.sio.
         install_worker_bridge()
         _log.install_worker_bridge()
+        self._stdio_tasks.append(loop.create_task(self._drain_stdout(stdout_read_fd)))
         await self._send({"type": "ready"})
 
         while not self._shutdown.is_set():
@@ -104,6 +114,13 @@ class Worker:
             task.cancel()
         if self._calls:
             await asyncio.gather(*self._calls.values(), return_exceptions=True)
+        if self._stdio_tasks:
+            _close_stdout_pipe()
+            _, pending = await asyncio.wait(self._stdio_tasks, timeout=1.0)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
         await self._outbound_q.join()
         if self._drainer is not None:
             self._drainer.cancel()
@@ -124,6 +141,24 @@ class Worker:
 
     async def _send(self, payload: dict[str, Any]) -> None:
         await self._outbound_q.put(payload)
+
+    async def _drain_stdout(self, fd: int) -> None:
+        loop = asyncio.get_running_loop()
+        reader = asyncio.StreamReader()
+        await loop.connect_read_pipe(
+            lambda: asyncio.StreamReaderProtocol(reader),
+            os.fdopen(fd, "rb", buffering=0),
+        )
+        try:
+            while True:
+                line = await reader.readline()
+                if not line:
+                    break
+                _emit_stdio_line("stdout", line)
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.debug("stdout drain failed", exc_info=True)
 
     def _enqueue_frame(self, frame: dict[str, Any]) -> None:
         """Sync put for the agentix.sio bridge — must never block."""
@@ -208,6 +243,50 @@ class Worker:
 async def _amain() -> None:
     worker = Worker()
     await worker.run()
+
+
+def _make_stdout_eager() -> None:
+    """Make regular `print()` visible without requiring `flush=True`."""
+    with contextlib.suppress(Exception):
+        reconfigure = getattr(sys.stdout, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(line_buffering=True, write_through=True)
+
+
+def _close_stdout_pipe() -> None:
+    """Flush fd 1 and detach it from the capture pipe so the drainer reaches EOF."""
+    with contextlib.suppress(Exception):
+        sys.stdout.flush()
+    with contextlib.suppress(Exception):
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(devnull, 1)
+        finally:
+            os.close(devnull)
+
+
+def _emit_stdio_line(stream: str, raw: bytes) -> None:
+    text = raw.decode("utf-8", "replace").rstrip("\r\n")
+    emit_worker_record(
+        {
+            "name": f"agentix.sandbox.{stream}",
+            "level": "INFO",
+            "levelno": logging.INFO,
+            "message": text,
+            "created": time.time(),
+            "pathname": "",
+            "lineno": 0,
+            "funcName": "",
+            "module": "stdio",
+            "exc_text": None,
+            "stack_info": None,
+            LOG_CONTEXT_ATTR: get_log_context(),
+            "extras": {
+                "agentix_stream": stream,
+                "worker_id": os.environ.get("AGENTIX_WORKER_ID"),
+            },
+        }
+    )
 
 
 def main() -> None:

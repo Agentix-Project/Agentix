@@ -20,6 +20,7 @@ from tests._namespace_target import (
     emit_log_with_extra,
     fire_namespace_event,
 )
+from tests._worker_target import print_stdout
 
 
 class _EchoHost(AsyncClientNamespace):
@@ -192,6 +193,35 @@ async def test_log_record_carries_worker_context(live_server):
             await c.remote(emit_log_line, "from sandbox worker", "INFO")
             record = await _await_record(captured, "from sandbox worker")
             assert record is not None
+            context = getattr(record, LOG_CONTEXT_ATTR, "")
+            assert context.startswith("sandbox-")
+            assert "-worker-" in context
+    finally:
+        target_logger.removeHandler(handler)
+
+
+@pytest.mark.asyncio
+async def test_remote_print_stdout_arrives_on_host(live_server):
+    base_url = await live_server()
+
+    captured: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            if record.name == "agentix.sandbox.stdout":
+                captured.append(record)
+
+    target_logger = logging.getLogger("agentix.sandbox.stdout")
+    target_logger.setLevel(logging.INFO)
+    handler = _Capture()
+    target_logger.addHandler(handler)
+    try:
+        async with RuntimeClient(base_url) as c:
+            result = await c.remote(print_stdout, "hello from print")
+            assert result == "printed"
+            record = await _await_record(captured, "hello from print")
+            assert record is not None
+            assert getattr(record, "agentix_stream", None) == "stdout"
             context = getattr(record, LOG_CONTEXT_ATTR, "")
             assert context.startswith("sandbox-")
             assert "-worker-" in context
