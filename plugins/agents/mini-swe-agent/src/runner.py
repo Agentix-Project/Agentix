@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 from minisweagent import Agent
 
@@ -11,8 +10,12 @@ def run(
     *,
     workdir: str = "/testbed",
     agent: Agent,
-) -> dict[str, Any]:
-    """Run a pre-built mini-swe-agent instance in sandbox."""
+) -> None:
+    """Run a pre-built mini-swe-agent instance in the sandbox.
+
+    Trajectory capture is left entirely to abridge at the proxy layer;
+    the integration only invokes the agent.
+    """
     workdir_path = Path(workdir)
     workdir_path.mkdir(parents=True, exist_ok=True)
 
@@ -21,4 +24,4 @@ def run(
     if env_config is not None and hasattr(env_config, "cwd"):
         env_config.cwd = str(workdir_path)
 
-    return dict(agent.run(task))
+    agent.run(task)
