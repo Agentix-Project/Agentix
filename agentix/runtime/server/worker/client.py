@@ -147,6 +147,12 @@ def _clean_worker_env(runtime_bin_dir: Path | None) -> dict[str, str]:
 class WorkerBackend(Protocol):
     """Internal execution backend boundary."""
 
+    @property
+    def closed(self) -> bool:
+        """True once the backend can no longer serve calls (e.g. its worker
+        subprocess has exited). A closed backend is replaced on the next call."""
+        ...
+
     async def call(self, request: RemoteRequest) -> RemoteResponse: ...
     async def send_inbound(self, namespace: str, event: str, data: Any) -> None: ...
     async def shutdown(self) -> None: ...
@@ -164,6 +170,12 @@ class _InProcessWorker:
 
     def __init__(self) -> None:
         self._invoker = CallableInvoker()
+
+    @property
+    def closed(self) -> bool:
+        # The in-process backend runs in the server's own loop; it never dies
+        # out from under us, so it is never closed.
+        return False
 
     def _resolve_or_error(self, request: RemoteRequest) -> tuple[Any | None, RemoteError | None]:
         try:
@@ -209,6 +221,10 @@ class _SubprocessWorker:
         self._pending: dict[str, asyncio.Future] = {}
         self._cancel_tasks: set[asyncio.Task] = set()
         self._sio_handler = sio_handler
+
+    @property
+    def closed(self) -> bool:
+        return self._closed.is_set()
 
     async def start(self) -> None:
         env = _clean_worker_env(self._runtime_bin_dir)
@@ -417,11 +433,18 @@ class RuntimeWorkerClient:
         self._worker = self._inprocess
 
     async def _get_worker(self) -> WorkerBackend:
-        if self._worker is not None:
-            return self._worker
+        worker = self._worker
+        if worker is not None and not worker.closed:
+            return worker
         async with self._spawn_lock:
-            if self._worker is not None:
-                return self._worker
+            worker = self._worker
+            if worker is not None and not worker.closed:
+                return worker
+            if worker is not None:
+                # The previous worker exited (crash, OOM kill). Its read loop
+                # already failed every in-flight call; replace it so the
+                # sandbox keeps serving instead of erroring out forever.
+                logger.warning("runtime worker is gone; spawning a replacement")
             worker = _SubprocessWorker(
                 self._python,
                 runtime_bin_dir=self._runtime_bin_dir,

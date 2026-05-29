@@ -132,3 +132,31 @@ async def test_subprocess_worker_death_fails_in_flight_call():
             await asyncio.wait_for(task, timeout=5)
     finally:
         await mp.shutdown()
+
+
+async def test_subprocess_worker_respawns_after_death():
+    """After the worker dies, the next call spawns a fresh worker instead of
+    raising WorkerExited forever."""
+    mp = _make_worker()
+    try:
+        r1 = await mp.call(request_for(target.echo, kwargs={"msg": "one"}))
+        assert r1.ok
+        worker1 = mp._worker
+        assert worker1 is not None
+
+        proc = worker1._proc  # type: ignore[attr-defined]
+        assert proc is not None
+        proc.kill()
+        # Let the read loop observe EOF and mark the worker closed.
+        for _ in range(100):
+            if worker1.closed:
+                break
+            await asyncio.sleep(0.05)
+        assert worker1.closed
+
+        r2 = await mp.call(request_for(target.echo, kwargs={"msg": "two"}))
+        assert r2.ok, r2.error
+        assert pickle.loads(r2.value).msg == "echo:two"
+        assert mp._worker is not worker1  # a fresh worker was spawned
+    finally:
+        await mp.shutdown()
