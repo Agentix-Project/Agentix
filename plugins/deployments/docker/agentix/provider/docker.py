@@ -410,6 +410,11 @@ class DockerProvider(SandboxProvider):
     def __init__(self, config: DockerProviderConfig | None = None):
         self.config = _default_config(config)
         self._ports: dict[SandboxId, int] = {}  # sandbox_id → host port
+        # Host ports handed out but not yet released, so concurrent create()s
+        # can't be allocated the same port in the window before `docker run`
+        # binds it. Reserved in _allocate_port; released in delete / on a
+        # failed create.
+        self._inflight_ports: set[int] = set()
 
     async def materialize_bundle(
         self,
@@ -432,14 +437,19 @@ class DockerProvider(SandboxProvider):
             metadata={"cache": str(cache_root), "name": bundle_name},
         )
 
-    @staticmethod
-    def _allocate_port() -> int:
-        # Ask the kernel for any free TCP port. There's still a small
-        # TOCTOU window before the container binds, but no worse than a
-        # linear probe and without the seed parameter.
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
-            return s.getsockname()[1]
+    def _allocate_port(self) -> int:
+        # Ask the kernel for a free TCP port, then reserve it in-process so a
+        # concurrent create() isn't handed the same number before `docker run`
+        # binds it (the kernel won't hand the same port to two live binds, but
+        # two creates that each bind-and-close can still collide on it).
+        for _ in range(100):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("127.0.0.1", 0))
+                port = s.getsockname()[1]
+            if port not in self._inflight_ports:
+                self._inflight_ports.add(port)
+                return port
+        raise RuntimeError("could not allocate a free host port")
 
     async def create(self, config: SandboxConfig) -> Sandbox:
         sandbox_id = SandboxId(f"agentix-{uuid4().hex[:8]}")
@@ -454,37 +464,35 @@ class DockerProvider(SandboxProvider):
 
         platform_args = ["--platform", config.platform] if config.platform else []
         resource_args = _resource_args(config.resource, self.config)
-        await _docker(
-            "run",
-            *platform_args,
-            *resource_args,
-            *self.config.run_args,
-            *_network_args(self.config),
-            "-d",
-            "--name",
-            sandbox_id,
-            *_publish_args(port, self.config),
-            *env_args,
-            *_nix_mount_args(config.bundle),
-            "--entrypoint",
-            BUNDLE_RUNTIME_ENTRYPOINT,
-            config.image,
-            config=self.config,
-            retries=3,
-        )
-
-        self._ports[sandbox_id] = port
-        logger.info("Created sandbox %s on port %d", sandbox_id, port)
-
         try:
+            await _docker(
+                "run",
+                *platform_args,
+                *resource_args,
+                *self.config.run_args,
+                *_network_args(self.config),
+                "-d",
+                "--name",
+                sandbox_id,
+                *_publish_args(port, self.config),
+                *env_args,
+                *_nix_mount_args(config.bundle),
+                "--entrypoint",
+                BUNDLE_RUNTIME_ENTRYPOINT,
+                config.image,
+                config=self.config,
+                retries=3,
+            )
+            self._ports[sandbox_id] = port
+            logger.info("Created sandbox %s on port %d", sandbox_id, port)
             await self._wait_healthy(port)
         except BaseException:
-            # The container started but never became healthy (bad bundle,
-            # crash loop, slow image) or creation was cancelled. Remove it so a
-            # failed create doesn't orphan a running container and its
-            # published host port — `session()` can't clean up a sandbox it
-            # never received.
+            # Failed or cancelled create: remove any container that started and
+            # release the reserved port so neither leaks. The container may
+            # have started but never become healthy (bad bundle, crash loop);
+            # `session()` can't clean up a sandbox it never received.
             await self.delete(sandbox_id)
+            self._inflight_ports.discard(port)
             raise
         return Sandbox(
             sandbox_id=sandbox_id,
@@ -526,7 +534,9 @@ class DockerProvider(SandboxProvider):
 
     async def delete(self, sandbox_id: SandboxId) -> None:
         await _docker("rm", "-f", sandbox_id, config=self.config, check=False)
-        self._ports.pop(sandbox_id, None)
+        port = self._ports.pop(sandbox_id, None)
+        if port is not None:
+            self._inflight_ports.discard(port)
         logger.info("Deleted sandbox %s", sandbox_id)
 
 
