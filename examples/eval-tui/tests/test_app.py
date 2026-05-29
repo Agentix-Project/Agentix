@@ -111,6 +111,17 @@ async def test_rollouts_export_to_writes_json(tmp_path: Path) -> None:
         assert len(loaded["rollouts"]) == 4
 
 
+async def test_theme_cycle_changes_theme() -> None:
+    app = AgentixTUI(rollout_spec=None)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        first = app.theme
+        await pilot.press("t")
+        await pilot.pause()
+        assert app.theme != first
+        assert app.theme in app._themes
+
+
 async def test_build_view_constructs_command_from_path() -> None:
     app = AgentixTUI(rollout_spec=None)
     async with app.run_test() as pilot:

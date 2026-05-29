@@ -92,6 +92,7 @@ class AgentixTUI(App):
         ("5", "show_tab('build')", "Build"),
         ("6", "show_tab('observability')", "Obs"),
         ("s", "save", "Save"),
+        ("t", "cycle_theme", "Theme"),
         ("q", "quit", "Quit"),
     ]
 
@@ -110,17 +111,31 @@ class AgentixTUI(App):
         self.notify(f"saved {len(payload['rollouts'])} rollouts → {path.name}", timeout=3)
 
     def on_mount(self) -> None:
-        # Best-effort branded theme; falls back to the default if the running
-        # Textual version's theme API differs.
+        # Build the set of cycleable themes: a best-effort branded theme (falls
+        # back gracefully if the Textual version's theme API differs) plus a few
+        # always-available built-ins. Cycle with `t`.
+        self._themes: list[str] = []
         try:
             from textual.theme import Theme
 
             self.register_theme(
                 Theme(name="agentix", primary="#cc785c", secondary="#a45a45", accent="#e08a6d", dark=True)
             )
-            self.theme = "agentix"
+            self._themes.append("agentix")
         except Exception:
             pass
+        for name in ("tokyo-night", "gruvbox", "nord", "dracula", "textual-light"):
+            if name in self.available_themes:
+                self._themes.append(name)
+        if self._themes:
+            self.theme = self._themes[0]
+
+    def action_cycle_theme(self) -> None:
+        if not self._themes:
+            return
+        index = self._themes.index(self.theme) if self.theme in self._themes else -1
+        self.theme = self._themes[(index + 1) % len(self._themes)]
+        self.notify(f"theme: {self.theme}", timeout=2)
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
