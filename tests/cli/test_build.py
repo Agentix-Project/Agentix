@@ -457,6 +457,16 @@ class TestDockerBuild:
         assert docker._build_container_args(cfg) == ["--build-arg", "FOO=bar"]
         assert docker._build_container_run_args(cfg) == ["--device", "/dev/fuse"]
 
+    def test_run_reports_command_on_failure(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # A failing command (no capture) must surface a diagnostic, not just a
+        # bare exit code.
+        with pytest.raises(SystemExit) as excinfo:
+            docker._run(["false"])
+        assert excinfo.value.code != 0
+        err = capsys.readouterr().err
+        assert "false" in err
+        assert "exited with code" in err
+
 
 # ── build: tar bundle artifacts ────────────────────────────────────
 

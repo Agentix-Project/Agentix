@@ -58,8 +58,11 @@ def _run(
             f"(https://podman.io/docs/installation), or pass --container-bin."
         ) from exc
     if check and proc.returncode != 0:
-        if capture:
-            sys.stderr.write(proc.stderr or "")
+        if capture and proc.stderr:
+            sys.stderr.write(proc.stderr)
+        # Always emit a diagnostic — without `capture` the failure was just a
+        # bare exit code, which is opaque to in-process callers (main(), tests).
+        sys.stderr.write(f"error: {cmd[0]} exited with code {proc.returncode}: {' '.join(cmd)}\n")
         raise SystemExit(proc.returncode)
     return proc
 
