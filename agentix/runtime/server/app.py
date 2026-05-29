@@ -6,9 +6,12 @@ Endpoints:
 
 - `GET /health`
 - `POST /call` — internal fast-path used by `RuntimeClient.remote`;
-  msgpack request/response. Returns the result inline if it lands
-  within the caller's `prefer_sync_ms` budget; otherwise returns
-  `accepted` and the result follows on Socket.IO.
+  msgpack request/response. The caller sends RFC 7240
+  `Prefer: respond-async, wait=N` (N seconds; fractional accepted).
+  Returns **200** with the result if it lands within that budget;
+  otherwise **202** with `{call_id}` + a `Location` header, and the
+  result follows on Socket.IO (`call:result` / `call:error`). The
+  honored budget is echoed in `Preference-Applied: wait=N`.
 - Socket.IO at `/socket.io/` — unary RPC on `/rpc` (`call` / `call:result` /
   `call:error`, `cancel`, plus `resume`/`ack` for reconnect-safe
   delivery), and side-channel namespaces (`/trace`, `/log`, and
@@ -22,6 +25,7 @@ builtins are supported call targets.
 from __future__ import annotations
 
 import logging
+import re
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
@@ -62,24 +66,67 @@ async def health() -> HealthResponse:
     return HealthResponse(version=__version__)
 
 
+_MSGPACK = "application/msgpack"
+# RFC 7240 `wait` is delta-seconds (integer); we accept fractional too
+# since we own both ends — a benign superset that keeps sub-second
+# budgets expressible.
+_WAIT_RE = re.compile(r"(?:^|[,;\s])wait\s*=\s*\"?([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)
+_DEFAULT_WAIT_S = 1.0
+
+
+def _parse_prefer_wait(prefer: str, *, default: float) -> float:
+    match = _WAIT_RE.search(prefer or "")
+    if not match:
+        return default
+    try:
+        return max(float(match.group(1)), 0.0)
+    except ValueError:
+        return default
+
+
+def _format_wait(seconds: float) -> str:
+    return str(int(seconds)) if seconds == int(seconds) else str(seconds)
+
+
 @_fastapi_app.post("/call")
 async def call(request: Request) -> Response:
     """Internal fast-path endpoint used by `RuntimeClient.remote`.
 
-    Request/response payloads are msgpack bytes, not JSON.
+    Request/response payloads are msgpack bytes, not JSON. The sync
+    budget is the RFC 7240 `Prefer: respond-async, wait=N` header.
     """
     raw = await request.body()
     payload = unpack(raw) if raw else {}
     if not isinstance(payload, dict):
         payload = {}
 
-    prefer_sync_ms = payload.get("prefer_sync_ms")
-    if not isinstance(prefer_sync_ms, int):
-        prefer_sync_ms = 1000
+    if not isinstance(payload.get("call_id"), str):
+        error = {"type": "BadRequest", "message": "missing or invalid call_id"}
+        return Response(
+            content=pack({"ok": False, "error": error}),
+            status_code=400,
+            media_type=_MSGPACK,
+        )
+
+    wait_s = _parse_prefer_wait(request.headers.get("prefer", ""), default=_DEFAULT_WAIT_S)
+    applied = {"Preference-Applied": f"wait={_format_wait(wait_s)}"}
 
     submit = getattr(_sio, "submit_http_call")
-    result = await submit(payload, prefer_sync_ms=prefer_sync_ms)
-    return Response(content=pack(result), media_type="application/msgpack")
+    result = await submit(payload, wait_s=wait_s)
+
+    if result.get("accepted") is True:
+        call_id = result.get("call_id")
+        return Response(
+            content=pack({"call_id": call_id}),
+            status_code=202,
+            media_type=_MSGPACK,
+            headers={**applied, "Location": f"/call/{call_id}"},
+        )
+
+    # Completed within the budget (200), success or remote exception —
+    # both are a delivered RPC outcome, distinguished by the `ok` flag.
+    body = {key: result[key] for key in ("ok", "value", "error") if key in result}
+    return Response(content=pack(body), status_code=200, media_type=_MSGPACK, headers=applied)
 
 
 # ── Compose ASGI app: FastAPI health + Socket.IO remote calls ──
