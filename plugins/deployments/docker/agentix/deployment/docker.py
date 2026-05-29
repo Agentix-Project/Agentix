@@ -353,12 +353,19 @@ async def _docker(
     delay = 2.0
     bin_name = _container_bin(config)
     while True:
-        proc = await asyncio.create_subprocess_exec(
-            bin_name,
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                bin_name,
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                f"container CLI {bin_name!r} not found on PATH. Install Docker "
+                f"(https://docs.docker.com/get-docker/) or Podman "
+                f"(https://podman.io/docs/installation), or set container_bin."
+            ) from exc
         stdout, stderr = await proc.communicate()
         rc = proc.returncode or 0
         if not check or rc == 0:

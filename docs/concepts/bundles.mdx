@@ -26,39 +26,41 @@ Agentix does not maintain a separate plugin manifest. The project's
 name = "my-rollout"
 version = "0.1.0"
 dependencies = [
-    "agentixx>=0.1.0",
+    "agentixx>=0.2.0",
     "agentix-runtime-basic>=0.1.0",
     "agentix-agent-claude-code>=0.1.0",
     "agentix-dataset-swe>=0.1.0",
 ]
 ```
 
-During the build, Agentix copies the project into the bundle and runs one
-install into the runtime environment:
+During the build, Agentix copies the project into the bundle and uses uv
+to resolve and install the dependency closure into the runtime venv:
 
 ```bash
-/nix/runtime/bin/pip install --no-cache-dir /src/project
+uv venv /nix/runtime/venv
+VIRTUAL_ENV=/nix/runtime/venv uv sync --active --frozen --no-dev --no-editable
 ```
 
-That single install brings in user code, direct dependencies,
-transitive dependencies, and integration modules such as `agentix.bash`
-or `agentix.plugins.datasets.swe`.
+That sync brings in user code, direct dependencies, transitive
+dependencies, and integration modules such as `agentix.bash` or
+`agentix.plugins.datasets.swe`. `uv sync --frozen` resolves from the
+project's lockfile, `--no-dev` drops dev-only dependency groups, and
+`--no-editable` installs everything as a regular (non-editable) copy so
+the bundle is self-contained.
 
 ## Runtime Layout
 
 ```text
 /nix/runtime/
 ├── bootstrap.sh           # container entry point (deployment backends exec this)
-├── bin/
-│   ├── python
-│   └── pip
-└── venv/
-    └── lib/python3.11/site-packages/
-        ├── agentix/
-        ├── agentix/bash/
-        ├── agentix/agents/claude_code/
-        ├── agentix/plugins/datasets/swe/
-        └── app.py
+├── venv/                  # the uv venv — all Python deps
+│   └── lib/python3.11/site-packages/
+│       ├── agentix/
+│       ├── agentix/bash/
+│       ├── agentix/agents/claude_code/
+│       ├── agentix/plugins/datasets/swe/
+│       └── app.py
+└── {bin,lib,...}/         # symlinkJoin of the Nix closures (system binaries)
 ```
 
 The runtime server and worker use this same environment. If the worker

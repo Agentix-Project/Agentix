@@ -11,15 +11,17 @@ dataset package, start with [integrate an agent](/integrate-agent) or
 
 - Python 3.11 or newer
 - Docker for end-to-end sandbox tests
-- Sibling runtime and deployment repos checked out next to `Agentix/`
-  when testing full rollouts
+- Agentix is one monorepo uv workspace — the runtime and deployment
+  plugins live under `plugins/` (e.g. `plugins/runtime-basic`,
+  `plugins/deployments/docker`) and are installed editable by
+  `uv sync --all-packages`. There are no sibling repos to check out.
 
 ## Setup
 
 ```bash
 git clone https://github.com/Agentiix/Agentix.git
 cd Agentix
-uv sync --extra dev
+uv sync --all-packages --all-extras
 ```
 
 The PyPI distribution is named `agentixx`; the import package is
@@ -40,23 +42,21 @@ AGENTIX_BIND_PORT=9000 uvicorn agentix.runtime.server.app:app --port 9000
 
 The server exposes `/health`; remote calls use `/socket.io/`.
 
-## Build the Runtime Base Image
+## Bundles, Not a Base Image
 
-Bundles extend a base image. Build it from the sibling
-runtime repo when testing end-to-end locally.
-
-```bash
-docker build -t agentix/runtime:0.1.0 -f ../Agentix-Runtime-Basic/runtime/Dockerfile .
-```
-
-Rebuild the base image when runtime code or dependency versions change.
+There is no separate runtime base image to build. `agentix build`
+produces a bundle, staging the Dockerfile shipped at
+`agentix/builder/Dockerfile` and running every heavy step inside the
+build container. Deployments then overlay that bundle onto any
+task image at `/nix` via Docker's `--mount type=image`, so the same
+bundle works across task images with no rebuild.
 
 ## Build a Bundle
 
 ```bash
 agentix build
 agentix build path/to/project --name my-rollout:dev
-BUNDLE=$(agentix deploy docker dist/my-rollout-dev-linux-amd64.bundle.tar | awk -F' -> ' '/^bundle -> /{print $2}')
+BUNDLE=$(agentix deploy docker dist/my-rollout-dev-linux-amd64.bundle.tar --format json | jq -r .bundle)
 agentix build path/to/project --dry-run
 ```
 
@@ -104,7 +104,10 @@ pytest -x
 | `agentix/runtime/client` | `RuntimeClient` and transport behavior |
 | `agentix/runtime/server` | FastAPI app, Socket.IO handlers, worker client, worker process, callable invocation |
 | `agentix/deployment` | Deployment protocol and backend discovery |
-| `agentix/cli` | Build command |
+| `agentix/cli` | Build + deploy CLI (`agentix build`, `agentix deploy`, `agentix plugin`) |
+| `agentix/sio` | Sandbox-side namespace API |
+| `agentix/utils` | log + trace bridges |
+| `agentix/builder` | `flake.nix`/`Dockerfile`/`bundle-build.sh` shipped as wheel data |
 
 ## Design Rules
 

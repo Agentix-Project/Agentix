@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
+from functools import wraps
 from typing import Any
 
 import socketio
@@ -84,4 +86,50 @@ class AsyncClientNamespace(socketio.AsyncClientNamespace):
             logger.exception("namespace handler for %r raised", event)
 
 
-__all__ = ["AsyncClientNamespace"]
+RequestMethod = Callable[[Any, Any], Awaitable[Any]]
+WrappedRequestHandler = Callable[[Any, Any], Awaitable[None]]
+
+
+def request_handler(event: str) -> Callable[[RequestMethod], WrappedRequestHandler]:
+    """Decorate a host `on_<event>` coroutine that answers a sandbox
+    `Namespace.request(event, body)` round-trip.
+
+    The wrapped coroutine receives the unwrapped request *body* and returns
+    the reply value. The request envelope (`request_id` / `data`), the reply
+    event name (`<event>:result` / `<event>:error`), and error replies are
+    all handled automatically — so a typo in the reply event name or a
+    forgotten reply (which otherwise hangs the sandbox until its request
+    timeout) can't happen. A raised exception becomes an `<event>:error`
+    reply carrying `{"type", "message"}` (the shape `Namespace.request`
+    raises as `RemoteSioError`).
+
+        class MyHost(AsyncClientNamespace):
+            def __init__(self) -> None:
+                super().__init__("/my-plugin")
+
+            @request_handler("fetch")
+            async def on_fetch(self, body):
+                return await do_work(body)
+    """
+
+    def decorate(method: RequestMethod) -> WrappedRequestHandler:
+        @wraps(method)
+        async def wrapper(self: Any, payload: Any) -> None:
+            request_id = payload.get("request_id") if isinstance(payload, dict) else None
+            body = payload.get("data") if isinstance(payload, dict) else payload
+            try:
+                value = await method(self, body)
+            except Exception as exc:
+                await self.emit(
+                    f"{event}:error",
+                    {"request_id": request_id, "error": {"type": type(exc).__name__, "message": str(exc)}},
+                )
+                return
+            await self.emit(f"{event}:result", {"request_id": request_id, "value": value})
+
+        return wrapper
+
+    return decorate
+
+
+__all__ = ["AsyncClientNamespace", "request_handler"]

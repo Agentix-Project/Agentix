@@ -14,7 +14,7 @@ is cleaned up.
 The Docker backend is the local development path:
 
 ```bash
-pip install agentix-deployment-docker
+uv add agentix-deployment-docker
 ```
 
 In code, create a deployment, pass a `SandboxConfig`, and use the
@@ -36,6 +36,21 @@ async with session(deployment, config) as sandbox:
 ```
 
 `session(...)` creates the sandbox on entry and deletes it on exit.
+
+For plugin-agnostic code where the backend name comes from config or an
+environment variable, use `load_deployment(name)` (which returns the
+class) instead of a concrete import:
+
+```python
+from agentix import load_deployment
+
+Deployment = load_deployment(os.environ["AGENTIX_DEPLOYMENT"])
+deployment = Deployment()
+```
+
+To discover what is installed, `from agentix import deployments;
+deployments().all()` returns `{name: DeploymentClass}` for every
+registered backend.
 
 If the bundle was built for a non-default architecture, pass the same
 Docker/OCI platform so the task image and runtime overlay match:
@@ -96,9 +111,13 @@ class FlyDeployment:
         ...
 ```
 
-Backend constructors take no arguments. Read API keys, regions, and
-templates from environment variables so CLI and code paths behave the
-same way.
+Most backends construct with no arguments, reading API keys, regions,
+and templates from environment variables so CLI and code paths behave
+the same way. A backend MAY accept its own config object — e.g.
+`DockerDeployment(DockerDeploymentConfig(container_bin="podman"))`
+selects the container runtime, network, GPU args, and so on.
+Backend-neutral settings (`image`, `bundle`, `env`, `resource`) belong
+in `SandboxConfig`, not the backend.
 
 ## Configuration
 

@@ -44,7 +44,14 @@ def _run(
 ) -> subprocess.CompletedProcess:
     """Run a subprocess, echoing the command; raise SystemExit on failure."""
     print(f"$ {' '.join(cmd)}", file=sys.stderr)
-    proc = subprocess.run(cmd, cwd=cwd, capture_output=capture, text=True)
+    try:
+        proc = subprocess.run(cmd, cwd=cwd, capture_output=capture, text=True)
+    except FileNotFoundError as exc:
+        raise SystemExit(
+            f"container build CLI {cmd[0]!r} not found on PATH. Install Docker "
+            f"(https://docs.docker.com/get-docker/) or Podman "
+            f"(https://podman.io/docs/installation), or pass --container-bin."
+        ) from exc
     if check and proc.returncode != 0:
         if capture:
             sys.stderr.write(proc.stderr or "")

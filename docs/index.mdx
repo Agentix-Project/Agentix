@@ -11,11 +11,11 @@ it; abridge captures trajectories for eval and RL—no custom rollout
 microservice per pairing.
 
 ```bash
-cd examples/hello-agentix
+cd examples/hello-world
 uv sync
-uv run agentix build . --name hello-agentix --output dist/hello-agentix.bundle.tar
-BUNDLE=$(uv run agentix deploy docker dist/hello-agentix.bundle.tar | awk -F' -> ' '/^bundle -> /{print $2}')
-uv run python run.py --bundle "$BUNDLE"
+uv run agentix build . --output dist/hello-world.bundle.tar
+BUNDLE=$(uv run agentix deploy docker dist/hello-world.bundle.tar --format json | jq -r .bundle)
+uv run python main.py --bundle "$BUNDLE"
 ```
 
 ```python
@@ -96,13 +96,15 @@ benchmark scorer, or a full RL rollout step.
 
 ## Example Rollout
 
-Start with the complete runnable demo in
-[`agentix-cookbook/examples/hello-agentix`](https://github.com/Agentiix/agentix-cookbook/tree/main/examples/hello-agentix):
+Start with the complete runnable demo in `examples/hello-world`
+(see the [agentix-cookbook](https://github.com/Agentiix/agentix-cookbook/tree/main/examples)
+for more examples):
 
 ```bash
-uv run agentix build . --name hello-agentix --output dist/hello-agentix.bundle.tar
-BUNDLE=$(uv run agentix deploy docker dist/hello-agentix.bundle.tar | awk -F' -> ' '/^bundle -> /{print $2}')
-uv run python run.py --bundle "$BUNDLE"
+cd examples/hello-world
+uv run agentix build . --output dist/hello-world.bundle.tar
+BUNDLE=$(uv run agentix deploy docker dist/hello-world.bundle.tar --format json | jq -r .bundle)
+uv run python main.py --bundle "$BUNDLE"
 ```
 
 This SWE-bench-shaped flow composes three independent packages in one

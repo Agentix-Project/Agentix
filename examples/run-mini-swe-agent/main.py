@@ -13,7 +13,8 @@ from minisweagent.config import get_config_from_spec
 from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
 from minisweagent.models.litellm_model import LitellmModel, LitellmModelConfig
 
-from agentix import RuntimeClient, bash
+from agentix import RuntimeClient
+from agentix.bash import run
 from agentix.deployment.base import SandboxConfig, session
 from agentix.utils.log import configure_logging
 
@@ -84,7 +85,7 @@ def subtract(a, b):
     return a - b
 PY
 """
-    result = await client.remote(bash.run, command=command, timeout=30)
+    result = await client.remote(run, command=command, timeout=30)
     if result.exit_code != 0:
         raise RuntimeError(f"workspace preparation failed:\n{result.stderr}\n{result.stdout}")
 
@@ -97,7 +98,7 @@ from math_utils import add, subtract
 print("verify", add(2, 3), subtract(5, 2))
 PY
 """
-    result = await client.remote(bash.run, command=command, cwd=workdir, timeout=30)
+    result = await client.remote(run, command=command, cwd=workdir, timeout=30)
     print("verification_exit", result.exit_code, flush=True)
     print("verification_stdout:", flush=True)
     print(result.stdout.rstrip(), flush=True)

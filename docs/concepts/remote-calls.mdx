@@ -33,6 +33,16 @@ The host rejects callables that cannot be encoded as an import path
 (lambdas, bound methods, partials, local closures). Put remote code
 behind an importable top-level function instead.
 
+To catch that at development time instead of at call time, validate a
+function with `RemoteCallable.validate`:
+
+```python
+from agentix import RemoteCallable
+
+RemoteCallable.validate(run)           # returns "app::run"
+RemoteCallable.validate(lambda x: x)   # raises TypeError
+```
+
 ## Payload Shape
 
 This call:
@@ -77,6 +87,24 @@ result = await client.remote(run, input="hello")
 Both sync and async functions are valid targets. The worker awaits the
 return value only when it is awaitable.
 
+## Typing
+
+`client.remote(fn, ...)` returns the **unwrapped** result of `fn` — type
+`R` — whether `fn` is sync or async. `remote` is itself a coroutine you
+`await`, so an `async def` target does not surface as `Awaitable[R]` on
+the host:
+
+```python
+def total(a: int, b: int) -> int: ...
+async def fetch(url: str) -> bytes: ...
+
+n: int = await client.remote(total, 1, 2)        # R = int
+data: bytes = await client.remote(fetch, "...")  # R = bytes, not Awaitable[bytes]
+```
+
+Your editor sees `fn`'s real signature, so argument and return types are
+checked against the local definition.
+
 ## Side Channels
 
 Trace, log, and plugin traffic share the same Socket.IO connection but
@@ -102,7 +130,9 @@ async with client as c:
 
 Agentix keeps errors in-band. A failed call emits `call:error` with a
 structured payload; the client raises `RemoteCallError` (or
-`asyncio.CancelledError` when `error.cancelled=True`).
+`asyncio.CancelledError` when `error.cancelled=True`). `RemoteCallError`'s
+message includes the sandbox-side traceback when one is available, and
+`exc.error.traceback` holds it on the exception for programmatic access.
 
 When the client disconnects or the caller's task is cancelled before a
 result arrives, the client emits `cancel` for the in-flight `call_id`.

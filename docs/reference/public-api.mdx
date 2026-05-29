@@ -22,18 +22,22 @@ If an API is not listed here, treat it as internal and subject to change.
 Top-level names exported by `agentix`:
 
 - `RuntimeClient`
+- `RemoteCallable`
 - `RemoteCallError`
 - `Namespace`
 - `RemoteSioError`
 - `register_namespace`
+- `request_handler` (host-side round-trip helper)
 - `AsyncClientNamespace`
 - `Deployment`
 - `Sandbox`
 - `SandboxConfig`
 - `SandboxId`
 - `SandboxInfo`
+- `deployments`
 - `load_deployment`
 - `register_deployment`
+- `quick_remote`
 - `session`
 - `log` (re-exported from `agentix.utils.log`)
 - `trace` (re-exported from `agentix.utils.trace`)
@@ -42,6 +46,48 @@ Top-level names exported by `agentix`:
 The canonical submodule paths are `agentix.utils.log` and
 `agentix.utils.trace`; the top-level `agentix.log` / `agentix.trace`
 attributes are convenience aliases.
+
+## One-call helper
+
+`agentix.quick_remote(...)` covers the 80% case — Docker, a local bundle, and
+one function — in a single call. It loads the deployment backend, opens a
+session plus `RuntimeClient`, runs `fn` in a fresh sandbox, and returns its
+result.
+
+```python
+import agentix
+from my_project.tasks import run
+
+result = await agentix.quick_remote(
+    run,
+    seed=42,
+    bundle="dist/my_project.bundle.tar",
+)
+```
+
+Full signature:
+
+```python
+agentix.quick_remote(
+    fn, *args,
+    bundle,
+    image="python:3.13-slim",
+    deployment="docker",
+    env=None,
+    platform=None,
+    **kwargs,
+)  # -> result of fn
+```
+
+For anything more involved — reusing a sandbox across calls, registering
+host-side namespaces, or a non-default backend lifecycle — drop down to the
+explicit `session` + `RuntimeClient` flow below.
+
+`agentix.RemoteCallable.validate(fn)` checks at development time that `fn` is
+remote-safe: it returns the wire ref (`module::qualname`) for an importable
+top-level function, and raises `TypeError` for lambdas, closures, and bound
+methods. `RemoteCallError` messages now include the sandbox-side traceback
+(`str(exc)`); it is also available on `exc.error.traceback`.
 
 ## Runtime client API
 
@@ -59,6 +105,15 @@ Also public:
 - `RuntimeClient.health()`
 - `RuntimeClient.register_namespace(ns)`
 
+### Timeout
+
+`RuntimeClient(url, timeout=...)` sets the per-request timeout in seconds. The
+default is `300`; raise it for agent workloads (roughly `600`–`1800`s), e.g.
+`RuntimeClient(url, timeout=1800)`. `http_sync_ms` (default `1000`) tunes the
+inline HTTP fast-path budget for short calls; set `http_sync_ms=None` to disable
+it so every call goes over Socket.IO. To bound a single call independently of
+the client timeout, wrap it in `asyncio.wait_for(client.remote(...), deadline)`.
+
 ## Deployment API
 
 Core deployment lifecycle:
@@ -72,6 +127,35 @@ deployment = deployment_cls()
 config = SandboxConfig(image="python:3.13-slim", bundle="/home/me/.cache/agentix/bundles/sha256-...")
 async with session(deployment, config) as sandbox:
     ...
+```
+
+### Discovering backends
+
+`agentix.deployments()` returns the deployment registry; `deployments().all()`
+returns `{name: DeploymentClass}` for every installed backend. `load_deployment(name)`
+returns the backend class, and raises `KeyError` listing the available names if
+the backend is not installed.
+
+```python
+from agentix import deployments, load_deployment
+
+deployments().all()          # {"docker": DockerDeployment, "podman": ...}
+deployment_cls = load_deployment("docker")
+```
+
+## Concrete deployment examples
+
+`load_deployment(name)` returns a deployment *class*; instantiate it (optionally
+with a backend config) to get a usable backend.
+
+```python
+from agentix.deployment.docker import DockerDeployment, DockerDeploymentConfig
+
+# Defaults (uses the docker CLI).
+deployment = DockerDeployment()
+
+# Same backend driven by podman.
+deployment = DockerDeployment(DockerDeploymentConfig(container_bin="podman"))
 ```
 
 ## Namespace extension API
@@ -175,12 +259,23 @@ These modules are public once their plugin package is installed:
 - `agentix.plugins.datasets.swe`
   - `prepare_env(...)`
   - `score(...)`
+- deployment backends (contribute siblings into `agentix.deployment`)
+  - `agentix.deployment.docker` (production; provides `docker` + `podman`)
+  - `agentix.deployment.apptainer` (production)
+  - `agentix.deployment.daytona` (stub)
+  - `agentix.deployment.e2b` (stub)
 
 ## CLI entrypoints
 
 Public command-line entrypoints:
 
-- `agentix` — dev-side build CLI (`agentix build [PATH]`)
+- `agentix build [PATH]` — build a deploy-ready bundle from a project root.
+- `agentix deploy <backend> <bundle>` — deploy a bundle to a backend.
+  `--format json` prints `{"bundle": ..., "platform": ..., "metadata": {...}}`
+  so the cache path can be read with `jq`, e.g.
+  `BUNDLE=$(uv run agentix deploy docker dist/x.bundle.tar --format json | jq -r .bundle)`.
+- `agentix plugin list` — read-only listing of installed deployment backends
+  and their load status.
 
 The bundle's runtime server is *not* exposed as a console script; it is
 launched inside the sandbox container by `/nix/runtime/bootstrap.sh`,

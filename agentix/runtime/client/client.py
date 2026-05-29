@@ -47,7 +47,10 @@ class RemoteCallError(RuntimeError):
     """Raised when a remote callable returns a non-ok RemoteResponse."""
 
     def __init__(self, display_name: str, error: RemoteError):
-        super().__init__(f"{display_name}: {error.type}: {error.message}")
+        message = f"{display_name}: {error.type}: {error.message}"
+        if error.traceback:
+            message += f"\n--- sandbox traceback ---\n{error.traceback}"
+        super().__init__(message)
         self.display_name = display_name
         self.error = error
 
@@ -75,7 +78,19 @@ def _unpickle_value(raw: Any) -> Any:
 class RuntimeClient:
     """Async client for the agentix runtime server."""
 
-    def __init__(self, base_url: str, timeout: float = 300):
+    def __init__(self, base_url: str, timeout: float = 300, *, http_sync_ms: int | None = 1000):
+        """Connect to a runtime server at `base_url`.
+
+        `timeout` is the per-request HTTP/WebSocket timeout in seconds; raise
+        it for long agent calls (e.g. `RuntimeClient(url, timeout=1800)`). Wrap
+        a single call in `asyncio.wait_for(...)` for a per-call deadline.
+
+        `http_sync_ms` is the inline HTTP fast-path budget for short calls: a
+        call that finishes within this many milliseconds returns over HTTP,
+        otherwise it completes over the Socket.IO result channel. Set
+        `http_sync_ms=None` to disable the fast path and send every call over
+        Socket.IO.
+        """
         self._base_url = base_url
         self._client = httpx.AsyncClient(base_url=base_url, timeout=timeout)
         # Socket.IO bookkeeping — created lazily on first remote call.
@@ -86,7 +101,7 @@ class RuntimeClient:
         # Namespaces queued for registration on connect.
         self._namespaces: list[socketio.AsyncClientNamespace] = []
         self._register_core_namespaces()
-        self._http_sync_budget_ms = 1000
+        self._http_sync_budget_ms: int | None = http_sync_ms
 
     def _register_core_namespaces(self) -> None:
         """Register agentix-core's built-in `/trace` and `/log` handlers."""
@@ -145,6 +160,9 @@ class RuntimeClient:
         sio: socketio.AsyncClient,
         payload: dict[str, Any],
     ) -> tuple[Literal["fallback", "accepted", "result", "error"], Any]:
+        if self._http_sync_budget_ms is None:
+            # Fast path disabled — go straight to the Socket.IO channel.
+            return "fallback", None
         sid = getattr(sio, "sid", None)
         if not (isinstance(sid, str) and sid):
             return "fallback", None

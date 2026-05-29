@@ -24,7 +24,8 @@ import agentix.agents.claude_code as cc
 import agentix.bridge.mitm as abridge_mitm
 from agentix.deployment.docker import DockerDeployment
 
-from agentix import RuntimeClient, bash
+from agentix import RuntimeClient
+from agentix.bash import run
 from agentix.deployment.base import SandboxConfig, session
 from agentix.utils.log import configure_logging
 
@@ -123,7 +124,7 @@ PY
 git add math_utils.py
 git commit -q -m init
 """
-    result = await client.remote(bash.run, command=command, timeout=30)
+    result = await client.remote(run, command=command, timeout=30)
     if result.exit_code != 0:
         raise RuntimeError(f"repo preparation failed:\n{result.stderr}\n{result.stdout}")
 
@@ -137,7 +138,7 @@ from math_utils import add, subtract
 print("verify", add(2, 3), subtract(5, 2))
 PY
 """
-    result = await client.remote(bash.run, command=command, cwd=workdir, timeout=30)
+    result = await client.remote(run, command=command, cwd=workdir, timeout=30)
     print("verification_exit", result.exit_code, flush=True)
     print("verification_stdout:", flush=True)
     print(result.stdout.rstrip(), flush=True)

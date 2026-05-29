@@ -41,7 +41,7 @@ reserved Socket.IO namespaces:
 
 | Namespace | System  | Public API                                      |
 |-----------|---------|-------------------------------------------------|
-| `/`       | RPC     | `client.remote(fn, ...)`                        |
+| `/rpc`    | RPC     | `client.remote(fn, ...)`                        |
 | `/trace`  | tracing | `agentix.utils.trace.span(...)` / `trace.Processor` |
 | `/log`    | logging | stdlib `logging` (auto-bridged sandbox → host) |
 
@@ -284,7 +284,7 @@ moves between task images.
 
 ## Wire Protocol
 
-RPC on `/`:
+RPC on `/rpc`:
 
 ```text
 call         {call_id, callable, arguments}

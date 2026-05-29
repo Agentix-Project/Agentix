@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -85,3 +86,27 @@ def test_deploy_rejects_backend_without_materializer(monkeypatch: pytest.MonkeyP
 
     with pytest.raises(SystemExit, match="cannot materialize"):
         deploy_mod.main(["fake", str(bundle)])
+
+
+def test_deploy_format_json_emits_machine_readable_ref(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    instance = FakeMaterializer()
+    bundle = tmp_path / "bundle.tar"
+    bundle.write_text("placeholder")
+
+    monkeypatch.setattr(deploy_mod, "load_deployment", lambda name: lambda: instance)
+
+    assert (
+        deploy_mod.main(
+            ["fake", str(bundle), "--name", "demo:dev", "--platform", "linux/amd64", "--format", "json"]
+        )
+        == 0
+    )
+
+    data = json.loads(capsys.readouterr().out)
+    assert data["bundle"] == "demo:dev"
+    assert data["platform"] == "linux/amd64"
+    assert data["metadata"]["cache"] == "/tmp/agentix-runtime-pytest"

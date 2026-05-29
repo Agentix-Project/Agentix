@@ -3,14 +3,13 @@
 Usage:
 
     from agentix import RuntimeClient
-    from agentix import bash
-    from agentix.bash import BashStdout, BashStderr, BashExit, BashError
+    from agentix.bash import run, run_stream, BashStdout, BashStderr, BashExit, BashError
 
     async with RuntimeClient(sandbox.runtime_url) as c:
-        r = await c.remote(bash.run, command="ls -la", cwd="/workspace")
+        r = await c.remote(run, command="ls -la", cwd="/workspace")
         print(r.exit_code, r.stdout)
 
-        async for ev in c.remote(bash.run_stream, command="long-job.sh"):
+        async for ev in c.remote(run_stream, command="long-job.sh"):
             match ev:
                 case BashStdout(data=chunk): print(chunk, end="")
                 case BashStderr(data=chunk): print(chunk, end="")

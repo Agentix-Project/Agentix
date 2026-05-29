@@ -118,28 +118,31 @@ blobs inside `call:result`.
 
 ## Bundle Layout
 
-`agentix build [path]` installs one Python project into the runtime venv:
+`agentix build [path]` installs one Python project into the runtime venv
+with uv (uv owns Python; Nix owns system binaries — there is no `pip`):
 
 ```bash
-/nix/runtime/bin/pip install --no-cache-dir /src/project
+uv venv /nix/runtime/venv
+VIRTUAL_ENV=/nix/runtime/venv uv sync --active --frozen --no-dev --no-editable
 ```
 
-The install brings in user code, direct dependencies, transitive
+The sync brings in user code, direct dependencies, transitive
 dependencies, and integration packages declared in `pyproject.toml`.
+
+The runtime tree is the uv venv plus a `symlinkJoin` of the Nix
+closures (interpreter, uv, and any system deps):
 
 ```text
 /nix/runtime/
 ├── bootstrap.sh           # container entry point (deployment backends exec this)
-├── bin/
-│   ├── python
-│   └── pip
-└── venv/
-    └── lib/python3.11/site-packages/
-        ├── agentix/
-        ├── agentix/bash/
-        ├── agentix/agents/claude_code/
-        ├── agentix/plugins/datasets/swe/
-        └── app.py
+├── venv/                  # the uv venv — all Python deps live here
+│   └── lib/python3.11/site-packages/
+│       ├── agentix/
+│       ├── agentix/bash/
+│       ├── agentix/agents/claude_code/
+│       ├── agentix/plugins/datasets/swe/
+│       └── app.py
+└── {bin,lib,...}/         # symlinkJoin of every Nix closure
 ```
 
 If the project includes `default.nix`, the build adds a Nix builder stage

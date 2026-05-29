@@ -94,14 +94,20 @@ class SandboxConfig(BaseModel):
     """
 
     image: str = Field(
-        description="Task base image — the environment the workload runs in "
-        "(e.g. `swebench/task-django__django-12345:latest`).",
+        description="Task base image — the container OS and task environment the "
+        "workload runs in (e.g. `python:3.13-slim` or "
+        "`swebench/task-django__django-12345:latest`). The deployment mounts the "
+        "bundle's `/nix` runtime tree into this image, so swapping the task image "
+        "needs no bundle rebuild.",
     )
     bundle: str = Field(
         description=(
-            "Backend-specific Agentix runtime bundle ref. `agentix build` "
-            "produces the portable tar; `agentix deploy <backend>` "
-            "materializes it into this ref when the backend needs staging."
+            "Agentix runtime bundle reference — the runtime server, your code, and "
+            "the Python deps that overlay onto `image` (read-only at `/nix`). "
+            "`agentix build` produces the portable tar; `agentix deploy <backend>` "
+            "materializes it into this backend-native ref (for docker/podman, the "
+            "cache path it prints). `image` is the task environment, `bundle` is "
+            "the runtime that runs there — both are required."
         ),
     )
     platform: str | None = Field(
