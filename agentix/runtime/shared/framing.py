@@ -41,12 +41,26 @@ import asyncio
 import struct
 from typing import Any
 
+from agentix.runtime.shared import MAX_MESSAGE_BYTES
 from agentix.runtime.shared.codec import pack, unpack
+
+# The control pipe carries the same pickled arguments / return values as the
+# Socket.IO transport, which caps payloads at `MAX_MESSAGE_BYTES`. Enforce the
+# same ceiling on the pipe so a corrupt or desynchronized 4-byte length prefix
+# cannot drive an unbounded `readexactly` allocation (or an indefinite wait for
+# bytes that never arrive). The `<I` prefix already tops out at ~4 GiB.
+MAX_FRAME_BYTES = MAX_MESSAGE_BYTES
+
+
+class FrameTooLarge(ValueError):
+    """A frame's declared or encoded length exceeds `MAX_FRAME_BYTES`."""
 
 
 def pack_frame(payload: dict[str, Any]) -> bytes:
     """Encode one frame: 4-byte LE length + msgpack body."""
     body = pack(payload)
+    if len(body) > MAX_FRAME_BYTES:
+        raise FrameTooLarge(f"frame body of {len(body)} bytes exceeds MAX_FRAME_BYTES={MAX_FRAME_BYTES}")
     return struct.pack("<I", len(body)) + body
 
 
@@ -57,6 +71,10 @@ async def read_frame(reader: asyncio.StreamReader) -> dict[str, Any] | None:
     except asyncio.IncompleteReadError:
         return None
     (n,) = struct.unpack("<I", header)
+    if n > MAX_FRAME_BYTES:
+        raise FrameTooLarge(
+            f"frame length {n} exceeds MAX_FRAME_BYTES={MAX_FRAME_BYTES}; control pipe desynchronized"
+        )
     if n == 0:
         return {}
     body = await reader.readexactly(n)
@@ -70,4 +88,4 @@ async def write_frame(writer: asyncio.StreamWriter, payload: dict[str, Any]) -> 
     await writer.drain()
 
 
-__all__ = ["pack_frame", "read_frame", "write_frame"]
+__all__ = ["MAX_FRAME_BYTES", "FrameTooLarge", "pack_frame", "read_frame", "write_frame"]

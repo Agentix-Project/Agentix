@@ -15,7 +15,8 @@ from typing import cast
 
 import pytest
 
-from agentix.runtime.shared.framing import pack_frame, read_frame, write_frame
+import agentix.runtime.shared.framing as framing
+from agentix.runtime.shared.framing import FrameTooLarge, pack_frame, read_frame, write_frame
 
 pytestmark = pytest.mark.asyncio
 
@@ -94,3 +95,24 @@ async def test_large_frame_round_trips():
     blob = os.urandom(2 * 1024 * 1024)  # 2 MiB — spans many read chunks
     got = await read_frame(_reader(pack_frame({"value": blob})))
     assert got is not None and got["value"] == blob
+
+
+async def test_read_frame_rejects_oversized_declared_length():
+    # A corrupt/desynced header must be rejected on the length alone, before
+    # any attempt to read (and buffer) the bogus body.
+    data = struct.pack("<I", framing.MAX_FRAME_BYTES + 1)
+    with pytest.raises(FrameTooLarge):
+        await read_frame(_reader(data))
+
+
+async def test_pack_frame_rejects_oversized_body(monkeypatch: pytest.MonkeyPatch):
+    # Shrink the cap so the guard is exercised without allocating 256 MiB.
+    monkeypatch.setattr(framing, "MAX_FRAME_BYTES", 16)
+    with pytest.raises(FrameTooLarge):
+        pack_frame({"value": b"x" * 64})
+
+
+async def test_read_frame_under_cap_still_round_trips(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(framing, "MAX_FRAME_BYTES", 4096)
+    payload = {"type": "result", "call_id": "ok"}
+    assert (await read_frame(_reader(pack_frame(payload)))) == payload
