@@ -11,6 +11,8 @@ adapters like `agentix-run`, or launch it bare to browse the Catalog.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from textual.app import App, ComposeResult
 from textual.widgets import Footer, Header, TabbedContent, TabPane
 
@@ -89,12 +91,23 @@ class AgentixTUI(App):
         ("4", "show_tab('sandboxes')", "Sandboxes"),
         ("5", "show_tab('build')", "Build"),
         ("6", "show_tab('observability')", "Obs"),
+        ("s", "save", "Save"),
         ("q", "quit", "Quit"),
     ]
 
     def __init__(self, *, rollout_spec: RunSpec | None = None) -> None:
         super().__init__()
         self._spec = rollout_spec
+
+    def action_save(self) -> None:
+        """Persist the collected rollout summaries to a JSON file in the cwd."""
+        view = self.query_one(RolloutsView)
+        payload = view.export_payload()
+        if not payload["rollouts"]:
+            self.notify("nothing to save yet — run some rollouts first", severity="warning", timeout=3)
+            return
+        path = view.export_to(Path.cwd() / "agentix-rollouts.json")
+        self.notify(f"saved {len(payload['rollouts'])} rollouts → {path.name}", timeout=3)
 
     def on_mount(self) -> None:
         # Best-effort branded theme; falls back to the default if the running

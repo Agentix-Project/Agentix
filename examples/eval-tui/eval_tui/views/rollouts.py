@@ -9,7 +9,10 @@ With no `RunSpec` the view shows an idle state (other tabs still work).
 
 from __future__ import annotations
 
+import json
 import time
+from pathlib import Path
+from typing import Any
 
 from agentix.runner import Rollout, run_rollouts
 from rich.text import Text
@@ -188,6 +191,25 @@ class RolloutsView(Vertical):
             (f"{rate:.1f}/min", "dim"),
         )
         self.query_one("#rollouts-summary", Static).update(text)
+
+    def export_payload(self) -> dict[str, Any]:
+        """A JSON-friendly snapshot of the run: the per-instance `Rollout`
+        summaries collected so far plus a small aggregate. This is the unit an
+        RL/eval loop persists for offline analysis or replay."""
+        return {
+            "summary": {
+                "total": len(self._instances),
+                "done": self._done,
+                "resolved": self._resolved,
+                "failed": self._failed,
+            },
+            "rollouts": [r.to_dict() for r in self._results.values()],
+        }
+
+    def export_to(self, path: Path) -> Path:
+        """Write `export_payload()` to `path` as pretty JSON; returns the path."""
+        path.write_text(json.dumps(self.export_payload(), indent=2))
+        return path
 
 
 def _short(value: object, limit: int = 40) -> str:

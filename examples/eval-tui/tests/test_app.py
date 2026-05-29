@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from eval_tui.app import AgentixTUI
 from eval_tui.demo import DemoAgent, DemoDataset, DemoProvider
 from eval_tui.models import RunSpec
@@ -83,6 +86,29 @@ async def test_observability_demo_streams_events() -> None:
         await app.workers.wait_for_complete()
         await pilot.pause()
         assert app.query_one(ObservabilityView)._emitted > 0
+
+
+async def test_rollouts_export_payload_snapshots_results() -> None:
+    n = 6
+    app = AgentixTUI(rollout_spec=_demo_spec(n))
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        payload = app.query_one(RolloutsView).export_payload()
+        assert payload["summary"]["done"] == n
+        assert len(payload["rollouts"]) == n
+        assert all("instance_id" in r and "resolved" in r for r in payload["rollouts"])
+
+
+async def test_rollouts_export_to_writes_json(tmp_path: Path) -> None:
+    app = AgentixTUI(rollout_spec=_demo_spec(4))
+    async with app.run_test() as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        out = app.query_one(RolloutsView).export_to(tmp_path / "rollouts.json")
+        loaded = json.loads(out.read_text())
+        assert loaded["summary"]["total"] == 4
+        assert len(loaded["rollouts"]) == 4
 
 
 async def test_build_view_constructs_command_from_path() -> None:
