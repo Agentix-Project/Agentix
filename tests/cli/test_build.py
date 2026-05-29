@@ -919,3 +919,56 @@ class TestStageClosures:
         out = tmp_path / "closures"
         collected = assemble(proj, out)
         assert all(c.label != "project" for c in collected)
+
+
+# ── build: passthrough args ────────────────────────────────────────
+
+
+def test_nix_arg_quoted_string_reaches_build_arg_verbatim(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A single --nix-arg can carry a whole shell-style sub-flag; it lands in the
+    AGENTIX_NIX_ARGS build-arg verbatim (the in-container shell word-splits it)."""
+    proj = _make_project(tmp_path / "proj")
+    configs: list[docker.ContainerBuildConfig | None] = []
+
+    def fake_tar_bundle(
+        stage: Path,
+        *,
+        output_path: Path,
+        name: str,
+        tag: str,
+        project_subpath: Path,
+        platform: str,
+        config: docker.ContainerBuildConfig | None = None,
+    ) -> Path:
+        del stage, name, tag, project_subpath, platform
+        configs.append(config)
+        return output_path
+
+    monkeypatch.setattr(build, "_build_tar_bundle", fake_tar_bundle)
+    assert (
+        build.main(
+            [
+                str(proj),
+                "--output",
+                str(tmp_path / "b.tar"),
+                "--nix-arg",
+                "--option extra-substituters https://cache.example",
+            ]
+        )
+        == 0
+    )
+    assert configs[0] is not None
+    assert configs[0].nix_args == ("--option extra-substituters https://cache.example",)
+    assert docker._passthrough_build_args(configs[0]) == [
+        "--build-arg",
+        "AGENTIX_NIX_ARGS=--option extra-substituters https://cache.example",
+    ]
+
+
+def test_container_arg_shlex_splits_quoted_value() -> None:
+    cfg = docker.ContainerBuildConfig(
+        container_args=("--build-arg FOO=bar",),
+        container_run_args=("--device /dev/fuse",),
+    )
+    assert docker._build_container_args(cfg) == ["--build-arg", "FOO=bar"]
+    assert docker._build_container_run_args(cfg) == ["--device", "/dev/fuse"]

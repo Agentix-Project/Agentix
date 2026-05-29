@@ -13,6 +13,7 @@ once buildx kicks off; the host never sees Python or Nix directly.
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -69,12 +70,18 @@ def _build_container_bin(config: ContainerBuildConfig | None = None) -> str:
     return (config or ContainerBuildConfig()).container_bin
 
 
+def _split_passthrough(values: tuple[str, ...]) -> list[str]:
+    """Shlex-split each passthrough value so a whole shell-style sub-flag can be
+    given as one quoted arg, e.g. --container-arg '--build-arg FOO=bar'."""
+    return [token for value in values for token in shlex.split(value)]
+
+
 def _build_container_args(config: ContainerBuildConfig | None = None) -> list[str]:
-    return list((config or ContainerBuildConfig()).container_args)
+    return _split_passthrough((config or ContainerBuildConfig()).container_args)
 
 
 def _build_container_run_args(config: ContainerBuildConfig | None = None) -> list[str]:
-    return list((config or ContainerBuildConfig()).container_run_args)
+    return _split_passthrough((config or ContainerBuildConfig()).container_run_args)
 
 
 def _proxy_build_args() -> list[str]:

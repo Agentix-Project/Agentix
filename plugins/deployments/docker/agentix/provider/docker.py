@@ -113,6 +113,10 @@ class DockerProviderConfig(BaseModel):
             return []
         if isinstance(value, str):
             return _split_shell_args(value, "deployment extra args")
+        if isinstance(value, (list, tuple)):
+            # Shlex-split each item so a whole shell-style sub-flag can be passed
+            # as one value, e.g. --container-run-arg "--device /dev/fuse".
+            return [token for item in value for token in _split_shell_args(str(item), "deployment extra args")]
         return value
 
     @field_validator("gpu_args", mode="before")

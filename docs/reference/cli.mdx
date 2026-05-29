@@ -56,18 +56,21 @@ remote x86 sandbox.
 
 ### Passthrough args
 
-`--nix-arg`, `--uv-arg`, and `--container-arg` are **raw passthroughs**: each
-value is forwarded verbatim to the underlying engine, so any knob is reachable
-without a bespoke flag per option. The CLI deliberately has no `--nix-substituter`
-/ `--builder-base` / etc. — use the passthrough instead:
+`--nix-arg`, `--uv-arg`, `--container-arg`, and `--container-run-arg` are **raw
+passthroughs**. Each value is a shell-style argument string forwarded to the
+underlying engine — quote a whole sub-flag as one value. Any knob is reachable
+this way, so the CLI deliberately has no `--nix-substituter` / `--builder-base`
+/ etc.:
 
 ```bash
 # tune the nix build, point it at a private binary cache, override the base image
 agentix build . \
   --nix-arg --cores=4 \
-  --nix-arg --option --nix-arg extra-substituters --nix-arg https://cache.example \
-  --container-arg --build-arg --container-arg AGENTIX_BUILDER_BASE=ghcr.io/nixos/nix:latest
+  --nix-arg "--option extra-substituters https://cache.example" \
+  --container-arg "--build-arg AGENTIX_BUILDER_BASE=ghcr.io/nixos/nix:latest"
 ```
+
+The same applies to `agentix deploy --container-run-arg "--device /dev/fuse"`.
 
 ### Dependency Model
 
