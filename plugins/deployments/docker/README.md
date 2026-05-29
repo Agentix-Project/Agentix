@@ -20,10 +20,10 @@ pip install agentix-deployment-docker
 
 ```python
 from agentix import RuntimeClient, SandboxConfig, session
-from agentix.deployment.docker import DockerDeployment, DockerDeploymentConfig
+from agentix.provider.docker import DockerProvider, DockerProviderConfig
 
-deployment = DockerDeployment(
-    DockerDeploymentConfig(
+deployment = DockerProvider(
+    DockerProviderConfig(
         container_bin="podman",
         run_args=["--runtime=crun", "--cgroups=disabled"],
         network="host",
@@ -56,7 +56,7 @@ directly in the host network namespace. In that mode the backend sets
 `SandboxConfig.env`.
 
 The `docker` and `podman` names come from the entry points this wheel
-declares under `agentix.deployment` — once installed, the framework
+declares under `agentix.provider` — once installed, the framework
 discovers them automatically. No core-framework changes are required to
 register a new backend; the same pattern works for
 `agentix-deployment-daytona`, `agentix-deployment-e2b`, or any

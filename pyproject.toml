@@ -46,7 +46,7 @@ agentix = "agentix.cli:main"
 # bootstrap.sh scrubs `sys.path` inside an inline `python -c` *before*
 # importing uvicorn / agentix, so the bundle venv isn't shadowed.
 
-# Deployment backends, agents, datasets, and runtime integrations ship
+# SandboxProvider backends, agents, datasets, and runtime integrations ship
 # in their own wheels. Runtime integrations are normal Python dependencies
 # installed into the bundle.
 #   pip install agentix-deployment-docker   # registers `docker` and `podman`

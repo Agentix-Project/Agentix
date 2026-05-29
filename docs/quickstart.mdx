@@ -1,17 +1,17 @@
 ---
 title: Quickstart
-description: Build a runtime bundle, overlay it on any Linux task image, and call a remote function with RuntimeClient.remote.
+description: Build a runtime bundle, overlay it on any Linux task image, and call a remote function with sandbox.remote.
 ---
 
 This quickstart walks the shortest end-to-end Agentix flow:
 
 1. Declare deps in a normal Python project.
 2. `agentix build` packages the project + every transitive dep into a
-   self-contained bundle — no `FROM`, no `pip install` at run
-   time, just a Nix closure under `/nix/store/...`.
+   self-contained bundle — no `FROM`, nothing installed at run
+   time, just a uv venv plus a Nix closure under `/nix/...`.
 3. Deploy a sandbox: the bundle is bind-mounted onto a task base image
    at `/nix`. Different task images, same runtime.
-4. Call a remote function with `RuntimeClient.remote(fn, …)`.
+4. Call a remote function with `sandbox.remote(fn, …)`.
 
 ## Prerequisites
 
@@ -30,7 +30,7 @@ The two-image model is the heart of Agentix:
 - **`image`** — the task-specific base the workload runs in (a
   SWE-bench task image, a customer environment, plain Ubuntu, …).
 
-`DockerDeployment` mounts the runtime's `/nix` into the task container
+`DockerProvider` mounts the runtime's `/nix` into the task container
 at sandbox-create time. The Python interpreter, the runtime server, your
 code, and the plugin binaries (bash, coreutils, …) all live under
 `/nix/runtime/bin/` and resolve regardless of the task image's
@@ -38,47 +38,76 @@ distribution.
 
 ## Layout
 
+This is the real in-repo example at `examples/hello-world` — a flat
+project: one `main.py` and one `default.nix`.
+
 ```text
-hello-agentix/
+hello-world/
 ├── pyproject.toml
 ├── uv.lock                       # run `uv lock`
-├── run.py                        # host orchestrator
-└── src/
-    └── hello_agentix/
-        └── __init__.py           # sandbox-side module (placeholder here)
+├── default.nix                   # adds ripgrep (rg) to the runtime PATH
+├── main.py                       # defines hello(); also host orchestrator
+└── README.md
 ```
 
 <Tabs>
   <Tab title="pyproject.toml">
     ```toml
-    [project]
-    name = "hello-agentix"
-    version = "0.1.0"
-    requires-python = ">=3.11"
-    dependencies = [
-        "agentixx>=0.1.5",
-        "agentix-runtime-basic>=0.1.4",      # bash + files namespaces
-        "agentix-deployment-docker>=0.1.4",  # docker/podman backend
-    ]
-
     [build-system]
     requires = ["hatchling"]
     build-backend = "hatchling.build"
 
+    [project]
+    name = "hello-world"
+    version = "0.1.0"
+    requires-python = ">=3.11"
+    dependencies = [
+        "agentixx>=0.2.0",
+        "agentix-runtime-basic",      # bash + files namespaces
+        "agentix-deployment-docker",  # docker/podman backend
+    ]
+
+    [tool.agentix]
+    nix = "default.nix"               # extra system deps for the runtime
+
+    # Hatchling cannot infer root-level main.py from the project name, so
+    # include it explicitly in the wheel that agentix build installs.
     [tool.hatch.build.targets.wheel]
-    packages = ["src/hello_agentix"]
+    only-include = ["main.py"]
     ```
   </Tab>
-  <Tab title="src/hello_agentix/__init__.py">
+  <Tab title="main.py">
     ```python
-    # Pure placeholder for this quickstart — bash.run from
-    # agentix-runtime-basic does all the work.
-    #
-    # Add your own functions when you outgrow bash:
-    #
-    #     async def greet(name: str) -> str:
-    #         return f"hello {name} from inside the sandbox"
+    import subprocess
+
+    from agentix.provider import providers
+    from agentix.provider.base import SandboxConfig
+
+
+    def hello() -> str:
+        """Return the bundled ripgrep version from the runtime PATH."""
+        proc = subprocess.run(
+            ["rg", "--version"], check=True, capture_output=True, text=True
+        )
+        return proc.stdout.splitlines()[0]
     ```
+
+    `rg` is on the sandbox PATH because `default.nix` adds it. The same
+    `hello()` runs once on the host and once inside the sandbox.
+  </Tab>
+  <Tab title="default.nix">
+    ```nix
+    { pkgs }:
+
+    pkgs.symlinkJoin {
+      name = "hello-world-sys";
+      paths = [ pkgs.ripgrep ];
+    }
+    ```
+
+    `[tool.agentix] nix = "default.nix"` points the builder at this file.
+    The builder hands it the pinned Nixpkgs and merges the result into
+    `/nix/runtime/bin`.
   </Tab>
   <Tab title="uv.lock">
     Run once and commit:
@@ -95,73 +124,106 @@ hello-agentix/
 ## Install + build
 
 ```bash
-cd hello-agentix
+cd examples/hello-world
 uv sync
-uv run agentix build . --name hello-agentix --output dist/hello-agentix.bundle.tar
-uv run agentix deploy docker dist/hello-agentix.bundle.tar
-# → bundle -> /home/me/.cache/agentix/bundles/sha256-...
+uv run agentix build . --output dist/hello-world.bundle.tar
+BUNDLE=$(uv run agentix deploy docker dist/hello-world.bundle.tar --format json | jq -r .bundle)
 ```
+
+`agentix deploy --format json` prints
+`{"bundle": ..., "platform": ..., "metadata": {...}}`, so the cache path
+reads cleanly with `jq -r .bundle` instead of parsing log lines.
 
 `agentix build` does, in order:
 
 1. Stages your project + every plugin's `default.nix` (each plugin
    ships its system deps next to its Python module).
-2. Runs Nix for the interpreter/system closures and `uv sync` for the
-   Python dependency closure inside the build container.
+2. Runs Nix for the interpreter/system closures and installs the Python
+   dependency closure with uv inside the build container:
+
+   ```bash
+   uv venv /nix/runtime/venv
+   VIRTUAL_ENV=/nix/runtime/venv uv sync --active --frozen --no-dev --no-editable
+   ```
+
 3. Writes a portable bundle tar containing `manifest.json + nix/`.
 
 `agentix deploy docker|podman` unpacks that tar into a content-addressed
 host cache. Docker-compatible sandbox runs bind-mount the cached `nix/`
-tree at `/nix`. No runtime `pip install`.
+tree at `/nix`. The runtime is a plain uv venv at `/nix/runtime/venv`
+plus a `symlinkJoin` of the Nix closures at `/nix/runtime/{bin,lib,...}` —
+there is no `pip` in the bundle and nothing is installed at run time.
 
 ## Call it
 
-```python title="run.py"
+`main.py` doubles as the host orchestrator: it constructs the Docker
+provider, opens a sandbox over the deployed bundle, and runs `hello()`
+inside it with `sandbox.remote(fn, …)`.
+
+```python title="main.py"
 import asyncio
+import subprocess
 
-from agentix import RuntimeClient, SandboxConfig, session
-from agentix.bash import run
-from agentix.deployment.docker import DockerDeployment
+from agentix.provider import providers
+from agentix.provider.base import SandboxConfig
 
 
-async def main() -> None:
-    deployment = DockerDeployment()
+def hello() -> str:
+    """Return the bundled ripgrep version from the runtime PATH."""
+    proc = subprocess.run(
+        ["rg", "--version"], check=True, capture_output=True, text=True
+    )
+    return proc.stdout.splitlines()[0]
+
+
+async def main(bundle: str) -> None:
+    # String-driven selection at a dynamic boundary; typed code can also
+    # `from agentix.provider.docker import DockerProvider` and construct it directly.
+    provider = providers().get("docker")()
     config = SandboxConfig(
         # Task base image — workload environment.
         image="python:3.13-slim",
-        # Cache path printed by `agentix deploy docker|podman`.
-        bundle="/home/me/.cache/agentix/bundles/sha256-...",
+        # Cache path captured from `agentix deploy ... --format json`.
+        bundle=bundle,
     )
-    async with session(deployment, config) as sandbox:
+    async with provider.session(config) as sandbox:
         print(f"sandbox up at {sandbox.runtime_url}")
-        async with RuntimeClient(sandbox.runtime_url) as client:
-            result = await client.remote(run, command="echo hello from $(uname -a)")
-            print(f"exit={result.exit_code} stdout={result.stdout!r}")
-
-
-asyncio.run(main())
+        print(f"Host result:    {hello()}")
+        print(f"Sandbox result: {await sandbox.remote(hello)}")
 ```
+
+Run it against the bundle path captured above:
 
 ```bash
-uv run python run.py
+uv run python main.py --bundle "$BUNDLE"
 ```
 
-Expected output:
+Expected output (the sandbox `rg` comes from `default.nix`):
 
 ```text
 sandbox up at http://localhost:33803
-exit=0 stdout='hello from Linux <kernel> ... GNU/Linux\n'
+Host result:    ripgrep 14.1.0
+Sandbox result: ripgrep 14.1.0
 ```
+
+<Tip>
+  The sandbox is a live handle — `await sandbox.remote(fn, …)` is the
+  one-call path. There is no separate `RuntimeClient` to open in the
+  common case; the provider's `session(...)` yields a sandbox you call
+  directly, then closes the connection and deletes the container on exit.
+  `RuntimeClient(url)` still exists for advanced/direct use against a
+  known `runtime_url` (e.g. an in-process server).
+</Tip>
 
 ## How the overlay works
 
-Under the hood, `DockerDeployment.create` does:
+Under the hood, `DockerProvider.create` does:
 
 ```bash
 # Per sandbox — task image plus the cached runtime /nix.
 docker run -d --name <sid> -p 127.0.0.1:<port>:<port> \
     -e AGENTIX_BIND_PORT=<port> \
-    --mount type=bind,source=/home/me/.cache/agentix/bundles/sha256-.../nix,target=/nix,readonly \
+    --mount type=bind,source="$BUNDLE"/nix,target=/nix,readonly \
     --entrypoint /nix/runtime/bootstrap.sh \
     python:3.13-slim
 ```
@@ -174,10 +236,10 @@ mounted cache puts them.
 ## Next
 
 <CardGroup cols={2}>
-  <Card title="Cookbook: hello-agentix" icon="book" href="https://github.com/Agentiix/agentix-cookbook/tree/main/examples/hello-agentix">
-    The complete project files used here.
+  <Card title="Example: hello-world" icon="book" href="https://github.com/Agentiix/Agentix/tree/main/examples/hello-world">
+    The complete in-repo project used here (`examples/hello-world`).
   </Card>
-  <Card title="Cookbook: eval-cc-swe" icon="flask" href="https://github.com/Agentiix/agentix-cookbook/tree/main/examples/eval-cc-swe">
+  <Card title="More examples (cookbook)" icon="flask" href="https://github.com/Agentiix/agentix-cookbook/tree/main/examples/eval-cc-swe">
     Larger example: Claude Code on SWE-bench Verified.
   </Card>
   <Card title="Architecture" icon="sitemap" href="/reference/architecture">

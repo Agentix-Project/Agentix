@@ -48,7 +48,10 @@ class RemoteCallError(RuntimeError):
     """Raised when a remote callable returns a non-ok RemoteResponse."""
 
     def __init__(self, display_name: str, error: RemoteError):
-        super().__init__(f"{display_name}: {error.type}: {error.message}")
+        message = f"{display_name}: {error.type}: {error.message}"
+        if error.traceback:
+            message += f"\n--- sandbox traceback ---\n{error.traceback}"
+        super().__init__(message)
         self.display_name = display_name
         self.error = error
 
@@ -92,15 +95,34 @@ class RuntimeClient:
         self,
         base_url: str,
         timeout: float = 300,
-        http_wait_seconds: float = 1.0,
-        call_deadline: float | None = None,
         *,
+        http_sync_ms: int | None = 1000,
+        call_deadline: float | None = None,
         reconnection: bool | None = None,
         reconnection_attempts: int | None = None,
         reconnection_delay: float | None = None,
         reconnection_delay_max: float | None = None,
         randomization_factor: float | None = None,
     ):
+        """Connect to a runtime server at `base_url`.
+
+        `timeout` is the per-request HTTP/WebSocket timeout in seconds; raise
+        it for long agent calls (e.g. `RuntimeClient(url, timeout=1800)`).
+
+        `http_sync_ms` is the inline HTTP fast-path budget for short calls,
+        sent as the RFC 7240 `Prefer: respond-async, wait=N` header: a call
+        that finishes within this many milliseconds returns over HTTP (200),
+        otherwise the server replies 202 and the result follows on Socket.IO.
+        Set `http_sync_ms=None` to disable the fast path and send every call
+        over Socket.IO.
+
+        `call_deadline` (seconds, None = unbounded) is the cheap catch-all
+        upper bound for any single `remote(...)`: whatever the cause — worker
+        hang, silent sandbox loss, network black hole — the caller gets a
+        `CallTimeout` (and the call is cancelled server-side) instead of
+        hanging. The `reconnection*` knobs override socketio's defaults for
+        long-lived sessions; left as None they use socketio's own defaults.
+        """
         self._base_url = base_url
         self._client = httpx.AsyncClient(base_url=base_url, timeout=timeout)
         # Socket.IO bookkeeping — created lazily on first remote call.
@@ -111,14 +133,12 @@ class RuntimeClient:
         # Namespaces queued for registration on connect.
         self._namespaces: list[socketio.AsyncClientNamespace] = []
         self._register_core_namespaces()
-        # Sync budget for the HTTP fast path, sent as the RFC 7240
-        # `Prefer: respond-async, wait=N` header (seconds). Configurable
-        # per client; calls exceeding it fall through to the SIO result.
-        self._http_wait_seconds = http_wait_seconds
+        # HTTP fast-path budget in ms (None disables it), sent as the
+        # RFC 7240 `Prefer: respond-async, wait=N` header (converted to
+        # seconds by `_try_http_fast_path`).
+        self._http_sync_budget_ms: int | None = http_sync_ms
         # Upper bound for any single `remote(...)` (seconds). None = no
-        # deadline. This is the cheap catch-all: whatever the cause —
-        # worker hang, silent sandbox loss, network black hole — the
-        # caller gets a `CallTimeout` in bounded time instead of hanging.
+        # deadline. The cheap catch-all so the caller never hangs.
         self._call_deadline = call_deadline
         # Socket.IO reconnection knobs. Left out (None) → socketio's own
         # defaults (reconnection on, infinite attempts, 1–5s backoff);
@@ -192,11 +212,14 @@ class RuntimeClient:
         sio: socketio.AsyncClient,
         payload: dict[str, Any],
     ) -> tuple[Literal["fallback", "accepted", "result", "error"], Any]:
+        if self._http_sync_budget_ms is None:
+            # Fast path disabled — go straight to the Socket.IO channel.
+            return "fallback", None
         sid = getattr(sio, "sid", None)
         if not (isinstance(sid, str) and sid):
             return "fallback", None
 
-        wait = self._http_wait_seconds
+        wait = self._http_sync_budget_ms / 1000  # ms → seconds for `Prefer: wait=`
         wait_token = str(int(wait)) if wait == int(wait) else str(wait)
         r = await self._client.post(
             "/call",

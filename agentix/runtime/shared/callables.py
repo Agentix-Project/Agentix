@@ -108,6 +108,18 @@ class RemoteCallable(str):
         module, qualname = ref
         return cls(f"{module}::{qualname}")
 
+    @classmethod
+    def validate(cls, fn: Callable[..., Any]) -> RemoteCallable:
+        """Check that `fn` is a remote-safe target and return its wire ref.
+
+        Use at development time to fail fast: raises `TypeError` if `fn`
+        is not an importable top-level function (lambdas, local closures,
+        bound methods, and callable instances are rejected). This is the
+        same encoding `client.remote(fn, ...)` performs internally before
+        dispatch, exposed so callers can validate ahead of a sandbox run.
+        """
+        return cls._resolve(fn)
+
     def resolve(self) -> Callable[..., Any]:
         """Decode this string back into a Python callable."""
         try:

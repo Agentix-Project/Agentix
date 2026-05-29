@@ -1,4 +1,4 @@
-"""Tests for `agentix.deployment._plugin.Registry[T]`.
+"""Tests for `agentix.provider._plugin.Registry[T]`.
 
 Covers the four scenarios every plugin axis cares about:
 
@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from agentix.deployment._plugin import PluginConflictError, Registry
+from agentix.provider._plugin import PluginConflictError, Registry
 
 
 @dataclass(frozen=True)
@@ -50,7 +50,7 @@ def _patch_eps(registry: Registry, eps: list):
 
 
 def _src(name, version):
-    from agentix.deployment._plugin import PluginSource
+    from agentix.provider._plugin import PluginSource
 
     return PluginSource(dist_name=name, dist_version=version)
 

@@ -14,10 +14,10 @@ from __future__ import annotations
 
 import os
 
-from agentix.deployment.base import Sandbox, SandboxConfig, SandboxId, SandboxInfo
+from agentix.provider.base import Sandbox, SandboxConfig, SandboxId, SandboxInfo, SandboxProvider
 
 
-class DaytonaDeployment:
+class DaytonaProvider(SandboxProvider):
     """Sandbox CRUD via Daytona (pending integration)."""
 
     def __init__(self) -> None:
@@ -25,13 +25,13 @@ class DaytonaDeployment:
 
     async def create(self, config: SandboxConfig) -> Sandbox:  # noqa: ARG002
         raise NotImplementedError(
-            "DaytonaDeployment is not wired yet. The CLI surface exists so "
+            "DaytonaProvider is not wired yet. The CLI surface exists so "
             "you can plan against it; the Daytona REST integration is the "
             "next item on the deploy roadmap."
         )
 
     async def delete(self, sandbox_id: SandboxId) -> None:  # noqa: ARG002
-        raise NotImplementedError("DaytonaDeployment.delete: see create()")
+        raise NotImplementedError("DaytonaProvider.delete: see create()")
 
     async def get(self, sandbox_id: SandboxId) -> SandboxInfo:  # noqa: ARG002
-        raise NotImplementedError("DaytonaDeployment.get: see create()")
+        raise NotImplementedError("DaytonaProvider.get: see create()")

@@ -103,6 +103,23 @@ Portable bundle tar layout:
     nix/store/...                the closures: interpreter, uv, system deps
     nix/runtime/venv             the uv venv (all Python deps)
     nix/runtime/{bin,lib,...}    symlinkJoin of every closure
+
+\b
+Environment (forwarded into the build container if set on the host):
+    NIX_CONFIG               Nix configuration override applied during the
+                             in-container `nix build` — e.g.
+                             `extra-substituters = https://mirror...`,
+                             `extra-trusted-public-keys = ...`. See
+                             https://nix.dev/manual/nix/stable/command-ref/conf-file
+                             for the full setting list.
+    AGENTIX_BUILDER_BASE     Builder base image; defaults to
+                             `nixos/nix:latest`. Useful for pinning a digest
+                             or pointing at a registry mirror.
+
+\b
+Proxies (HTTP/HTTPS) are no longer auto-forwarded — configure them once in
+`~/.docker/config.json` under `proxies` and BuildKit will inherit them for
+every `docker build`, agentix included.
 """
 
 
@@ -160,26 +177,6 @@ Portable bundle tar layout:
     metavar="ARG",
     help="Extra argument passed when extracting a tar bundle with container run; repeat for multiple args.",
 )
-@click.option(
-    "--builder-base",
-    default=None,
-    metavar="IMAGE",
-    help="Builder base image. Default: nixos/nix:latest from the bundled Dockerfile.",
-)
-@click.option(
-    "--nix-substituter",
-    "nix_substituters",
-    multiple=True,
-    metavar="URL",
-    help="Nix binary cache substituter inside the build container; repeat in fallback order.",
-)
-@click.option(
-    "--nix-trusted-public-key",
-    "nix_trusted_public_keys",
-    multiple=True,
-    metavar="KEY",
-    help="Extra Nix cache public key inside the build container; repeat for multiple keys.",
-)
 def build(
     path: Path,
     name: str | None,
@@ -189,9 +186,6 @@ def build(
     container_bin: str | None,
     container_args: tuple[str, ...],
     container_run_args: tuple[str, ...],
-    builder_base: str | None,
-    nix_substituters: tuple[str, ...],
-    nix_trusted_public_keys: tuple[str, ...],
 ) -> int:
     """Package a Python project into a bundle artifact."""
     src = path.resolve()
@@ -211,9 +205,6 @@ def build(
         container_bin=container_bin or "docker",
         container_args=container_args,
         container_run_args=container_run_args,
-        builder_base=builder_base,
-        nix_substituters=nix_substituters,
-        nix_trusted_public_keys=nix_trusted_public_keys,
     )
 
     if dry_run:

@@ -6,7 +6,7 @@ import pickle
 
 import pytest
 
-from agentix.deployment.base import SandboxConfig, SandboxResource
+from agentix.provider.base import SandboxConfig, SandboxResource
 from agentix.runtime.shared.callables import RemoteCallable
 from agentix.runtime.shared.models import RemoteError, RemoteRequest, RemoteResponse
 

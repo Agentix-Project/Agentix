@@ -29,7 +29,7 @@ Current architecture:
       Python dependencies.
 - [x] One merged `/nix/runtime` venv containing the framework, user
       project, integrations, and transitive dependencies.
-- [x] Deployment backend plugin axis via `agentix.deployment`.
+- [x] SandboxProvider backend plugin axis via `agentix.provider`.
 - [x] Side channels over the same Socket.IO connection: `/trace`, `/log`,
       and plugin namespaces via `agentix.sio`.
 
@@ -104,10 +104,10 @@ is still moving quickly.
 
 - [`Agentix-Runtime-Basic`](https://github.com/Agentiix/Agentix-Runtime-Basic)
   — `bash` and `files` modules. Published as `agentix-runtime-basic`.
-- [`Agentix-Deployment-Docker`](https://github.com/Agentiix/Agentix-Deployment-Docker)
+- [`Agentix-SandboxProvider-Docker`](https://github.com/Agentiix/Agentix-SandboxProvider-Docker)
   — local Docker backend. Published as `agentix-deployment-docker`.
-- [`Agentix-Deployment-Daytona`](https://github.com/Agentiix/Agentix-Deployment-Daytona)
-  and [`Agentix-Deployment-E2B`](https://github.com/Agentiix/Agentix-Deployment-E2B)
+- [`Agentix-SandboxProvider-Daytona`](https://github.com/Agentiix/Agentix-SandboxProvider-Daytona)
+  and [`Agentix-SandboxProvider-E2B`](https://github.com/Agentiix/Agentix-SandboxProvider-E2B)
   — hosted deployment backends.
 - [`abridge`](https://github.com/Agentiix/abridge) — host-side
   rollout-to-RL-buffer bridge.
@@ -153,5 +153,5 @@ dead-ends without expanding the current API prematurely.
   enabling token-level trajectory capture, cost tracking, and replay.
 - **Checkpoint / partial rollout** — snapshot a sandbox filesystem and
   loaded runtime state, then fork to explore alternative continuations.
-- **K8s deployment backend** — `Deployment` implementation using the
+- **K8s deployment backend** — `SandboxProvider` implementation using the
   same bundle-image contract, likely shipping as `agentix-deployment-k8s`.

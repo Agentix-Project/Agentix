@@ -227,5 +227,5 @@ Bundle = what code and dependencies exist in the sandbox
 client.remote(fn) = which importable function to call
 Worker = where user code executes
 agentix.sio = host ↔ sandbox side channels (trace, log, plugins)
-Deployment = where the bundle image runs
+SandboxProvider = where the bundle image runs
 ```

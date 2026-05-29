@@ -19,8 +19,8 @@ agentixx = { workspace = true }
 
 # `uv sync` makes `load_deployment("e2b")` work with zero framework
 # changes — the registry walks this entry-point group.
-[project.entry-points."agentix.deployment"]
-e2b = "agentix.deployment.e2b:E2BDeployment"
+[project.entry-points."agentix.provider"]
+e2b = "agentix.provider.e2b:E2BProvider"
 
 [tool.hatch.build.targets.wheel]
 # One file at `agentix/deployment/e2b.py`; the namespace dirs carry no

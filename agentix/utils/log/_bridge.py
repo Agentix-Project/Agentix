@@ -25,6 +25,7 @@ RECORD_EVENT = "record"
 
 class _WorkerLogNamespace(_sio.Namespace):
     namespace = NAMESPACE
+    _allow_reserved = True
 
 
 _namespace_singleton: _WorkerLogNamespace | None = None
@@ -37,7 +38,10 @@ def _get_worker_stream() -> _sio.ReliableStream:
         _namespace_singleton = _WorkerLogNamespace()
         _sio.register_namespace(_namespace_singleton)
     if _stream_singleton is None:
-        _stream_singleton = _sio.ReliableStream(_namespace_singleton)
+        _stream_singleton = _sio.ReliableStream(
+            _namespace_singleton,
+            max_buffer=_sio._env_buffer("AGENTIX_LOG_BUFFER"),
+        )
     return _stream_singleton
 
 

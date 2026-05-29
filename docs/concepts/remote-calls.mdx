@@ -7,8 +7,11 @@ A remote call starts with a real function object, not a string route.
 
 ```python
 from app import run
+from agentix.provider.docker import DockerProvider, DockerProviderConfig
 
-result = await client.remote(run, input="hello")
+provider = DockerProvider(DockerProviderConfig())
+async with provider.session(SandboxConfig(image=..., bundle=...)) as sandbox:
+    result = await sandbox.remote(run, input="hello")
 ```
 
 Agentix reads exactly two attributes from `run`:
@@ -22,7 +25,9 @@ sandbox, resolves the function, unpickles the arguments, and calls it.
 
 ## Why Function Objects
 
-Passing the function object keeps the host and sandbox API aligned:
+`sandbox` is a live handle returned by the provider — call
+`sandbox.remote(fn, ...)` on it directly. Passing the function object keeps
+the host and sandbox API aligned:
 
 - Your editor sees kwargs and return types from the local signature.
 - Refactors stay visible to Python tooling instead of hiding in RPC
@@ -33,6 +38,16 @@ The host rejects callables that cannot be encoded as an import path
 (lambdas, bound methods, partials, local closures). Put remote code
 behind an importable top-level function instead.
 
+To catch that at development time instead of at call time, validate a
+function with `RemoteCallable.validate`:
+
+```python
+from agentix import RemoteCallable
+
+RemoteCallable.validate(run)           # returns "app::run"
+RemoteCallable.validate(lambda x: x)   # raises TypeError
+```
+
 ## Payload Shape
 
 This call:
@@ -40,7 +55,7 @@ This call:
 ```python
 from app import run
 
-result = await client.remote(run, input="hello")
+result = await sandbox.remote(run, input="hello")
 ```
 
 becomes this wire payload:
@@ -53,11 +68,11 @@ becomes this wire payload:
 }
 ```
 
-`RuntimeClient.remote()` generates a fresh `call_id` per call. The
+`sandbox.remote()` generates a fresh `call_id` per call. The
 runtime uses it to correlate `call:result` / `call:error` responses and
 to support cancellation.
 
-Remote calls use Socket.IO events on the `/rpc` namespace. `RuntimeClient`
+Remote calls use Socket.IO events on the `/rpc` namespace. The sandbox
 may use the internal HTTP `/call` fast path for short calls, but accepted
 long-running calls and replayed results still complete over `/rpc`.
 
@@ -71,41 +86,60 @@ async def run(input: str) -> dict[str, str]:
 ```python
 from app import run
 
-result = await client.remote(run, input="hello")
+result = await sandbox.remote(run, input="hello")
 ```
 
 Both sync and async functions are valid targets. The worker awaits the
 return value only when it is awaitable.
 
+## Typing
+
+`sandbox.remote(fn, ...)` returns the **unwrapped** result of `fn` — type
+`R` — whether `fn` is sync or async. `remote` is itself a coroutine you
+`await`, so an `async def` target does not surface as `Awaitable[R]` on
+the host:
+
+```python
+def total(a: int, b: int) -> int: ...
+async def fetch(url: str) -> bytes: ...
+
+n: int = await sandbox.remote(total, 1, 2)        # R = int
+data: bytes = await sandbox.remote(fetch, "...")  # R = bytes, not Awaitable[bytes]
+```
+
+Your editor sees `fn`'s real signature, so argument and return types are
+checked against the local definition.
+
 ## Side Channels
 
 Trace, log, and plugin traffic share the same Socket.IO connection but
-ride their own namespaces, separate from `c.remote()`:
+ride their own namespaces, separate from `sandbox.remote()`:
 
 | Namespace | Direction | Purpose |
 | --- | --- | --- |
-| `/rpc` | host ↔ sandbox | `c.remote()` |
+| `/rpc` | host ↔ sandbox | `sandbox.remote()` |
 | `/trace` | sandbox → host | span lifecycle (auto-registered) |
 | `/log` | sandbox → host | stdlib logging records (auto-registered) |
 | `/<plugin>` | both | plugin-defined events via `agentix.sio` |
 
-Register a host-side handler before connecting:
+Register a host-side handler before the first remote call:
 
 ```python
-client = RuntimeClient(url)
-client.register_namespace(MyHostNamespace())
-async with client as c:
-    await c.remote(my_sandbox_fn, ...)
+async with provider.session(SandboxConfig(image=..., bundle=...)) as sandbox:
+    sandbox.register_namespace(MyHostNamespace())
+    await sandbox.remote(my_sandbox_fn, ...)
 ```
 
 ## Errors and Cancellation
 
 Agentix keeps errors in-band. A failed call emits `call:error` with a
 structured payload; the client raises `RemoteCallError` (or
-`asyncio.CancelledError` when `error.cancelled=True`).
+`asyncio.CancelledError` when `error.cancelled=True`). `RemoteCallError`'s
+message includes the sandbox-side traceback when one is available, and
+`exc.error.traceback` holds it on the exception for programmatic access.
 
-When the client disconnects or the caller's task is cancelled before a
-result arrives, the client emits `cancel` for the in-flight `call_id`.
+When the sandbox disconnects or the caller's task is cancelled before a
+result arrives, the sandbox emits `cancel` for the in-flight `call_id`.
 
-Per-call timeouts are caller-owned — wrap `await client.remote(...)` in
+Per-call timeouts are caller-owned — wrap `await sandbox.remote(...)` in
 `asyncio.wait_for(...)` when you need a deadline.

@@ -9,9 +9,10 @@ If an API is not listed here, treat it as internal and subject to change.
 
 ## Compatibility contract
 
-- `RuntimeClient.remote(fn, *args, **kwargs)` is a stable public API.
-- `client.remote` has no default retry behavior.
-- `client.remote` returns the target function result on success, and raises
+- `Sandbox.remote(fn, *args, **kwargs)` is a stable public API; the same
+  contract holds for `RuntimeClient.remote(...)`.
+- `.remote` has no default retry behavior.
+- `.remote` returns the target function result on success, and raises
   on failure.
 - `/rpc`, `/log`, and `/trace` are reserved by agentix-core.
 - tracing and logging transport details are internal implementation details;
@@ -22,19 +23,20 @@ If an API is not listed here, treat it as internal and subject to change.
 Top-level names exported by `agentix`:
 
 - `RuntimeClient`
+- `RemoteCallable`
 - `RemoteCallError`
 - `Namespace`
 - `RemoteSioError`
 - `register_namespace`
+- `request_handler` (host-side round-trip helper)
 - `AsyncClientNamespace`
-- `Deployment`
+- `SandboxProvider`
 - `Sandbox`
 - `SandboxConfig`
 - `SandboxId`
 - `SandboxInfo`
-- `load_deployment`
-- `register_deployment`
-- `session`
+- `providers`
+- `register_provider`
 - `log` (re-exported from `agentix.utils.log`)
 - `trace` (re-exported from `agentix.utils.trace`)
 - `__version__`
@@ -43,9 +45,50 @@ The canonical submodule paths are `agentix.utils.log` and
 `agentix.utils.trace`; the top-level `agentix.log` / `agentix.trace`
 attributes are convenience aliases.
 
+## Canonical call path
+
+The common path is a provider session yielding a live `Sandbox` handle. Call
+`await sandbox.remote(fn, ...)` directly — there is no separate `RuntimeClient`
+to open.
+
+```python
+from agentix import SandboxConfig
+from agentix.provider.docker import DockerProvider
+from my_project.tasks import run
+
+provider = DockerProvider()
+config = SandboxConfig(
+    image="python:3.13-slim",
+    bundle="dist/my_project.bundle.tar",
+)
+
+async with provider.session(config) as sandbox:
+    result = await sandbox.remote(run, seed=42)
+```
+
+`provider.session(config)` closes the runtime connection and deletes the
+container on exit. For manual lifecycle control:
+
+```python
+sandbox = await provider.create(config)
+try:
+    result = await sandbox.remote(run, seed=42)
+finally:
+    await sandbox.aclose()                     # close the runtime connection
+    await provider.delete(sandbox.sandbox_id)  # remove the container
+```
+
+`agentix.RemoteCallable.validate(fn)` checks at development time that `fn` is
+remote-safe: it returns the wire ref (`module::qualname`) for an importable
+top-level function, and raises `TypeError` for lambdas, closures, and bound
+methods. `RemoteCallError` messages now include the sandbox-side traceback
+(`str(exc)`); it is also available on `exc.error.traceback`.
+
 ## Runtime client API
 
-Primary user entrypoint:
+`RuntimeClient` is the advanced/direct entrypoint for talking to a known
+`runtime_url` (for example, an in-process server). The sandbox path should use
+`sandbox.remote` instead of a nested `RuntimeClient`.
 
 ```python
 from agentix import RuntimeClient
@@ -59,19 +102,75 @@ Also public:
 - `RuntimeClient.health()`
 - `RuntimeClient.register_namespace(ns)`
 
-## Deployment API
+### Timeout
 
-Core deployment lifecycle:
+The timeout knobs apply to both `sandbox.remote` and `RuntimeClient`.
+`RuntimeClient(url, timeout=...)` sets the per-request timeout in seconds. The
+default is `300`; raise it for agent workloads (roughly `600`–`1800`s), e.g.
+`RuntimeClient(url, timeout=1800)`. `http_sync_ms` (default `1000`) tunes the
+inline HTTP fast-path budget for short calls; set `http_sync_ms=None` to disable
+it so every call goes over Socket.IO. To bound a single call independently of
+the request timeout, wrap it in `asyncio.wait_for(sandbox.remote(...), deadline)`.
+
+## SandboxProvider API
+
+Core provider lifecycle. `provider.session(config)` is the scoped form; it
+yields a live `Sandbox` and tears it down on exit.
 
 ```python
-from agentix import SandboxConfig, load_deployment, session
+from agentix import SandboxConfig
+from agentix.provider.docker import DockerProvider
 
-deployment_cls = load_deployment("docker")
-deployment = deployment_cls()
+provider = DockerProvider()
 
 config = SandboxConfig(image="python:3.13-slim", bundle="/home/me/.cache/agentix/bundles/sha256-...")
-async with session(deployment, config) as sandbox:
-    ...
+async with provider.session(config) as sandbox:
+    result = await sandbox.remote(fn, ...)
+```
+
+Backends subclass `SandboxProvider` (from `agentix.provider.base`), implementing
+`create`, `delete`, and `get`; `session` is inherited.
+
+```python
+from agentix.provider.base import SandboxProvider
+
+class FooProvider(SandboxProvider):
+    async def create(self, config: SandboxConfig) -> Sandbox: ...
+    async def delete(self, sandbox_id: SandboxId) -> None: ...
+    async def get(self, sandbox_id: SandboxId) -> Sandbox: ...
+```
+
+### Discovering backends
+
+`agentix.providers()` returns the provider registry; `providers().all()`
+returns `{name: ProviderClass}` for every installed backend.
+
+```python
+from agentix import providers
+
+providers().all()          # {"docker": DockerProvider, "podman": ...}
+```
+
+There is intentionally no string loader for typed code: import the concrete
+provider directly so the type is known at construction. For string/CLI-driven
+selection only, look the class up dynamically with `providers().get(name)`.
+
+## Concrete provider examples
+
+Import the concrete provider and instantiate it (optionally with a backend
+config) to get a usable backend.
+
+```python
+from agentix.provider.docker import DockerProvider, DockerProviderConfig
+
+# Defaults (uses the docker CLI).
+provider = DockerProvider()
+
+# Same backend driven by podman.
+provider = DockerProvider(DockerProviderConfig(container_bin="podman"))
+
+# A config can also build its provider directly.
+provider = DockerProviderConfig(container_bin="podman").to_provider()
 ```
 
 ## Namespace extension API
@@ -86,13 +185,21 @@ Sandbox-side namespace handlers run in the worker:
 from agentix import Namespace, register_namespace
 ```
 
-Host-side namespace handlers run in the process that owns `RuntimeClient`:
+Host-side namespace handlers run in the process that owns the `Sandbox`:
 
 ```python
 from agentix import AsyncClientNamespace
 ```
 
-Register host-side namespaces before entering the client context:
+Register host-side namespaces on the sandbox before the first remote call:
+
+```python
+async with provider.session(config) as sandbox:
+    sandbox.register_namespace(MyHostNamespace())
+    result = await sandbox.remote(fn, ...)
+```
+
+When driving a `RuntimeClient` directly, register before entering its context:
 
 ```python
 from agentix import RuntimeClient
@@ -109,8 +216,8 @@ and worker extension flow.
 
 ## Logging API
 
-Sandbox code uses stdlib logging. `RuntimeClient` automatically registers the
-host-side `/log` consumer.
+Sandbox code uses stdlib logging. The host side automatically registers the
+`/log` consumer.
 
 ```python
 import logging
@@ -175,12 +282,23 @@ These modules are public once their plugin package is installed:
 - `agentix.plugins.datasets.swe`
   - `prepare_env(...)`
   - `score(...)`
+- deployment backends (contribute siblings into `agentix.provider`)
+  - `agentix.provider.docker` (production; provides `docker` + `podman`)
+  - `agentix.provider.apptainer` (production)
+  - `agentix.provider.daytona` (stub)
+  - `agentix.provider.e2b` (stub)
 
 ## CLI entrypoints
 
 Public command-line entrypoints:
 
-- `agentix` — dev-side build CLI (`agentix build [PATH]`)
+- `agentix build [PATH]` — build a deploy-ready bundle from a project root.
+- `agentix deploy <backend> <bundle>` — deploy a bundle to a backend.
+  `--format json` prints `{"bundle": ..., "platform": ..., "metadata": {...}}`
+  so the cache path can be read with `jq`, e.g.
+  `BUNDLE=$(uv run agentix deploy docker dist/x.bundle.tar --format json | jq -r .bundle)`.
+- `agentix plugin list` — read-only listing of installed deployment backends
+  and their load status.
 
 The bundle's runtime server is *not* exposed as a console script; it is
 launched inside the sandbox container by `/nix/runtime/bootstrap.sh`,

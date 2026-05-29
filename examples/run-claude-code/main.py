@@ -22,10 +22,10 @@ from typing import Any
 
 import agentix.agents.claude_code as cc
 import agentix.bridge.mitm as abridge_mitm
-from agentix.deployment.docker import DockerDeployment
+from agentix.bash import run
+from agentix.provider.docker import DockerProvider
 
-from agentix import RuntimeClient, bash
-from agentix.deployment.base import SandboxConfig, session
+from agentix.provider.base import Sandbox, SandboxConfig
 from agentix.utils.log import configure_logging
 
 DEFAULT_IMAGE = "python:3.13-slim"
@@ -72,42 +72,40 @@ def parse_args() -> argparse.Namespace:
 
 async def run_claude_code(args: argparse.Namespace, *, forwarder: abridge_mitm.OpenAIForwarder) -> None:
     cfg = SandboxConfig(image=args.image, bundle=args.bundle, platform=args.platform)
-    async with session(DockerDeployment(), cfg) as sandbox:
+    async with DockerProvider().session(cfg) as sandbox:
         print(f"runtime_url={sandbox.runtime_url}", flush=True)
-        client = RuntimeClient(sandbox.runtime_url, timeout=args.timeout + 180)
-        client.register_namespace(forwarder)
-        async with client as c:
-            proxy = await c.remote(
-                abridge_mitm.start_proxy,
-                port=args.proxy_port,
-                mode=args.proxy_mode,
+        sandbox.register_namespace(forwarder)
+        proxy = await sandbox.remote(
+            abridge_mitm.start_proxy,
+            port=args.proxy_port,
+            mode=args.proxy_mode,
+        )
+        print(f"abridge_proxy_url={proxy.url}", flush=True)
+        try:
+            await prepare_repo(sandbox, args.workdir)
+            result = await sandbox.remote(
+                cc.run,
+                instruction=args.instruction,
+                workdir=args.workdir,
+                timeout=args.timeout,
+                max_turns=args.max_turns,
+                anthropic_base_url=proxy.url,
+                anthropic_model=args.anthropic_model,
+                log_name="run-claude-code.jsonl",
             )
-            print(f"abridge_proxy_url={proxy.url}", flush=True)
-            try:
-                await prepare_repo(c, args.workdir)
-                result = await c.remote(
-                    cc.run,
-                    instruction=args.instruction,
-                    workdir=args.workdir,
-                    timeout=args.timeout,
-                    max_turns=args.max_turns,
-                    anthropic_base_url=proxy.url,
-                    anthropic_model=args.anthropic_model,
-                    log_name="run-claude-code.jsonl",
-                )
-                print(f"claude_exit={result.exit_code}", flush=True)
-                if result.stderr_tail:
-                    print("claude_stderr_tail:", flush=True)
-                    print(result.stderr_tail.rstrip(), flush=True)
-                if result.stdout_tail:
-                    print("claude_stdout_tail:", flush=True)
-                    print(result.stdout_tail.rstrip(), flush=True)
-                await print_verification(c, args.workdir)
-            finally:
-                await c.remote(abridge_mitm.stop_proxy, handle=proxy)
+            print(f"claude_exit={result.exit_code}", flush=True)
+            if result.stderr_tail:
+                print("claude_stderr_tail:", flush=True)
+                print(result.stderr_tail.rstrip(), flush=True)
+            if result.stdout_tail:
+                print("claude_stdout_tail:", flush=True)
+                print(result.stdout_tail.rstrip(), flush=True)
+            await print_verification(sandbox, args.workdir)
+        finally:
+            await sandbox.remote(abridge_mitm.stop_proxy, handle=proxy)
 
 
-async def prepare_repo(client: RuntimeClient, workdir: str) -> None:
+async def prepare_repo(sandbox: Sandbox, workdir: str) -> None:
     command = f"""
 set -eu
 rm -rf {shell_quote(workdir)}
@@ -123,12 +121,12 @@ PY
 git add math_utils.py
 git commit -q -m init
 """
-    result = await client.remote(bash.run, command=command, timeout=30)
+    result = await sandbox.remote(run, command=command, timeout=30)
     if result.exit_code != 0:
         raise RuntimeError(f"repo preparation failed:\n{result.stderr}\n{result.stdout}")
 
 
-async def print_verification(client: RuntimeClient, workdir: str) -> None:
+async def print_verification(sandbox: Sandbox, workdir: str) -> None:
     command = """
 set -eu
 git diff -- math_utils.py
@@ -137,7 +135,7 @@ from math_utils import add, subtract
 print("verify", add(2, 3), subtract(5, 2))
 PY
 """
-    result = await client.remote(bash.run, command=command, cwd=workdir, timeout=30)
+    result = await sandbox.remote(run, command=command, cwd=workdir, timeout=30)
     print("verification_exit", result.exit_code, flush=True)
     print("verification_stdout:", flush=True)
     print(result.stdout.rstrip(), flush=True)

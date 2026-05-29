@@ -1,4 +1,4 @@
-"""Unit tests for `ApptainerDeployment` using a fake `apptainer` binary.
+"""Unit tests for `ApptainerProvider` using a fake `apptainer` binary.
 
 The fake binary is a small shell script the test stages on PATH at the
 start of each test. It records every call to a file and acts as both
@@ -21,13 +21,13 @@ from pathlib import Path
 
 import httpx
 import pytest
-from agentix.deployment.apptainer import (
-    ApptainerDeployment,
+from agentix.provider.apptainer import (
+    ApptainerProvider,
     _bundle_digest,
     _extract_bundle,
 )
 
-from agentix.deployment.base import SandboxConfig, session
+from agentix.provider.base import SandboxConfig
 
 # ── helpers ───────────────────────────────────────────────────────────────
 
@@ -49,7 +49,7 @@ def _write_bundle_tar(tmp_path: Path, *, digest: str = "sha256:abc") -> Path:
 
 
 _FAKE_APPTAINER_SOURCE = '''#!{python}
-"""Recording shim for `apptainer` used by ApptainerDeployment tests.
+"""Recording shim for `apptainer` used by ApptainerProvider tests.
 
 Logs every invocation as one JSON line to `LOG_PATH`. On `exec`,
 launches a tiny HTTP server that responds 200 on `/health` so the
@@ -210,9 +210,9 @@ def test_extract_bundle_skips_when_runtime_already_present(tmp_path: Path) -> No
 async def test_create_and_delete_roundtrip(env, tmp_path: Path) -> None:
     bundle = _write_bundle_tar(tmp_path)
     config = SandboxConfig(image="docker://python:3.13-slim", bundle=str(bundle))
-    deployment = ApptainerDeployment()
+    deployment = ApptainerProvider()
 
-    async with session(deployment, config) as sandbox:
+    async with deployment.session(config) as sandbox:
         info = await deployment.get(sandbox.sandbox_id)
         assert info.status == "running"
         async with httpx.AsyncClient(base_url=sandbox.runtime_url, timeout=5) as c:
@@ -232,8 +232,8 @@ async def test_create_records_expected_apptainer_cli(env, tmp_path: Path) -> Non
         bundle=str(bundle),
         env={"HF_HOME": "/tmp/hf"},
     )
-    deployment = ApptainerDeployment()
-    async with session(deployment, config) as _:
+    deployment = ApptainerProvider()
+    async with deployment.session(config) as _:
         pass
 
     log_lines = [
@@ -275,8 +275,8 @@ async def test_apptainer_flags_env_override(env, tmp_path: Path, monkeypatch) ->
     )
     bundle = _write_bundle_tar(tmp_path)
     config = SandboxConfig(image="docker://python:3.13-slim", bundle=str(bundle))
-    deployment = ApptainerDeployment()
-    async with session(deployment, config) as _:
+    deployment = ApptainerProvider()
+    async with deployment.session(config) as _:
         pass
 
     log_lines = [

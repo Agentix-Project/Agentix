@@ -8,11 +8,11 @@ import json
 import tarfile
 from pathlib import Path
 
-import agentix.deployment.docker as docker_mod
+import agentix.provider.docker as docker_mod
 import pytest
-from agentix.deployment.docker import DockerDeployment, DockerDeploymentConfig, PodmanDeployment
+from agentix.provider.docker import DockerProvider, DockerProviderConfig, PodmanProvider
 
-from agentix.deployment.base import SandboxConfig, SandboxResource
+from agentix.provider.base import SandboxConfig, SandboxResource
 
 
 def _bundle_tar(tmp_path: Path) -> Path:
@@ -62,7 +62,7 @@ async def test_create_passes_platform_and_bundle_mount_to_sandbox(
 
     async def fake_docker(
         *args: str,
-        config: DockerDeploymentConfig | None = None,
+        config: DockerProviderConfig | None = None,
         check: bool = True,
         retries: int = 0,
     ) -> tuple[int, bytes, bytes]:
@@ -72,14 +72,14 @@ async def test_create_passes_platform_and_bundle_mount_to_sandbox(
             return 1, b"", b""
         return 0, b"", b""
 
-    async def fake_wait_healthy(self: DockerDeployment, port: int) -> None:
+    async def fake_wait_healthy(self: DockerProvider, port: int) -> None:
         return None
 
     monkeypatch.setattr(docker_mod, "_docker", fake_docker)
-    monkeypatch.setattr(DockerDeployment, "_allocate_port", staticmethod(lambda: 18000))
-    monkeypatch.setattr(DockerDeployment, "_wait_healthy", fake_wait_healthy)
+    monkeypatch.setattr(DockerProvider, "_allocate_port", staticmethod(lambda: 18000))
+    monkeypatch.setattr(DockerProvider, "_wait_healthy", fake_wait_healthy)
 
-    deployment = DockerDeployment()
+    deployment = DockerProvider()
     await deployment.create(
         SandboxConfig(
             image="python:3.13-slim",
@@ -118,7 +118,7 @@ async def test_create_passes_resource_limits_and_extra_runner_args(
 
     async def fake_docker(
         *args: str,
-        config: DockerDeploymentConfig | None = None,
+        config: DockerProviderConfig | None = None,
         check: bool = True,
         retries: int = 0,
     ) -> tuple[int, bytes, bytes]:
@@ -128,15 +128,15 @@ async def test_create_passes_resource_limits_and_extra_runner_args(
             return 1, b"", b""
         return 0, b"", b""
 
-    async def fake_wait_healthy(self: DockerDeployment, port: int) -> None:
+    async def fake_wait_healthy(self: DockerProvider, port: int) -> None:
         return None
 
     monkeypatch.setattr(docker_mod, "_docker", fake_docker)
-    monkeypatch.setattr(DockerDeployment, "_allocate_port", staticmethod(lambda: 18001))
-    monkeypatch.setattr(DockerDeployment, "_wait_healthy", fake_wait_healthy)
+    monkeypatch.setattr(DockerProvider, "_allocate_port", staticmethod(lambda: 18001))
+    monkeypatch.setattr(DockerProvider, "_wait_healthy", fake_wait_healthy)
 
-    deployment = DockerDeployment(
-        DockerDeploymentConfig(
+    deployment = DockerProvider(
+        DockerProviderConfig(
             run_args=["--runtime=crun", "--cgroups=disabled"],
         )
     )
@@ -168,7 +168,7 @@ async def test_host_network_binds_runtime_to_loopback(
 
     async def fake_docker(
         *args: str,
-        config: DockerDeploymentConfig | None = None,
+        config: DockerProviderConfig | None = None,
         check: bool = True,
         retries: int = 0,
     ) -> tuple[int, bytes, bytes]:
@@ -178,14 +178,14 @@ async def test_host_network_binds_runtime_to_loopback(
             return 1, b"", b""
         return 0, b"", b""
 
-    async def fake_wait_healthy(self: DockerDeployment, port: int) -> None:
+    async def fake_wait_healthy(self: DockerProvider, port: int) -> None:
         return None
 
     monkeypatch.setattr(docker_mod, "_docker", fake_docker)
-    monkeypatch.setattr(DockerDeployment, "_allocate_port", staticmethod(lambda: 18004))
-    monkeypatch.setattr(DockerDeployment, "_wait_healthy", fake_wait_healthy)
+    monkeypatch.setattr(DockerProvider, "_allocate_port", staticmethod(lambda: 18004))
+    monkeypatch.setattr(DockerProvider, "_wait_healthy", fake_wait_healthy)
 
-    deployment = DockerDeployment(DockerDeploymentConfig(network="host"))
+    deployment = DockerProvider(DockerProviderConfig(network="host"))
     await deployment.create(SandboxConfig(image="python:3.13-slim", bundle=str(materialized)))
 
     run_call = next(call for call in calls if call[0] == "run")
@@ -197,7 +197,7 @@ async def test_host_network_binds_runtime_to_loopback(
 
 
 def test_gpu_args_can_be_overridden_for_podman_cdi() -> None:
-    config = DockerDeploymentConfig(gpu_args=["--device", "nvidia.com/gpu=all", "--label", "gpu-count={gpu}"])
+    config = DockerProviderConfig(gpu_args=["--device", "nvidia.com/gpu=all", "--label", "gpu-count={gpu}"])
 
     assert docker_mod._resource_args(SandboxResource(gpu=2), config) == [
         "--device",
@@ -210,18 +210,18 @@ def test_gpu_args_can_be_overridden_for_podman_cdi() -> None:
 def test_publish_host_can_be_omitted_for_podman_cni() -> None:
     assert docker_mod._port_mapping(18002) == "127.0.0.1:18002:18002"
 
-    assert docker_mod._port_mapping(18002, DockerDeploymentConfig(publish_host="")) == "18002:18002"
+    assert docker_mod._port_mapping(18002, DockerProviderConfig(publish_host="")) == "18002:18002"
 
 
 def test_network_mode_disables_port_publishing() -> None:
     assert docker_mod._network_args() == []
     assert docker_mod._publish_args(18003) == ["-p", "127.0.0.1:18003:18003"]
 
-    slirp = DockerDeploymentConfig(network="slirp4netns")
+    slirp = DockerProviderConfig(network="slirp4netns")
     assert docker_mod._network_args(slirp) == ["--network", "slirp4netns"]
     assert docker_mod._publish_args(18003, slirp) == ["-p", "127.0.0.1:18003:18003"]
 
-    host = DockerDeploymentConfig(network="host")
+    host = DockerProviderConfig(network="host")
     assert docker_mod._network_args(host) == ["--network", "host"]
     assert docker_mod._publish_args(18003, host) == []
 
@@ -244,7 +244,7 @@ async def test_container_bin_config_selects_podman(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
 
-    await docker_mod._docker("ps", config=DockerDeploymentConfig(container_bin="podman"))
+    await docker_mod._docker("ps", config=DockerProviderConfig(container_bin="podman"))
 
     assert calls == [("podman", "ps")]
 
@@ -256,7 +256,7 @@ async def test_materialize_bundle_extracts_tar_to_cache(
     bundle = _bundle_tar(tmp_path)
     cache = tmp_path / "cache"
 
-    deployment = DockerDeployment(DockerDeploymentConfig(bundle_cache_dir=cache))
+    deployment = DockerProvider(DockerProviderConfig(bundle_cache_dir=cache))
     result = await deployment.materialize_bundle(bundle, name="localhost/demo:dev")
 
     expected = cache / f"sha256-{'a' * 64}"
@@ -273,7 +273,7 @@ async def test_materialize_bundle_defaults_image_ref_from_manifest(
     tmp_path: Path,
 ) -> None:
     bundle = _bundle_tar(tmp_path)
-    result = await DockerDeployment(DockerDeploymentConfig(bundle_cache_dir=tmp_path / "cache")).materialize_bundle(
+    result = await DockerProvider(DockerProviderConfig(bundle_cache_dir=tmp_path / "cache")).materialize_bundle(
         bundle
     )
 
@@ -281,6 +281,6 @@ async def test_materialize_bundle_defaults_image_ref_from_manifest(
 
 
 def test_podman_deployment_uses_podman_by_default() -> None:
-    deployment = PodmanDeployment()
+    deployment = PodmanProvider()
 
     assert deployment._deployment.config.container_bin == "podman"

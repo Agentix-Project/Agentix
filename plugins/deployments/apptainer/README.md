@@ -4,7 +4,7 @@ Apptainer (formerly Singularity) deployment backend for Agentix. Targets
 HPC and shared-cluster environments where the Docker daemon is
 unavailable but `apptainer` is installed and unprivileged-friendly.
 
-Registers `apptainer` in the `agentix.deployment` entry-point group, so
+Registers `apptainer` in the `agentix.provider` entry-point group, so
 `load_deployment("apptainer")` resolves after `pip install
 agentix-deployment-apptainer`.
 

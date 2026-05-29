@@ -11,8 +11,7 @@ import argparse
 import logging
 import subprocess
 
-from agentix import RuntimeClient
-from agentix.deployment.base import SandboxConfig, load_deployment, session
+from agentix.provider.base import SandboxConfig, providers
 from agentix.utils.log import configure_logging as configure_agentix_logging
 
 logger = logging.getLogger(__name__)
@@ -44,7 +43,7 @@ def _parse_args() -> argparse.Namespace:
         "--deployment",
         default="docker",
         help=(
-            "Deployment backend registered under the `agentix.deployment` "
+            "SandboxProvider backend registered under the `agentix.provider` "
             "entry-point group (e.g. `docker`, `podman`, or `apptainer`)."
         ),
     )
@@ -72,16 +71,14 @@ def _parse_args() -> argparse.Namespace:
 
 async def main(args: argparse.Namespace | None = None) -> None:
     args = args or _parse_args()
-    deployment_cls = load_deployment(args.deployment)
-    deployment = deployment_cls()
+    provider = providers().get(args.deployment)()
     config = SandboxConfig(image=args.image, bundle=args.bundle)
     logger.info("config: %s", config)
-    async with session(deployment, config) as sandbox:
-        async with RuntimeClient(sandbox.runtime_url) as client:
-            result = hello()
-            print(f"Host result: {result}")
-            result = await client.remote(hello)
-            print(f"Sandbox result: {result}")
+    async with provider.session(config) as sandbox:
+        result = hello()
+        print(f"Host result: {result}")
+        result = await sandbox.remote(hello)
+        print(f"Sandbox result: {result}")
 
 
 if __name__ == "__main__":

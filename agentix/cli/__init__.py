@@ -1,8 +1,9 @@
 """`agentix` command-line interface.
 
 The core CLI intentionally stays narrow: `agentix build` packages a
-project into a bundle artifact, and `agentix deploy` materializes that
-artifact for a deployment backend.
+project into a bundle artifact, `agentix deploy` materializes that
+artifact for a deployment backend, and `agentix plugin` inspects the
+installed deployment backends.
 
 Argument parsing is delegated to click — each subcommand is a
 `click.Command` registered on the `agentix` group. Click owns `--help`,
@@ -19,6 +20,7 @@ import click
 
 from agentix.cli.build import build as _build
 from agentix.cli.deploy import deploy as _deploy
+from agentix.cli.plugin import plugin as _plugin
 
 _HELP_OPTIONS = {"help_option_names": ["-h", "--help"]}
 
@@ -30,6 +32,7 @@ def cli() -> None:
 
 cli.add_command(_build)
 cli.add_command(_deploy)
+cli.add_command(_plugin)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

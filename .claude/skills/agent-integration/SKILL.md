@@ -318,7 +318,7 @@ docker build -t agentix-hub/<name>:0.1.0 <name>/    # context = the closure dir
 # In a tiny script:
 import asyncio
 from agentix import RuntimeClient, SandboxConfig
-from agentix.deployment.docker import DockerDeployment
+from agentix.provider.docker import DockerProvider
 from agentix_closures import <name>
 
 async def check():
@@ -327,7 +327,7 @@ async def check():
         runtime="agentix/runtime:0.1.0",
         closures=["agentix-hub/<name>:0.1.0"],
     )
-    async with DockerDeployment().session(cfg) as sb:
+    async with DockerProvider().session(cfg) as sb:
         async with RuntimeClient(sb.runtime_url) as c:
             print(await c.closures())
             result = await c.remote(<name>.run, instruction="...")

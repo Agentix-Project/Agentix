@@ -5,7 +5,7 @@ description: How Agentix plugins extend the runtime without changing the core RP
 
 Agentix plugins extend the runtime in two different ways:
 
-1. expose importable Python functions that callers run with `client.remote`
+1. expose importable Python functions that callers run with `sandbox.remote`
 2. open side-channel Socket.IO namespaces for events between host and sandbox
 
 The runtime server stays generic. It does not know plugin event names or
@@ -16,11 +16,11 @@ the worker process.
 
 ```mermaid placement="top-right"
 flowchart LR
-    Host["Host process<br/>RuntimeClient"]
+    Host["Host process<br/>live Sandbox handle"]
     Server["Runtime server<br/>generic Socket.IO forwarder"]
     Worker["Worker subprocess<br/>user code + sandbox namespaces"]
 
-    Host -->|RPC on /rpc: client.remote| Server
+    Host -->|RPC on /rpc: sandbox.remote| Server
     Server -->|call frame: module::qualname + pickle args| Worker
     Worker -->|pickle result or error| Server
     Server -->|call:result or call:error| Host
@@ -38,7 +38,7 @@ Agentix core owns three reserved Socket.IO namespaces:
 
 | Namespace | System | User-facing API | Extension point |
 | --- | --- | --- | --- |
-| `/rpc` | RPC | `await client.remote(fn, *args, **kwargs)` | expose a normal importable Python callable |
+| `/rpc` | RPC | `await sandbox.remote(fn, *args, **kwargs)` | expose a normal importable Python callable |
 | `/log` | logging | stdlib `logging` in sandbox code | configure host logging handlers, levels, and formatters |
 | `/trace` | tracing | `agentix.trace.trace(...)`, `agentix.trace.span(...)` | register `agentix.trace.Processor` implementations |
 
@@ -61,10 +61,10 @@ The host calls the function object:
 ```python
 from app import run
 
-result = await client.remote(run, input="hello")
+result = await sandbox.remote(run, input="hello")
 ```
 
-`RuntimeClient` serializes the target as `fn.__module__ + "::" +
+The sandbox serializes the target as `fn.__module__ + "::" +
 fn.__qualname__`, pickles args and kwargs, and the worker imports the same
 callable inside the sandbox.
 
@@ -83,7 +83,7 @@ async def run() -> None:
 ```
 
 At worker boot, Agentix installs a root `logging.Handler` that forwards
-`LogRecord` data over `/log`. `RuntimeClient` automatically registers the host
+`LogRecord` data over `/log`. The sandbox automatically registers the host
 consumer and replays those records into the host logging tree.
 
 ```mermaid actions={false}
@@ -127,7 +127,7 @@ async def run() -> None:
 ```
 
 At worker boot, Agentix installs an internal `trace.Processor` that forwards
-trace and span lifecycle events over `/trace`. `RuntimeClient` automatically
+trace and span lifecycle events over `/trace`. The sandbox automatically
 registers the host consumer, which replays those events into the host trace
 provider.
 
@@ -184,12 +184,34 @@ Do not register your own `/trace` namespace. If a plugin needs a different
 event model, use a plugin namespace and optionally convert those events into
 spans through a `trace.Processor`.
 
+## Choosing: Callables vs. Namespaces
+
+Two ways to expose sandbox behavior — pick by data-flow shape:
+
+- **Callable** (`sandbox.remote(fn, ...)`) — one call in, one return value
+  out, after the work finishes. No data flows back mid-execution. This is
+  the default; bash `run`, file `upload`/`download`, and agent/scorer
+  wrappers are all callables.
+- **Callable returning `AsyncIterator[T]`** — progressive results streamed
+  to the host as they happen, host → sandbox only. `bash.run_stream` yields
+  `BashStdout` / `BashStderr` / `BashExit` events this way.
+- **Namespace** — host and sandbox exchange data *during* execution
+  (bidirectional), or the plugin bridges an external service the sandbox
+  must reach through the host. abridge uses a namespace: sandbox code
+  forwards an LLM request to the host, the host calls the real upstream,
+  and the reply comes back on the same namespace — all while the agent
+  keeps running in the sandbox.
+
+Rule of thumb: reach for a callable first. Use a namespace only when you
+need a persistent, bidirectional channel; it costs an extra class on each
+side.
+
 ## Plugin Namespaces
 
 A plugin namespace has two optional halves:
 
 - a sandbox-side `agentix.Namespace`, registered inside the worker
-- a host-side `agentix.AsyncClientNamespace`, registered on `RuntimeClient`
+- a host-side `agentix.AsyncClientNamespace`, registered on the live sandbox
 
 The sandbox side emits events or handles host requests:
 
@@ -209,6 +231,7 @@ The host side receives events or replies to sandbox requests:
 
 ```python
 import agentix
+from agentix.provider.docker import DockerProvider, DockerProviderConfig
 
 class MyHost(agentix.AsyncClientNamespace):
     def __init__(self):
@@ -217,15 +240,45 @@ class MyHost(agentix.AsyncClientNamespace):
     async def on_record(self, payload):
         ...
 
-client = agentix.RuntimeClient(runtime_url)
-client.register_namespace(MyHost())
+provider = DockerProvider(DockerProviderConfig(...))
 
-async with client:
-    ...
+async with provider.session(SandboxConfig(image=..., bundle=...)) as sandbox:
+    sandbox.register_namespace(MyHost())
+    result = await sandbox.remote(run, input="hello")
 ```
 
-`RuntimeClient.register_namespace(...)` must run before entering the async
-context, because the Socket.IO connection plan is fixed at connect time.
+`sandbox.register_namespace(...)` must run before the first remote call,
+because the Socket.IO connection plan is fixed at connect time.
+
+### Round-trip Requests
+
+When the sandbox needs an answer *from* the host mid-run, the sandbox side
+calls `await self.request("fetch", body)`. It emits the request with a
+generated `request_id` and waits for the host to reply on `fetch:result`
+(success) or `fetch:error` (failure).
+
+On the host, wrap the handler with `request_handler` so the envelope, the
+reply event name, and error replies are handled for you:
+
+```python
+from agentix import AsyncClientNamespace, request_handler
+
+class MyHost(AsyncClientNamespace):
+    def __init__(self):
+        super().__init__("/my-plugin")
+
+    @request_handler("fetch")
+    async def on_fetch(self, body):
+        return await call_upstream(body)   # return value → fetch:result
+```
+
+The wrapped coroutine receives the unwrapped request body and returns the
+reply value; a raised exception becomes a `fetch:error` reply carrying
+`{"type", "message"}` — the shape `Namespace.request` re-raises as
+`RemoteSioError`. Without the decorator you must pull `request_id` out of
+the envelope yourself and emit the exact `fetch:result` / `fetch:error`
+event by hand; a typo or a forgotten reply hangs the sandbox until its
+request timeout.
 
 ## What the Server Does
 
@@ -257,10 +310,10 @@ not need runtime-server patches for new event protocols.
 
 A plugin package can contribute any combination of:
 
-- importable functions that callers invoke with `client.remote`
+- importable functions that callers invoke with `sandbox.remote`
 - sandbox-side namespaces registered by code running in the worker
-- host-side namespace handlers registered on `RuntimeClient`
-- deployment backends through the `agentix.deployment` entry-point group
+- host-side namespace handlers registered on the live sandbox
+- sandbox providers through the `agentix.provider` entry-point group
 - system dependency closures through the `agentix.nix` entry-point group
 
 Keep these boundaries separate. Remote calls are the main RPC system; `/log`

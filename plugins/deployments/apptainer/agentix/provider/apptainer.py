@@ -4,7 +4,7 @@ Targets HPC / shared-cluster environments where Docker is absent but
 `apptainer` (formerly Singularity) is available and unprivileged-
 friendly.
 
-Two artifacts, one container, same contract as `DockerDeployment`:
+Two artifacts, one container, same contract as `DockerProvider`:
 
   - `config.bundle` is the portable tar bundle produced by
     `agentix build`. Its `nix/` tree is extracted once per
@@ -48,10 +48,10 @@ import tarfile
 from pathlib import Path
 from uuid import uuid4
 
-from agentix.deployment.base import Deployment, Sandbox, SandboxConfig, SandboxId, SandboxInfo
+from agentix.provider.base import Sandbox, SandboxConfig, SandboxId, SandboxInfo, SandboxProvider
 from agentix.runtime import BIND_PORT_ENV, BUNDLE_NIX_ROOT, BUNDLE_RUNTIME_ENTRYPOINT
 
-logger = logging.getLogger("agentix.deployment.apptainer")
+logger = logging.getLogger("agentix.provider.apptainer")
 
 _DEFAULT_CACHE = Path.home() / ".cache" / "agentix" / "apptainer"
 
@@ -185,7 +185,7 @@ async def _ensure_sif(image: str) -> Path:
     return sif
 
 
-class ApptainerDeployment(Deployment):
+class ApptainerProvider(SandboxProvider):
     """Sandbox CRUD via local apptainer.
 
     State is in-process: `_procs` maps `SandboxId` to the live

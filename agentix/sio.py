@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import logging
+import os
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -126,15 +127,20 @@ class Namespace:
     """
 
     namespace: str = ""  # subclass MUST override
+    # Core's own /trace and /log handlers set this True; every other
+    # class (including user subclasses) is rejected from the reserved
+    # namespaces, so a plugin can't shadow a core side channel.
+    _allow_reserved: bool = False
 
     def __init__(self, namespace: str | None = None) -> None:
         if namespace is not None:
             self.namespace = namespace
         if not isinstance(self.namespace, str) or not self.namespace.startswith("/"):
             raise ValueError(f"namespace must start with '/' (got {self.namespace!r})")
-        if self.namespace in RESERVED_NAMESPACES and type(self) is Namespace:
+        if self.namespace in RESERVED_NAMESPACES and not self._allow_reserved:
             raise ValueError(
-                f"namespace {self.namespace!r} is reserved by agentix-core",
+                f"namespace {self.namespace!r} is reserved by agentix-core "
+                f"(use your own '/<package-name>' namespace instead)",
             )
         self._handlers: dict[str, list[Handler]] = {}
         self._pending_requests: dict[str, asyncio.Future] = {}
@@ -165,6 +171,16 @@ class Namespace:
         handlers = self._handlers.get(event, [])
         if handler in handlers:
             handlers.remove(handler)
+
+    def registered_handlers(self) -> dict[str, list[Handler]]:
+        """Snapshot of `event -> [handlers]` registered on this namespace.
+
+        Includes auto-registered `on_<event>` methods and any added via
+        `on(...)`. Handy when debugging a handler that never fires — e.g. a
+        typo in an `on_<event>` method name silently leaves the event with
+        no handler.
+        """
+        return {event: list(handlers) for event, handlers in self._handlers.items()}
 
     async def request(
         self,
@@ -263,6 +279,23 @@ _STREAM_ACK_EVENT = "_ack"
 _STREAM_RESUME_EVENT = "_resume"
 
 
+def _env_buffer(env_var: str, default: int = 10_000) -> int:
+    """Positive int from `env_var`, or `default` when unset/invalid.
+
+    Lets the `/log` and `/trace` bridges size their `ReliableStream`
+    buffers (`AGENTIX_LOG_BUFFER` / `AGENTIX_TRACE_BUFFER`) without
+    forking agentix when a high-volume workload needs a deeper buffer.
+    """
+    raw = os.environ.get(env_var)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
 class ReliableStream:
     """Wraps a sandbox-side `Namespace` to give it at-least-once,
     reconnect-safe delivery for fire-and-forget event streams.
@@ -272,11 +305,14 @@ class ReliableStream:
       - **Sequence**: every emit gets a strictly monotonic `_seq`.
       - **Buffer**: emits are kept in a bounded ring until acked.
       - **Ordering**: replay preserves emit order.
-      - **At-least-once**: across reconnects, the host gets every
-        event since its last ack — possibly with duplicates if the
-        host already saw an event but disconnected before its ack
+      - **At-least-once (bounded)**: across reconnects, the host gets
+        every event since its last ack — possibly with duplicates if
+        the host already saw an event but disconnected before its ack
         reached the sandbox. Duplicates are detected on the host by
-        comparing `_seq` to the last delivered.
+        comparing `_seq` to the last delivered. The guarantee holds for
+        up to `max_buffer` unacked events; if the host falls further
+        behind, the oldest unacked events are evicted (logged at
+        WARNING) and at-least-once is degraded for those events.
 
     Wire envelope: `{"_seq": N, "data": <event payload>}`. The host
     extracts `data` after dedup. New events outside this envelope are
@@ -291,6 +327,7 @@ class ReliableStream:
     ) -> None:
         self._ns = namespace
         self._next_seq = 1
+        self._dropped = 0
         self._buffer: collections.deque[tuple[int, str, dict[str, Any]]] = collections.deque(
             maxlen=max_buffer,
         )
@@ -311,6 +348,21 @@ class ReliableStream:
         return self.emit_nowait(event, data)
 
     def _wrap(self, event: str, data: Any) -> tuple[int, dict[str, Any]]:
+        maxlen = self._buffer.maxlen
+        if maxlen is not None and len(self._buffer) >= maxlen:
+            # Buffer full: this append evicts the oldest *unacked* event,
+            # so at-least-once is degraded until the host catches up.
+            # Surface it instead of dropping silently.
+            self._dropped += 1
+            if self._dropped == 1 or self._dropped % 1000 == 0:
+                logger.warning(
+                    "ReliableStream %s buffer full (max_buffer=%d): dropping oldest "
+                    "unacked events; at-least-once delivery degraded (dropped=%d). "
+                    "Raise AGENTIX_LOG_BUFFER / AGENTIX_TRACE_BUFFER or ack faster.",
+                    self._ns.namespace,
+                    maxlen,
+                    self._dropped,
+                )
         seq = self._next_seq
         self._next_seq += 1
         wrapped = {"_seq": seq, "data": data}

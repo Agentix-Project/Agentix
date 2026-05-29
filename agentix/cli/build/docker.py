@@ -20,7 +20,19 @@ from pathlib import Path
 
 from agentix.cli.build.platform import normalize_platform
 
-_PROXY_BUILD_ARG_NAMES = ("http_proxy", "https_proxy", "no_proxy", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY")
+# Host env vars that, when present, are forwarded into the build container
+# verbatim as `--build-arg KEY=VALUE`. They're declared as `ARG` in the
+# Dockerfile and propagated to subsequent `RUN` steps via matching `ENV`.
+#
+#   NIX_CONFIG            Nix's official `nix.conf` override hatch — covers
+#                         substituters, trusted-public-keys, timeouts, and
+#                         every other setting in one knob.
+#   AGENTIX_BUILDER_BASE  Builder base image, used directly in `FROM`.
+#
+# HTTP proxies are intentionally not in this list: Docker BuildKit reads
+# them from `~/.docker/config.json`'s `proxies` section, which is the
+# durable, daemon-level place to configure them.
+_ENV_BUILD_ARG_NAMES = ("NIX_CONFIG", "AGENTIX_BUILDER_BASE")
 
 
 @dataclass(frozen=True)
@@ -30,9 +42,6 @@ class ContainerBuildConfig:
     container_bin: str = "docker"
     container_args: tuple[str, ...] = ()
     container_run_args: tuple[str, ...] = ()
-    builder_base: str | None = None
-    nix_substituters: tuple[str, ...] = ()
-    nix_trusted_public_keys: tuple[str, ...] = ()
 
 
 def _run(
@@ -44,7 +53,14 @@ def _run(
 ) -> subprocess.CompletedProcess:
     """Run a subprocess, echoing the command; raise SystemExit on failure."""
     print(f"$ {' '.join(cmd)}", file=sys.stderr)
-    proc = subprocess.run(cmd, cwd=cwd, capture_output=capture, text=True)
+    try:
+        proc = subprocess.run(cmd, cwd=cwd, capture_output=capture, text=True)
+    except FileNotFoundError as exc:
+        raise SystemExit(
+            f"container build CLI {cmd[0]!r} not found on PATH. Install Docker "
+            f"(https://docs.docker.com/get-docker/) or Podman "
+            f"(https://podman.io/docs/installation), or pass --container-bin."
+        ) from exc
     if check and proc.returncode != 0:
         if capture:
             sys.stderr.write(proc.stderr or "")
@@ -64,25 +80,14 @@ def _build_container_run_args(config: ContainerBuildConfig | None = None) -> lis
     return list((config or ContainerBuildConfig()).container_run_args)
 
 
-def _proxy_build_args() -> list[str]:
+def _env_build_args() -> list[str]:
+    """Forward known host env vars into the build as `--build-arg KEY=VALUE`."""
     return [
         arg
-        for name in _PROXY_BUILD_ARG_NAMES
+        for name in _ENV_BUILD_ARG_NAMES
         if (value := os.environ.get(name))
         for arg in ("--build-arg", f"{name}={value}")
     ]
-
-
-def _nix_build_args(config: ContainerBuildConfig | None = None) -> list[str]:
-    config = config or ContainerBuildConfig()
-    args: list[str] = []
-    if config.builder_base:
-        args.extend(["--build-arg", f"AGENTIX_BUILDER_BASE={config.builder_base}"])
-    if config.nix_substituters:
-        args.extend(["--build-arg", f"AGENTIX_NIX_SUBSTITUTERS={' '.join(config.nix_substituters)}"])
-    if config.nix_trusted_public_keys:
-        args.extend(["--build-arg", f"AGENTIX_NIX_TRUSTED_PUBLIC_KEYS={' '.join(config.nix_trusted_public_keys)}"])
-    return args
 
 
 def _docker_build_image(
@@ -108,8 +113,7 @@ def _docker_build_image(
             normalize_platform(platform),
             "--load",
             *_build_container_args(config),
-            *_proxy_build_args(),
-            *_nix_build_args(config),
+            *_env_build_args(),
             *tags_args,
             "--build-arg",
             f"AGENTIX_PROJECT_SUBPATH={project_subpath}",
@@ -123,8 +127,7 @@ def _docker_build_image(
             "--platform",
             normalize_platform(platform),
             *_build_container_args(config),
-            *_proxy_build_args(),
-            *_nix_build_args(config),
+            *_env_build_args(),
             *tags_args,
             "--build-arg",
             f"AGENTIX_PROJECT_SUBPATH={project_subpath}",

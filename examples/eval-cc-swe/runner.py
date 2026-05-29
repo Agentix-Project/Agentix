@@ -3,14 +3,14 @@
 Per instance, two sandboxes back-to-back:
 
     1. Agent sandbox (base = `swebench/sweb.eval.x86_64.<id>:latest`)
-         - register `agentix.bridge.anthropic.OpenAIGateway` on the host RuntimeClient
-         - c.remote(agentix.plugins.datasets.swe.prepare_env, /testbed, base_commit)
-         - c.remote(agentix.bridge.anthropic.start_service, ...)
-         - c.remote(agentix.agents.claude_code.run, ..., anthropic_base_url=svc.url)
-         - c.remote(runner.get_patch, /testbed)
+         - register `agentix.bridge.anthropic.OpenAIGateway` on the host sandbox
+         - sandbox.remote(agentix.plugins.datasets.swe.prepare_env, /testbed, base_commit)
+         - sandbox.remote(agentix.bridge.anthropic.start_service, ...)
+         - sandbox.remote(agentix.agents.claude_code.run, ..., anthropic_base_url=svc.url)
+         - sandbox.remote(runner.get_patch, /testbed)
 
     2. Score sandbox (fresh container, no LLM gateway)
-         - c.remote(agentix.plugins.datasets.swe.score, instance=..., patch=...)
+         - sandbox.remote(agentix.plugins.datasets.swe.score, instance=..., patch=...)
 
 Host wires an `openai.AsyncOpenAI` client into `AnthropicGateway` so
 the actual provider call (model-eval, OpenRouter, etc.) lives on the
@@ -34,12 +34,11 @@ from pathlib import Path
 import agentix.agents.claude_code as cc
 import agentix.bridge.anthropic
 import agentix.plugins.datasets.swe as swe
-from agentix.deployment.docker import DockerDeployment
+from agentix.provider.docker import DockerProvider
 from datasets import load_dataset
 from openai import AsyncOpenAI
 
-from agentix import RuntimeClient
-from agentix.deployment.base import SandboxConfig, session
+from agentix.provider.base import SandboxConfig
 from agentix.utils.log import configure_logging
 
 WORKDIR = "/testbed"
@@ -98,45 +97,43 @@ async def _run_agent_phase(
         upstream_model=upstream_model,
     )
 
-    async with session(DockerDeployment(), cfg) as sandbox:
-        client = RuntimeClient(sandbox.runtime_url)
-        client.register_namespace(gateway)
-        async with client as c:
-            prepared = await c.remote(
-                swe.prepare_env,
-                workdir=WORKDIR,
-                base_commit=inst["base_commit"],
-            )
-            if not prepared.ok:
-                print(f"[{iid}] prepare-env failed:\n{prepared.log[-500:]}")
-                return {"instance_id": iid, "skipped": "prepare_env_failed"}
-            print(f"[{iid}] HEAD={prepared.head[:12]}")
+    async with DockerProvider().session(cfg) as sandbox:
+        sandbox.register_namespace(gateway)
+        prepared = await sandbox.remote(
+            swe.prepare_env,
+            workdir=WORKDIR,
+            base_commit=inst["base_commit"],
+        )
+        if not prepared.ok:
+            print(f"[{iid}] prepare-env failed:\n{prepared.log[-500:]}")
+            return {"instance_id": iid, "skipped": "prepare_env_failed"}
+        print(f"[{iid}] HEAD={prepared.head[:12]}")
 
-            svc = await c.remote(
-                agentix.bridge.anthropic.start_service,
-                response_model=response_model,
-            )
-            print(f"[{iid}] abridge service at {svc.url}")
+        svc = await sandbox.remote(
+            agentix.bridge.anthropic.start_service,
+            response_model=response_model,
+        )
+        print(f"[{iid}] abridge service at {svc.url}")
 
-            print(f"[{iid}] running claude (model={response_model})")
-            cc_res = await c.remote(
-                cc.run,
-                instruction=inst["problem_statement"],
-                workdir=WORKDIR,
-                timeout=cc_timeout,
-                max_turns=max_turns,
-                anthropic_base_url=svc.url,
-                anthropic_model=response_model,
-            )
-            print(f"[{iid}] claude exit={cc_res.exit_code}")
-            if cc_res.stderr_tail:
-                print(f"[{iid}] stderr_tail:\n{cc_res.stderr_tail.rstrip()}")
+        print(f"[{iid}] running claude (model={response_model})")
+        cc_res = await sandbox.remote(
+            cc.run,
+            instruction=inst["problem_statement"],
+            workdir=WORKDIR,
+            timeout=cc_timeout,
+            max_turns=max_turns,
+            anthropic_base_url=svc.url,
+            anthropic_model=response_model,
+        )
+        print(f"[{iid}] claude exit={cc_res.exit_code}")
+        if cc_res.stderr_tail:
+            print(f"[{iid}] stderr_tail:\n{cc_res.stderr_tail.rstrip()}")
 
-            patch = await c.remote(get_patch, workdir=WORKDIR)
-            try:
-                await c.remote(agentix.bridge.anthropic.stop_service, handle=svc)
-            except Exception:
-                pass
+        patch = await sandbox.remote(get_patch, workdir=WORKDIR)
+        try:
+            await sandbox.remote(agentix.bridge.anthropic.stop_service, handle=svc)
+        except Exception:
+            pass
 
     return {"instance_id": iid, "patch": patch, "claude_exit": cc_res.exit_code}
 
@@ -154,7 +151,7 @@ async def _score_patch(
     eval_timeout: float,
     out_dir: Path,
 ) -> dict:
-    """Run client2: prepare a fresh SWE image and score `patch`."""
+    """Run the score sandbox: prepare a fresh SWE image and score `patch`."""
     iid = inst["instance_id"]
     base_image = _instance_image(
         inst,
@@ -182,15 +179,14 @@ async def _score_patch(
     cfg = SandboxConfig(image=base_image, bundle=bundle, platform=docker_platform)
     print(f"[{iid}] score sandbox: {base_image}")
     print(f"[{iid}] patch_bytes={len(patch)}")
-    async with session(DockerDeployment(), cfg) as sandbox:
-        async with RuntimeClient(sandbox.runtime_url) as c:
-            ev = await c.remote(
-                swe.score,
-                instance=inst,
-                patch=patch,
-                workdir=WORKDIR,
-                eval_timeout=eval_timeout,
-            )
+    async with DockerProvider().session(cfg) as sandbox:
+        ev = await sandbox.remote(
+            swe.score,
+            instance=inst,
+            patch=patch,
+            workdir=WORKDIR,
+            eval_timeout=eval_timeout,
+        )
 
     result = dict(ev)
     summary = {

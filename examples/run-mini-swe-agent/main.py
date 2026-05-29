@@ -7,14 +7,14 @@ import asyncio
 import os
 
 import agentix.agents.mini_swe_agent as mini_swe
-from agentix.deployment.docker import DockerDeployment
+from agentix.bash import run
+from agentix.provider.docker import DockerProvider
 from minisweagent.agents.default import AgentConfig, DefaultAgent
 from minisweagent.config import get_config_from_spec
 from minisweagent.environments.local import LocalEnvironment, LocalEnvironmentConfig
 from minisweagent.models.litellm_model import LitellmModel, LitellmModelConfig
 
-from agentix import RuntimeClient, bash
-from agentix.deployment.base import SandboxConfig, session
+from agentix.provider.base import Sandbox, SandboxConfig
 from agentix.utils.log import configure_logging
 
 DEFAULT_IMAGE = "python:3.13-slim"
@@ -44,37 +44,36 @@ async def main() -> None:
     args = parse_args()
     configure_logging(default_context="host")
     cfg = SandboxConfig(image=args.image, bundle=args.bundle, platform=args.platform)
-    async with session(DockerDeployment(), cfg) as sandbox:
+    async with DockerProvider().session(cfg) as sandbox:
         print(f"runtime_url={sandbox.runtime_url}", flush=True)
-        async with RuntimeClient(sandbox.runtime_url, timeout=args.timeout + 180) as client:
-            await prepare_workspace(client, args.workdir)
-            try:
-                agent = build_agent(
-                    model_name=args.model,
-                    api_key=os.environ["OPENAI_API_KEY"],
-                    api_base=os.environ["OPENAI_BASE_URL"],
-                    workdir=args.workdir,
-                )
-                result = await client.remote(
-                    mini_swe.run,
-                    task=args.task,
-                    workdir=args.workdir,
-                    agent=agent,
-                )
-            except Exception as exc:
-                print("mini_run_error:", flush=True)
-                print(f"{type(exc).__name__}: {exc}", flush=True)
-                await print_verification(client, args.workdir)
-                return
-            print(f"mini_exit_status={result.get('exit_status', 'unknown')}", flush=True)
-            submission = str(result.get("submission", ""))
-            if submission:
-                print("mini_submission:", flush=True)
-                print(submission.rstrip(), flush=True)
-            await print_verification(client, args.workdir)
+        await prepare_workspace(sandbox, args.workdir)
+        try:
+            agent = build_agent(
+                model_name=args.model,
+                api_key=os.environ["OPENAI_API_KEY"],
+                api_base=os.environ["OPENAI_BASE_URL"],
+                workdir=args.workdir,
+            )
+            result = await sandbox.remote(
+                mini_swe.run,
+                task=args.task,
+                workdir=args.workdir,
+                agent=agent,
+            )
+        except Exception as exc:
+            print("mini_run_error:", flush=True)
+            print(f"{type(exc).__name__}: {exc}", flush=True)
+            await print_verification(sandbox, args.workdir)
+            return
+        print(f"mini_exit_status={result.get('exit_status', 'unknown')}", flush=True)
+        submission = str(result.get("submission", ""))
+        if submission:
+            print("mini_submission:", flush=True)
+            print(submission.rstrip(), flush=True)
+        await print_verification(sandbox, args.workdir)
 
 
-async def prepare_workspace(client: RuntimeClient, workdir: str) -> None:
+async def prepare_workspace(sandbox: Sandbox, workdir: str) -> None:
     command = f"""
 set -eu
 rm -rf {shell_quote(workdir)}
@@ -84,12 +83,12 @@ def subtract(a, b):
     return a - b
 PY
 """
-    result = await client.remote(bash.run, command=command, timeout=30)
+    result = await sandbox.remote(run, command=command, timeout=30)
     if result.exit_code != 0:
         raise RuntimeError(f"workspace preparation failed:\n{result.stderr}\n{result.stdout}")
 
 
-async def print_verification(client: RuntimeClient, workdir: str) -> None:
+async def print_verification(sandbox: Sandbox, workdir: str) -> None:
     command = """
 set -eu
 python - <<'PY'
@@ -97,7 +96,7 @@ from math_utils import add, subtract
 print("verify", add(2, 3), subtract(5, 2))
 PY
 """
-    result = await client.remote(bash.run, command=command, cwd=workdir, timeout=30)
+    result = await sandbox.remote(run, command=command, cwd=workdir, timeout=30)
     print("verification_exit", result.exit_code, flush=True)
     print("verification_stdout:", flush=True)
     print(result.stdout.rstrip(), flush=True)

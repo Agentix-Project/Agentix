@@ -1,6 +1,6 @@
-"""Plugin registry for the `agentix.deployment` entry-point group.
+"""Plugin registry for the `agentix.provider` entry-point group.
 
-Lives under `agentix.deployment` because deployments are the only
+Lives under `agentix.provider` because deployments are the only
 framework axis discovered via entry points. Remote callables do not need
 a framework registry; only sandbox lifecycle backends need a name-to-class
 registry.
@@ -28,7 +28,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
-logger = logging.getLogger("agentix.deployment.plugin")
+logger = logging.getLogger("agentix.provider.plugin")
 
 T = TypeVar("T")
 
@@ -60,7 +60,7 @@ class Registry(Generic[T]):
     """One `agentix.<axis>` entry-point group + in-process `register()`.
 
     `T` is whatever the entry-point load resolves to — typically a class
-    (`type[Deployment]`) or a callable factory. The registry doesn't
+    (`type[SandboxProvider]`) or a callable factory. The registry doesn't
     instantiate anything; callers decide what to do with the loaded
     value. This keeps the contract narrow: T's shape is the axis's
     Protocol; how it gets instantiated is the axis's concern.

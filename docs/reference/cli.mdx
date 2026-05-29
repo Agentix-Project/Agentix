@@ -3,17 +3,20 @@ title: CLI reference
 description: Build and deploy bundle artifacts.
 ---
 
-The Agentix CLI has two verbs:
+The Agentix CLI has two core verbs plus a read-only inspector:
 
 - `agentix build` turns a Python project into a deploy-ready runtime
   bundle tar.
 - `agentix deploy` materializes that portable tar for a deployment
   backend.
+- `agentix plugin list` lists the installed deployment backends and
+  whether each one loads.
 
 ```bash
 agentix --help
 agentix build --help
 agentix deploy --help
+agentix plugin --help
 ```
 
 ## `agentix build`
@@ -49,14 +52,17 @@ remote x86 sandbox.
 ### Dependency Model
 
 The CLI never enumerates integrations. It installs the project into the
-runtime venv, and pip resolves everything declared by the project.
+runtime venv, and `uv sync` resolves and installs everything declared by
+the project. The in-container build runs
+`uv sync --frozen --no-dev --no-editable`, so the bundle gets the locked,
+production-only dependency closure.
 
 ```toml title="pyproject.toml"
 [project]
 name = "my-rollout"
 version = "0.1.0"
 dependencies = [
-    "agentixx>=0.1.0",
+    "agentixx>=0.2.0",
     "agentix-runtime-basic>=0.1.0",
     "agentix-agent-claude-code>=0.1.0",
     "agentix-dataset-swe>=0.1.0",
@@ -92,12 +98,20 @@ path as `SandboxConfig.bundle`.
 
 | Option | Meaning |
 | --- | --- |
-| `backend` | Deployment backend name, e.g. `docker` or `podman` |
+| `backend` | SandboxProvider backend name, e.g. `docker` or `podman` |
 | `bundle` | Bundle tar produced by `agentix build` |
 | `-n`, `--name` | Optional backend bundle label |
 | `--platform` | Optional runtime platform; defaults to manifest platform |
 | `--container-bin` | Docker-compatible CLI override |
 | `--run-arg` | Extra argument for Docker-compatible runtime containers; repeatable |
+| `--format` | Output format: `text` (default) or `json` (`{"bundle","platform","metadata"}`) |
+
+With `--format json`, deploy prints a machine-readable object so the
+cache path can be read with `jq` instead of parsed from text:
+
+```bash
+BUNDLE=$(agentix deploy docker dist/my-rollout.bundle.tar --format json | jq -r .bundle)
+```
 
 ### Bundle Tar
 
@@ -114,6 +128,19 @@ unpack this tar into their cache and bind it into task containers.
 The transient build image used to produce the tar is kept locally under
 an `agentix-bundle-cache:*` tag and overwritten on later builds, so the
 container builder can reuse it for incremental builds.
+
+## `agentix plugin`
+
+A read-only inspector for the installed deployment backends.
+
+```bash
+agentix plugin list
+```
+
+`agentix plugin list` enumerates every deployment backend discovered
+through the `agentix.provider` entry-point group and reports whether
+each one loaded OK or failed to import. Use it to confirm a backend such
+as `docker` or `podman` is installed and importable before you deploy.
 
 ## Configuration
 

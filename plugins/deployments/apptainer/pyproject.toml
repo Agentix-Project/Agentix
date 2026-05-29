@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Apptainer (Singularity) deployment backend for Agentix (registers the `apptainer` backend)"
 requires-python = ">=3.11"
 dependencies = [
-    # Protocol + dataclasses (`Deployment`, `Sandbox`, `SandboxConfig`,
+    # Protocol + dataclasses (`SandboxProvider`, `Sandbox`, `SandboxConfig`,
     # `SandboxInfo`, `SandboxId`) all live in core agentix. The
     # backend's loopback health check uses raw asyncio sockets, so we
     # don't pull in httpx here — it would otherwise honor environment
@@ -22,8 +22,8 @@ agentixx = { workspace = true }
 
 # `uv sync` makes `load_deployment("apptainer")` work with zero framework
 # changes — the registry walks this entry-point group.
-[project.entry-points."agentix.deployment"]
-apptainer = "agentix.deployment.apptainer:ApptainerDeployment"
+[project.entry-points."agentix.provider"]
+apptainer = "agentix.provider.apptainer:ApptainerProvider"
 
 [tool.hatch.build.targets.wheel]
 # One file at `agentix/deployment/apptainer.py`. The `agentix` and

@@ -39,6 +39,7 @@ DISPATCH_CALL_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 
 class _WorkerTraceNamespace(_sio.Namespace):
     namespace = NAMESPACE
+    _allow_reserved = True
 
 
 class _ForwardProcessor(trace.Processor):
@@ -46,7 +47,7 @@ class _ForwardProcessor(trace.Processor):
 
     def __init__(self, ns: _sio.Namespace) -> None:
         self._ns = ns
-        self._stream = _sio.ReliableStream(ns)
+        self._stream = _sio.ReliableStream(ns, max_buffer=_sio._env_buffer("AGENTIX_TRACE_BUFFER"))
 
     def on_trace_start(self, t: trace.Trace) -> None:
         self._emit(

@@ -68,7 +68,7 @@ extension model.
 | `agentix.runtime.shared` | Wire models, msgpack codec, framing, `RemoteCallable`, `CallId` |
 | `agentix.runtime.client` | `RuntimeClient.remote(fn, ...)` and host-side namespace handlers |
 | `agentix.runtime.server` | FastAPI and Socket.IO server, worker process management, namespace forwarding |
-| `agentix.deployment` | Host-side sandbox lifecycle protocol and backend plugin lookup |
+| `agentix.provider` | Host-side sandbox lifecycle protocol and backend plugin lookup |
 | `agentix.cli` | `agentix build` |
 | `agentix.sio` | Sandbox-side namespace API bridged over the worker pipe |
 
@@ -118,28 +118,31 @@ blobs inside `call:result`.
 
 ## Bundle Layout
 
-`agentix build [path]` installs one Python project into the runtime venv:
+`agentix build [path]` installs one Python project into the runtime venv
+with uv (uv owns Python; Nix owns system binaries — there is no `pip`):
 
 ```bash
-/nix/runtime/bin/pip install --no-cache-dir /src/project
+uv venv /nix/runtime/venv
+VIRTUAL_ENV=/nix/runtime/venv uv sync --active --frozen --no-dev --no-editable
 ```
 
-The install brings in user code, direct dependencies, transitive
+The sync brings in user code, direct dependencies, transitive
 dependencies, and integration packages declared in `pyproject.toml`.
+
+The runtime tree is the uv venv plus a `symlinkJoin` of the Nix
+closures (interpreter, uv, and any system deps):
 
 ```text
 /nix/runtime/
-├── bootstrap.sh           # container entry point (deployment backends exec this)
-├── bin/
-│   ├── python
-│   └── pip
-└── venv/
-    └── lib/python3.11/site-packages/
-        ├── agentix/
-        ├── agentix/bash/
-        ├── agentix/agents/claude_code/
-        ├── agentix/plugins/datasets/swe/
-        └── app.py
+├── bootstrap.sh           # container entry point (provider backends exec this)
+├── venv/                  # the uv venv — all Python deps live here
+│   └── lib/python3.11/site-packages/
+│       ├── agentix/
+│       ├── agentix/bash/
+│       ├── agentix/agents/claude_code/
+│       ├── agentix/plugins/datasets/swe/
+│       └── app.py
+└── {bin,lib,...}/         # symlinkJoin of every Nix closure
 ```
 
 If the project includes `default.nix`, the build adds a Nix builder stage
@@ -169,21 +172,38 @@ events between host-side `AsyncClientNamespace` handlers and worker-side
 The worker uses the same `/nix/runtime` environment as the runtime
 server, so anything installed into the bundle can be imported on demand.
 
-## Deployment Boundary
+## SandboxProvider Boundary
 
-Deployments are host-side plugins that stage a bundle and start the
-sandbox. They return a `runtime_url`; after that, the runtime protocol
-is the same regardless of where the sandbox is running.
+A `SandboxProvider` is a host-side plugin that stages a bundle and starts
+the sandbox. `provider.create(...)` returns a live `Sandbox` handle; call
+`await sandbox.remote(fn, ...)` directly. The runtime protocol is the same
+regardless of where the sandbox is running.
 
 ```text
-Deployment.create(SandboxConfig(image="python:3.13-slim", bundle="/home/me/.cache/agentix/bundles/sha256-..."))
+SandboxProvider.create(SandboxConfig(image="python:3.13-slim", bundle="/home/me/.cache/agentix/bundles/sha256-..."))
         |
         v
-Sandbox(runtime_url="http://...")
+Sandbox(sandbox_id=..., runtime_url="http://...")   # live handle
         |
         v
-RuntimeClient(runtime_url)
+await sandbox.remote(fn, ...)
 ```
+
+The scoped form constructs the provider, opens a session, and tears down
+both the runtime connection and the container on exit:
+
+```python
+from agentix.provider.docker import DockerProvider, DockerProviderConfig
+
+provider = DockerProvider(DockerProviderConfig())
+async with provider.session(SandboxConfig(image=..., bundle=...)) as sandbox:
+    result = await sandbox.remote(run, input="hello")
+```
+
+`RuntimeClient(runtime_url)` still exists as the underlying transport for
+advanced, direct use against a known `runtime_url` (for example, an
+in-process server). The sandbox path uses `sandbox.remote` rather than a
+nested `RuntimeClient`.
 
 ## Mental Model
 
@@ -192,5 +212,5 @@ Bundle = what code and dependencies exist in the sandbox
 Remote call = which importable function to call
 Worker = where user code executes
 agentix.sio = sandbox ↔ host side channels (trace, log, plugins)
-Deployment = where the bundle is staged and run
+SandboxProvider = where the bundle is staged and run
 ```

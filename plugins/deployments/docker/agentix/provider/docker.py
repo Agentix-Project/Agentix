@@ -27,7 +27,7 @@ Design:
   health-check `/health` on it.
 
   The backend defaults to the `docker` CLI. Podman can be selected with
-  `DockerDeploymentConfig(container_bin="podman", ...)` when it
+  `DockerProviderConfig(container_bin="podman", ...)` when it
   provides the Docker-compatible commands this backend needs.
 """
 
@@ -50,18 +50,18 @@ from uuid import uuid4
 import httpx
 from pydantic import BaseModel, Field, field_validator
 
-from agentix.deployment.base import (
-    Deployment,
+from agentix.provider.base import (
     MaterializedBundle,
     Sandbox,
     SandboxConfig,
     SandboxId,
     SandboxInfo,
+    SandboxProvider,
     SandboxResource,
 )
 from agentix.runtime import BIND_HOST_ENV, BIND_PORT_ENV, BUNDLE_NIX_ROOT, BUNDLE_RUNTIME_ENTRYPOINT
 
-logger = logging.getLogger("agentix.deployment.docker")
+logger = logging.getLogger("agentix.provider.docker")
 
 
 def _split_shell_args(value: str, label: str) -> list[str]:
@@ -71,7 +71,7 @@ def _split_shell_args(value: str, label: str) -> list[str]:
         raise RuntimeError(f"{label} must contain shell-style arguments: {exc}") from exc
 
 
-class DockerDeploymentConfig(BaseModel):
+class DockerProviderConfig(BaseModel):
     """Docker-compatible CLI settings for the deployment backend."""
 
     container_bin: str = Field(
@@ -124,35 +124,39 @@ class DockerDeploymentConfig(BaseModel):
             return _split_shell_args(value, "deployment gpu_args")
         return value
 
+    def to_provider(self) -> DockerProvider:
+        """Construct a `DockerProvider` from this config."""
+        return DockerProvider(self)
 
-def _default_config(config: DockerDeploymentConfig | None = None) -> DockerDeploymentConfig:
-    return config or DockerDeploymentConfig()
+
+def _default_config(config: DockerProviderConfig | None = None) -> DockerProviderConfig:
+    return config or DockerProviderConfig()
 
 
-def _container_bin(config: DockerDeploymentConfig | None = None) -> str:
+def _container_bin(config: DockerProviderConfig | None = None) -> str:
     return _default_config(config).container_bin
 
 
-def _port_mapping(port: int, config: DockerDeploymentConfig | None = None) -> str:
+def _port_mapping(port: int, config: DockerProviderConfig | None = None) -> str:
     host = _default_config(config).publish_host
     if not host:
         return f"{port}:{port}"
     return f"{host}:{port}:{port}"
 
 
-def _network_args(config: DockerDeploymentConfig | None = None) -> list[str]:
+def _network_args(config: DockerProviderConfig | None = None) -> list[str]:
     network = _default_config(config).network
     if not network:
         return []
     return ["--network", network]
 
 
-def _network_uses_host_ports(config: DockerDeploymentConfig | None = None) -> bool:
+def _network_uses_host_ports(config: DockerProviderConfig | None = None) -> bool:
     network = _default_config(config).network
     return network == "host" or bool(network and network.startswith("host:"))
 
 
-def _publish_args(port: int, config: DockerDeploymentConfig | None = None) -> list[str]:
+def _publish_args(port: int, config: DockerProviderConfig | None = None) -> list[str]:
     if _network_uses_host_ports(config):
         return []
     return ["-p", _port_mapping(port, config)]
@@ -162,14 +166,14 @@ def _format_cpu(cpu: float) -> str:
     return str(int(cpu)) if cpu.is_integer() else str(cpu)
 
 
-def _gpu_args(gpu: int, config: DockerDeploymentConfig | None = None) -> list[str]:
+def _gpu_args(gpu: int, config: DockerProviderConfig | None = None) -> list[str]:
     template = _default_config(config).gpu_args
     if template is None:
         return ["--gpus", str(gpu)]
     return [arg.format(gpu=gpu) for arg in template]
 
 
-def _resource_args(resource: SandboxResource | None, config: DockerDeploymentConfig | None = None) -> list[str]:
+def _resource_args(resource: SandboxResource | None, config: DockerProviderConfig | None = None) -> list[str]:
     if resource is None:
         return []
     args: list[str] = []
@@ -229,7 +233,7 @@ def _bundle_digest(manifest: dict[str, object], bundle_tar: Path) -> str:
     return h.hexdigest()
 
 
-def _bundle_cache_base(config: DockerDeploymentConfig | None = None) -> Path:
+def _bundle_cache_base(config: DockerProviderConfig | None = None) -> Path:
     configured = _default_config(config).bundle_cache_dir
     if configured is not None:
         return configured.expanduser()
@@ -239,7 +243,7 @@ def _bundle_cache_base(config: DockerDeploymentConfig | None = None) -> Path:
 def _bundle_cache_root(
     manifest: dict[str, object],
     bundle_tar: Path,
-    config: DockerDeploymentConfig | None = None,
+    config: DockerProviderConfig | None = None,
 ) -> Path:
     return _bundle_cache_base(config) / f"sha256-{_bundle_digest(manifest, bundle_tar)}"
 
@@ -345,7 +349,7 @@ def _nix_mount_args(bundle: str) -> list[str]:
 
 async def _docker(
     *args: str,
-    config: DockerDeploymentConfig | None = None,
+    config: DockerProviderConfig | None = None,
     check: bool = True,
     retries: int = 0,
 ) -> tuple[int, bytes, bytes]:
@@ -353,12 +357,19 @@ async def _docker(
     delay = 2.0
     bin_name = _container_bin(config)
     while True:
-        proc = await asyncio.create_subprocess_exec(
-            bin_name,
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                bin_name,
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                f"container CLI {bin_name!r} not found on PATH. Install Docker "
+                f"(https://docs.docker.com/get-docker/) or Podman "
+                f"(https://podman.io/docs/installation), or set container_bin."
+            ) from exc
         stdout, stderr = await proc.communicate()
         rc = proc.returncode or 0
         if not check or rc == 0:
@@ -393,10 +404,10 @@ def _is_transient_docker_error(stderr: bytes) -> bool:
     )
 
 
-class DockerDeployment(Deployment):
+class DockerProvider(SandboxProvider):
     """Sandbox CRUD via local Docker."""
 
-    def __init__(self, config: DockerDeploymentConfig | None = None):
+    def __init__(self, config: DockerProviderConfig | None = None):
         self.config = _default_config(config)
         self._ports: dict[SandboxId, int] = {}  # sandbox_id → host port
 
@@ -510,11 +521,11 @@ class DockerDeployment(Deployment):
         logger.info("Deleted sandbox %s", sandbox_id)
 
 
-class PodmanDeployment:
-    """Docker-compatible deployment configured to use the Podman CLI."""
+class PodmanProvider(SandboxProvider):
+    """Docker-compatible provider configured to use the Podman CLI."""
 
-    def __init__(self, config: DockerDeploymentConfig | None = None):
-        self._deployment = DockerDeployment(config or DockerDeploymentConfig(container_bin="podman"))
+    def __init__(self, config: DockerProviderConfig | None = None):
+        self._deployment = DockerProvider(config or DockerProviderConfig(container_bin="podman"))
 
     async def materialize_bundle(
         self,
@@ -535,4 +546,4 @@ class PodmanDeployment:
         return await self._deployment.get(sandbox_id)
 
 
-__all__ = ["DockerDeployment", "DockerDeploymentConfig", "PodmanDeployment"]
+__all__ = ["DockerProvider", "DockerProviderConfig", "PodmanProvider"]

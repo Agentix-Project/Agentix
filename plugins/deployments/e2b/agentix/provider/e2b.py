@@ -15,10 +15,10 @@ from __future__ import annotations
 
 import os
 
-from agentix.deployment.base import Sandbox, SandboxConfig, SandboxId, SandboxInfo
+from agentix.provider.base import Sandbox, SandboxConfig, SandboxId, SandboxInfo, SandboxProvider
 
 
-class E2BDeployment:
+class E2BProvider(SandboxProvider):
     """Sandbox CRUD via E2B (pending integration)."""
 
     def __init__(self) -> None:
@@ -27,13 +27,13 @@ class E2BDeployment:
 
     async def create(self, config: SandboxConfig) -> Sandbox:  # noqa: ARG002
         raise NotImplementedError(
-            "E2BDeployment is not wired yet. A bundle tar needs to be "
+            "E2BProvider is not wired yet. A bundle tar needs to be "
             "uploaded or unpacked into an E2B-accessible volume before "
             "sandbox creation; the API integration is on the deploy roadmap."
         )
 
     async def delete(self, sandbox_id: SandboxId) -> None:  # noqa: ARG002
-        raise NotImplementedError("E2BDeployment.delete: see create()")
+        raise NotImplementedError("E2BProvider.delete: see create()")
 
     async def get(self, sandbox_id: SandboxId) -> SandboxInfo:  # noqa: ARG002
-        raise NotImplementedError("E2BDeployment.get: see create()")
+        raise NotImplementedError("E2BProvider.get: see create()")

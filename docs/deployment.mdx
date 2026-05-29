@@ -1,12 +1,12 @@
 ---
 title: Deployments
-description: Start bundles as sandboxes and hand RuntimeClient a runtime URL.
+description: Start bundles as sandboxes and call remote functions on a live handle.
 ---
 
-A deployment backend answers one question: where should this bundle run?
+A provider backend answers one question: where should this bundle run?
 
 Remote calls decide which function runs. Bundles decide what code exists
-in the sandbox. Deployments decide where the image is started and how it
+in the sandbox. Providers decide where the image is started and how it
 is cleaned up.
 
 ## Use a Backend
@@ -14,28 +14,64 @@ is cleaned up.
 The Docker backend is the local development path:
 
 ```bash
-pip install agentix-deployment-docker
+uv add agentix-deployment-docker
 ```
 
-In code, create a deployment, pass a `SandboxConfig`, and use the
-returned `runtime_url` with `RuntimeClient`.
+In code, construct a provider, open a session with a `SandboxConfig`,
+and call `remote` directly on the returned live sandbox handle.
 
 ```python
-from agentix import RuntimeClient, SandboxConfig, session
-from agentix.deployment.docker import DockerDeployment
+from agentix import SandboxConfig
+from agentix.provider.docker import DockerProvider, DockerProviderConfig
 
-deployment = DockerDeployment()
+provider = DockerProvider(DockerProviderConfig())
 config = SandboxConfig(
     image="python:3.13-slim",
     bundle="/home/me/.cache/agentix/bundles/sha256-...",
 )
 
-async with session(deployment, config) as sandbox:
-    async with RuntimeClient(sandbox.runtime_url) as client:
-        ...
+async with provider.session(config) as sandbox:
+    result = await sandbox.remote(run, input="hello")
 ```
 
-`session(...)` creates the sandbox on entry and deletes it on exit.
+`provider.session(...)` creates the sandbox on entry, closes the runtime
+connection, and deletes the container on exit.
+
+For manual lifecycle control, create and delete the sandbox yourself:
+
+```python
+sandbox = await provider.create(config)
+try:
+    result = await sandbox.remote(run, input="hello")
+finally:
+    await sandbox.aclose()
+    await provider.delete(sandbox.sandbox_id)
+```
+
+Host-side plugin namespaces register on the sandbox before the first
+remote call:
+
+```python
+async with provider.session(config) as sandbox:
+    sandbox.register_namespace(MyHostNamespace())
+    result = await sandbox.remote(run, input="hello")
+```
+
+For plugin-agnostic code where the backend name comes from config or an
+environment variable, look the provider class up by name through the
+registry instead of a concrete import:
+
+```python
+import os
+from agentix import providers
+
+ProviderClass = providers().get(os.environ["AGENTIX_PROVIDER"])
+provider = ProviderClass()
+```
+
+To discover what is installed, `from agentix import providers;
+providers().all()` returns `{name: ProviderClass}` for every
+registered backend.
 
 If the bundle was built for a non-default architecture, pass the same
 Docker/OCI platform so the task image and runtime overlay match:
@@ -50,7 +86,7 @@ config = SandboxConfig(
 
 ## Backend Plugins
 
-Deployment packages register classes in the `agentix.deployment` entry
+SandboxProvider packages register classes in the `agentix.provider` entry
 point group.
 
 ```toml title="pyproject.toml"
@@ -58,31 +94,32 @@ point group.
 name = "agentix-deployment-fly"
 version = "0.1.0"
 
-[project.entry-points."agentix.deployment"]
-fly = "my_deploy:FlyDeployment"
+[project.entry-points."agentix.provider"]
+fly = "my_deploy:FlyProvider"
 ```
 
-After installation, the backend name becomes available to
-`load_deployment`:
+After installation, the backend name becomes available through the
+registry:
 
 ```python
-from agentix import load_deployment
+from agentix import providers
 
-FlyDeployment = load_deployment("fly")
+FlyProvider = providers().get("fly")
 ```
 
 ## Backend Protocol
 
-Backends are structural. They do not inherit a base class; they implement
-three async methods.
+Backends subclass `SandboxProvider`, implement three async methods, and
+inherit `session()`.
 
 ```python title="my_deploy/__init__.py"
 import os
 
 from agentix import Sandbox, SandboxConfig, SandboxId, SandboxInfo
+from agentix.provider.base import SandboxProvider
 
 
-class FlyDeployment:
+class FlyProvider(SandboxProvider):
     def __init__(self) -> None:
         self._token = os.environ["FLY_API_TOKEN"]
 
@@ -96,9 +133,13 @@ class FlyDeployment:
         ...
 ```
 
-Backend constructors take no arguments. Read API keys, regions, and
-templates from environment variables so CLI and code paths behave the
-same way.
+Most backends construct with no arguments, reading API keys, regions,
+and templates from environment variables so CLI and code paths behave
+the same way. A backend MAY accept its own config object — e.g.
+`DockerProvider(DockerProviderConfig(container_bin="podman"))`
+selects the container runtime, network, GPU args, and so on.
+Backend-neutral settings (`image`, `bundle`, `env`, `resource`) belong
+in `SandboxConfig`, not the backend.
 
 ## Configuration
 
@@ -113,6 +154,6 @@ error should surface before the backend starts creating infrastructure.
 
 ## Boundary
 
-Deployment backends should not know about agent wrappers, dataset
+SandboxProvider backends should not know about agent wrappers, dataset
 scorers, or remote-call targets. They only stage bundles, start
 sandboxes, and return the runtime endpoint.

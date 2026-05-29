@@ -2,13 +2,24 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
-from agentix.deployment.docker import DockerDeploymentConfig
+from agentix.provider.docker import DockerProviderConfig
 
 import agentix.cli.deploy as deploy_mod
-from agentix.deployment.base import MaterializedBundle
+from agentix.provider.base import MaterializedBundle
+
+
+class _Resolver:
+    """Stand-in for `providers()` — `.get(name)` returns the resolved class."""
+
+    def __init__(self, fn) -> None:
+        self._fn = fn
+
+    def get(self, name: str):
+        return self._fn(name)
 
 
 class FakeMaterializer:
@@ -39,7 +50,7 @@ def test_deploy_invokes_materializer(
     bundle = tmp_path / "bundle.tar"
     bundle.write_text("placeholder")
 
-    monkeypatch.setattr(deploy_mod, "load_deployment", lambda name: lambda: instance)
+    monkeypatch.setattr(deploy_mod, "providers", lambda: _Resolver(lambda name: lambda: instance))
 
     assert deploy_mod.main(["fake", str(bundle), "--name", "demo:dev", "--platform", "linux/amd64"]) == 0
 
@@ -54,21 +65,21 @@ def test_deploy_passes_docker_compatible_config(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    configs: list[DockerDeploymentConfig] = []
+    configs: list[DockerProviderConfig] = []
     bundle = tmp_path / "bundle.tar"
     bundle.write_text("placeholder")
 
-    class FakeDockerDeployment(FakeMaterializer):
-        def __init__(self, config: DockerDeploymentConfig) -> None:
+    class FakeDockerProvider(FakeMaterializer):
+        def __init__(self, config: DockerProviderConfig) -> None:
             super().__init__()
             configs.append(config)
 
-    monkeypatch.setattr(deploy_mod, "load_deployment", lambda name: FakeDockerDeployment)
+    monkeypatch.setattr(deploy_mod, "providers", lambda: _Resolver(lambda name: FakeDockerProvider))
 
     assert deploy_mod.main(["podman", str(bundle), "--run-arg", "--runtime=crun"]) == 0
 
     assert configs == [
-        DockerDeploymentConfig(
+        DockerProviderConfig(
             container_bin="podman",
             run_args=["--runtime=crun"],
         )
@@ -76,12 +87,36 @@ def test_deploy_passes_docker_compatible_config(
 
 
 def test_deploy_rejects_backend_without_materializer(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    class FakeDeployment:
+    class FakeProvider:
         pass
 
     bundle = tmp_path / "bundle.tar"
     bundle.write_text("placeholder")
-    monkeypatch.setattr(deploy_mod, "load_deployment", lambda name: FakeDeployment)
+    monkeypatch.setattr(deploy_mod, "providers", lambda: _Resolver(lambda name: FakeProvider))
 
     with pytest.raises(SystemExit, match="cannot materialize"):
         deploy_mod.main(["fake", str(bundle)])
+
+
+def test_deploy_format_json_emits_machine_readable_ref(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    instance = FakeMaterializer()
+    bundle = tmp_path / "bundle.tar"
+    bundle.write_text("placeholder")
+
+    monkeypatch.setattr(deploy_mod, "providers", lambda: _Resolver(lambda name: lambda: instance))
+
+    assert (
+        deploy_mod.main(
+            ["fake", str(bundle), "--name", "demo:dev", "--platform", "linux/amd64", "--format", "json"]
+        )
+        == 0
+    )
+
+    data = json.loads(capsys.readouterr().out)
+    assert data["bundle"] == "demo:dev"
+    assert data["platform"] == "linux/amd64"
+    assert data["metadata"]["cache"] == "/tmp/agentix-runtime-pytest"

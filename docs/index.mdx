@@ -6,30 +6,29 @@ description: The universal bridge between agents and environments.
 **The universal bridge between agents and environments.**
 
 Train, evaluate, and collect rollouts across any agent and any sandbox.
-`agentix build` packages your stack; `client.remote` runs callables inside
+`agentix build` packages your stack; `sandbox.remote` runs callables inside
 it; abridge captures trajectories for eval and RL—no custom rollout
 microservice per pairing.
 
 ```bash
-cd examples/hello-agentix
+cd examples/hello-world
 uv sync
-uv run agentix build . --name hello-agentix --output dist/hello-agentix.bundle.tar
-BUNDLE=$(uv run agentix deploy docker dist/hello-agentix.bundle.tar | awk -F' -> ' '/^bundle -> /{print $2}')
-uv run python run.py --bundle "$BUNDLE"
+uv run agentix build . --output dist/hello-world.bundle.tar
+BUNDLE=$(uv run agentix deploy docker dist/hello-world.bundle.tar --format json | jq -r .bundle)
+uv run python main.py --bundle "$BUNDLE"
 ```
 
 ```python
-from agentix import RuntimeClient, SandboxConfig, session
+from agentix import SandboxConfig
 from agentix.bash import run
-from agentix.deployment.docker import DockerDeployment
+from agentix.provider.docker import DockerProvider
 
 config = SandboxConfig(
     image="python:3.13-slim",
     bundle="/home/me/.cache/agentix/bundles/sha256-...",
 )
-async with session(DockerDeployment(), config) as sandbox:
-    async with RuntimeClient(sandbox.runtime_url) as client:
-        result = await client.remote(run, command="echo hello from $(uname -a)")
+async with DockerProvider().session(config) as sandbox:
+    result = await sandbox.remote(run, command="echo hello from $(uname -a)")
 ```
 
 The unit of composition is not a custom runner. It is a function.
@@ -39,7 +38,7 @@ The unit of composition is not a custom runner. It is a function.
 Agentix keeps the execution layer deliberately small:
 
 - **Remote calls** run an installed function inside a sandbox worker.
-  `client.remote(fn, ...)` derives the target from `fn.__module__` and
+  `sandbox.remote(fn, ...)` derives the target from `fn.__module__` and
   `fn.__qualname__`, ships args/kwargs as one pickle blob, and imports
   the function inside the worker.
 - **Bundles** package one Python project and its declared dependencies
@@ -73,16 +72,16 @@ Python, the host can call it.
 
 | You have | You expose | You call |
 | --- | --- | --- |
-| Claude Code, Codex, Aider, OpenHands, or an internal agent | `async def run(...) -> RunResult` | `await client.remote(run, ...)` |
-| Bash, file operations, repo setup, or local tools | `async def run(command: str) -> BashResult` | `await client.remote(bash_run, ...)` |
-| SWE-bench, MLE-Bench, or an internal evaluator | `async def score(...) -> Score` | `await client.remote(score, ...)` |
+| Claude Code, Codex, Aider, OpenHands, or an internal agent | `async def run(...) -> RunResult` | `await sandbox.remote(run, ...)` |
+| Bash, file operations, repo setup, or local tools | `async def run(command: str) -> BashResult` | `await sandbox.remote(bash_run, ...)` |
+| SWE-bench, MLE-Bench, or an internal evaluator | `async def score(...) -> Score` | `await sandbox.remote(score, ...)` |
 
 ## Where It Sits
 
 ```text
 Trainer / evaluator / script
   imports a function
-  calls RuntimeClient.remote(fn, *args, **kwargs)
+  calls sandbox.remote(fn, *args, **kwargs)
         |
         v
 Sandbox bundle
@@ -96,13 +95,15 @@ benchmark scorer, or a full RL rollout step.
 
 ## Example Rollout
 
-Start with the complete runnable demo in
-[`agentix-cookbook/examples/hello-agentix`](https://github.com/Agentiix/agentix-cookbook/tree/main/examples/hello-agentix):
+Start with the complete runnable demo in `examples/hello-world`
+(see the [agentix-cookbook](https://github.com/Agentiix/agentix-cookbook/tree/main/examples)
+for more examples):
 
 ```bash
-uv run agentix build . --name hello-agentix --output dist/hello-agentix.bundle.tar
-BUNDLE=$(uv run agentix deploy docker dist/hello-agentix.bundle.tar | awk -F' -> ' '/^bundle -> /{print $2}')
-uv run python run.py --bundle "$BUNDLE"
+cd examples/hello-world
+uv run agentix build . --output dist/hello-world.bundle.tar
+BUNDLE=$(uv run agentix deploy docker dist/hello-world.bundle.tar --format json | jq -r .bundle)
+uv run python main.py --bundle "$BUNDLE"
 ```
 
 This SWE-bench-shaped flow composes three independent packages in one
@@ -111,15 +112,16 @@ and a scorer wrapper grades the patch.
 
 ```python
 from datasets import load_dataset
-from agentix import RuntimeClient
+from agentix import SandboxConfig
 from agentix.bash import run as bash_run
 from agentix.agents.claude_code import run as run_claude
 from agentix.plugins.datasets.swe import score
+from agentix.provider.docker import DockerProvider
 
 inst = dict(load_dataset("princeton-nlp/SWE-bench_Verified", split="test")[0])
 
-async with RuntimeClient(sandbox.runtime_url) as client:
-    await client.remote(
+async with DockerProvider().session(SandboxConfig(image=image, bundle=bundle)) as sandbox:
+    await sandbox.remote(
         bash_run,
         command=(
             f"git clone https://github.com/{inst['repo']}.git /testbed && "
@@ -127,18 +129,18 @@ async with RuntimeClient(sandbox.runtime_url) as client:
         ),
     )
 
-    await client.remote(
+    await sandbox.remote(
         run_claude,
         instruction=inst["problem_statement"],
         workdir="/testbed",
         env={"ANTHROPIC_API_KEY": api_key},
     )
 
-    diff = await client.remote(
+    diff = await sandbox.remote(
         bash_run,
         command="cd /testbed && git add -A && git diff --cached --no-color",
     )
-    report = await client.remote(score, instance=inst, patch=diff.stdout)
+    report = await sandbox.remote(score, instance=inst, patch=diff.stdout)
 ```
 
 Agentix does not special-case Claude Code, SWE-bench, or bash. They are
