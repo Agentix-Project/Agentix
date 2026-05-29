@@ -93,7 +93,7 @@ Examples:
     agentix build . --name hello-agentix  # bundle tar (auto-appends version)
     agentix build . --name hello:dev      # bundle tar tagged as dev
     agentix build . --platform linux/amd64
-    agentix build . --container-bin podman
+    agentix build . --backend podman
     agentix build . --dry-run             # stage the build context only
     agentix deploy docker dist/hello-0.1.0-linux-amd64.bundle.tar
 
@@ -141,10 +141,12 @@ Portable bundle tar layout:
 )
 @click.option("--dry-run", is_flag=True, help="Stage the build context to ./build/<name>/ and stop.")
 @click.option(
-    "--container-bin",
+    "--backend",
+    "container_bin",
     default=None,
-    metavar="BIN",
-    help="Docker-compatible build CLI to use. Default: docker.",
+    metavar="docker|podman",
+    help="Container build backend — the docker-compatible CLI to build with "
+    "(docker, podman, or any compatible binary). Default: docker.",
 )
 @click.option(
     "--container-arg",
@@ -161,24 +163,20 @@ Portable bundle tar layout:
     help="Extra argument passed when extracting a tar bundle with container run; repeat for multiple args.",
 )
 @click.option(
-    "--builder-base",
-    default=None,
-    metavar="IMAGE",
-    help="Builder base image. Default: nixos/nix:latest from the bundled Dockerfile.",
+    "--nix-arg",
+    "nix_args",
+    multiple=True,
+    metavar="ARG",
+    help="Raw argument appended verbatim to the in-container `nix build`; repeat for multiple. "
+    "E.g. --nix-arg --cores=4 --nix-arg '--option keep-going true'. Covers nix knobs "
+    "(substituters, trusted keys, cores, ...) without a bespoke flag per option.",
 )
 @click.option(
-    "--nix-substituter",
-    "nix_substituters",
+    "--uv-arg",
+    "uv_args",
     multiple=True,
-    metavar="URL",
-    help="Nix binary cache substituter inside the build container; repeat in fallback order.",
-)
-@click.option(
-    "--nix-trusted-public-key",
-    "nix_trusted_public_keys",
-    multiple=True,
-    metavar="KEY",
-    help="Extra Nix cache public key inside the build container; repeat for multiple keys.",
+    metavar="ARG",
+    help="Raw argument appended verbatim to the in-container `uv sync`; repeat for multiple.",
 )
 def build(
     path: Path,
@@ -189,9 +187,8 @@ def build(
     container_bin: str | None,
     container_args: tuple[str, ...],
     container_run_args: tuple[str, ...],
-    builder_base: str | None,
-    nix_substituters: tuple[str, ...],
-    nix_trusted_public_keys: tuple[str, ...],
+    nix_args: tuple[str, ...],
+    uv_args: tuple[str, ...],
 ) -> int:
     """Package a Python project into a bundle artifact."""
     src = path.resolve()
@@ -211,9 +208,8 @@ def build(
         container_bin=container_bin or "docker",
         container_args=container_args,
         container_run_args=container_run_args,
-        builder_base=builder_base,
-        nix_substituters=nix_substituters,
-        nix_trusted_public_keys=nix_trusted_public_keys,
+        nix_args=nix_args,
+        uv_args=uv_args,
     )
 
     if dry_run:

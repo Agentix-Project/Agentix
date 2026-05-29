@@ -76,7 +76,7 @@ def test_deploy_passes_docker_compatible_config(
 
     monkeypatch.setattr(deploy_mod, "providers", lambda: _Resolver(lambda name: FakeDockerProvider))
 
-    assert deploy_mod.main(["podman", str(bundle), "--run-arg", "--runtime=crun"]) == 0
+    assert deploy_mod.main(["podman", str(bundle), "--container-run-arg", "--runtime=crun"]) == 0
 
     assert configs == [
         DockerProviderConfig(

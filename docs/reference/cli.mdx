@@ -43,11 +43,31 @@ and tag are derived from `[project].name` and `[project].version`;
 | `-o`, `--output` | Output file or directory; defaults to `dist/<name>-<tag>-<platform>.bundle.tar` |
 | `--platform` | Sandbox runtime platform, `linux/amd64` or `linux/arm64`; defaults to local CPU |
 | `--dry-run` | Stage the Dockerfile and build context without running Docker |
+| `--backend` | Container build backend — `docker`, `podman`, or a compatible binary; default `docker` |
+| `--container-arg` | Raw arg appended to the container build command; repeatable |
+| `--container-run-arg` | Raw arg appended to the in-build export `run`; repeatable |
+| `--nix-arg` | Raw arg appended verbatim to the in-container `nix build`; repeatable |
+| `--uv-arg` | Raw arg appended verbatim to the in-container `uv sync`; repeatable |
 
 `--platform` describes the Linux container platform where the sandbox
 will run, not the machine that invokes the build. For example, use
 `--platform linux/amd64` when building on an Apple Silicon Mac for a
 remote x86 sandbox.
+
+### Passthrough args
+
+`--nix-arg`, `--uv-arg`, and `--container-arg` are **raw passthroughs**: each
+value is forwarded verbatim to the underlying engine, so any knob is reachable
+without a bespoke flag per option. The CLI deliberately has no `--nix-substituter`
+/ `--builder-base` / etc. — use the passthrough instead:
+
+```bash
+# tune the nix build, point it at a private binary cache, override the base image
+agentix build . \
+  --nix-arg --cores=4 \
+  --nix-arg --option --nix-arg extra-substituters --nix-arg https://cache.example \
+  --container-arg --build-arg --container-arg AGENTIX_BUILDER_BASE=ghcr.io/nixos/nix:latest
+```
 
 ### Dependency Model
 
@@ -103,7 +123,7 @@ path as `SandboxConfig.bundle`.
 | `-n`, `--name` | Optional backend bundle label |
 | `--platform` | Optional runtime platform; defaults to manifest platform |
 | `--container-bin` | Docker-compatible CLI override |
-| `--run-arg` | Extra argument for Docker-compatible runtime containers; repeatable |
+| `--container-run-arg` | Raw arg appended to the sandbox `docker run`; repeatable |
 | `--format` | Output format: `text` (default) or `json` (`{"bundle","platform","metadata"}`) |
 
 With `--format json`, deploy prints a machine-readable object so the

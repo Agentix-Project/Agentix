@@ -408,8 +408,8 @@ class TestDockerBuild:
             config=docker.ContainerBuildConfig(
                 container_bin="podman",
                 container_args=("--isolation=chroot",),
-                builder_base="ghcr.io/nixos/nix:latest",
-                nix_substituters=("https://mirrors.tencent.com/nix-channels/store",),
+                nix_args=("--cores=4",),
+                uv_args=("--no-build-isolation",),
             ),
         )
 
@@ -418,11 +418,8 @@ class TestDockerBuild:
         assert "--isolation=chroot" in cmd
         build_arg_pairs = list(zip(cmd, cmd[1:], strict=False))
         assert ("--build-arg", "https_proxy=http://proxy.example:3128") in build_arg_pairs
-        assert ("--build-arg", "AGENTIX_BUILDER_BASE=ghcr.io/nixos/nix:latest") in build_arg_pairs
-        assert (
-            "--build-arg",
-            "AGENTIX_NIX_SUBSTITUTERS=https://mirrors.tencent.com/nix-channels/store",
-        ) in build_arg_pairs
+        assert ("--build-arg", "AGENTIX_NIX_ARGS=--cores=4") in build_arg_pairs
+        assert ("--build-arg", "AGENTIX_UV_ARGS=--no-build-isolation") in build_arg_pairs
         assert "buildx" not in cmd
         assert "--load" not in cmd
 
@@ -792,14 +789,14 @@ class TestMainBuild:
                     str(proj),
                     "--name",
                     "demo:dev",
-                    "--container-bin",
+                    "--backend",
                     "podman",
                     "--container-arg",
                     "--isolation=chroot",
-                    "--builder-base",
-                    "ghcr.io/nixos/nix:latest",
-                    "--nix-substituter",
-                    "https://mirrors.tencent.com/nix-channels/store",
+                    "--nix-arg",
+                    "--cores=4",
+                    "--uv-arg",
+                    "--no-build-isolation",
                 ]
             )
             == 0
@@ -808,8 +805,8 @@ class TestMainBuild:
             docker.ContainerBuildConfig(
                 container_bin="podman",
                 container_args=("--isolation=chroot",),
-                builder_base="ghcr.io/nixos/nix:latest",
-                nix_substituters=("https://mirrors.tencent.com/nix-channels/store",),
+                nix_args=("--cores=4",),
+                uv_args=("--no-build-isolation",),
             )
         ]
 

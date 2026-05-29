@@ -25,14 +25,20 @@ _PROXY_BUILD_ARG_NAMES = ("http_proxy", "https_proxy", "no_proxy", "HTTP_PROXY",
 
 @dataclass(frozen=True)
 class ContainerBuildConfig:
-    """Docker-compatible build executor settings."""
+    """Docker-compatible build executor settings + raw engine passthrough args.
+
+    `nix_args` / `uv_args` are forwarded verbatim into the in-container
+    `nix build` / `uv sync`; `container_args` / `container_run_args` are
+    forwarded to the container build / export `run`. This raw passthrough
+    is the escape hatch that keeps the CLI from sprouting a bespoke flag
+    per engine knob.
+    """
 
     container_bin: str = "docker"
     container_args: tuple[str, ...] = ()
     container_run_args: tuple[str, ...] = ()
-    builder_base: str | None = None
-    nix_substituters: tuple[str, ...] = ()
-    nix_trusted_public_keys: tuple[str, ...] = ()
+    nix_args: tuple[str, ...] = ()
+    uv_args: tuple[str, ...] = ()
 
 
 def _run(
@@ -50,7 +56,7 @@ def _run(
         raise SystemExit(
             f"container build CLI {cmd[0]!r} not found on PATH. Install Docker "
             f"(https://docs.docker.com/get-docker/) or Podman "
-            f"(https://podman.io/docs/installation), or pass --container-bin."
+            f"(https://podman.io/docs/installation), or pass --backend."
         ) from exc
     if check and proc.returncode != 0:
         if capture:
@@ -80,15 +86,15 @@ def _proxy_build_args() -> list[str]:
     ]
 
 
-def _nix_build_args(config: ContainerBuildConfig | None = None) -> list[str]:
+def _passthrough_build_args(config: ContainerBuildConfig | None = None) -> list[str]:
+    """Pack raw nix/uv passthrough args into Docker build-args the in-container
+    `bundle-build.sh` splits back onto `nix build` / `uv sync`."""
     config = config or ContainerBuildConfig()
     args: list[str] = []
-    if config.builder_base:
-        args.extend(["--build-arg", f"AGENTIX_BUILDER_BASE={config.builder_base}"])
-    if config.nix_substituters:
-        args.extend(["--build-arg", f"AGENTIX_NIX_SUBSTITUTERS={' '.join(config.nix_substituters)}"])
-    if config.nix_trusted_public_keys:
-        args.extend(["--build-arg", f"AGENTIX_NIX_TRUSTED_PUBLIC_KEYS={' '.join(config.nix_trusted_public_keys)}"])
+    if config.nix_args:
+        args.extend(["--build-arg", f"AGENTIX_NIX_ARGS={' '.join(config.nix_args)}"])
+    if config.uv_args:
+        args.extend(["--build-arg", f"AGENTIX_UV_ARGS={' '.join(config.uv_args)}"])
     return args
 
 
@@ -116,7 +122,7 @@ def _docker_build_image(
             "--load",
             *_build_container_args(config),
             *_proxy_build_args(),
-            *_nix_build_args(config),
+            *_passthrough_build_args(config),
             *tags_args,
             "--build-arg",
             f"AGENTIX_PROJECT_SUBPATH={project_subpath}",
@@ -131,7 +137,7 @@ def _docker_build_image(
             normalize_platform(platform),
             *_build_container_args(config),
             *_proxy_build_args(),
-            *_nix_build_args(config),
+            *_passthrough_build_args(config),
             *tags_args,
             "--build-arg",
             f"AGENTIX_PROJECT_SUBPATH={project_subpath}",

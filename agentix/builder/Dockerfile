@@ -20,26 +20,27 @@ ARG no_proxy
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY
-ARG AGENTIX_NIX_SUBSTITUTERS
-ARG AGENTIX_NIX_TRUSTED_PUBLIC_KEYS
-
 # Flakes + the modern CLI; accept flake `nixConfig` for substituters.
 # Syscall filtering can fail under Docker buildx emulation; the Docker
-# build sandbox is already the outer isolation boundary here.
+# build sandbox is already the outer isolation boundary here. Per-build nix
+# knobs (substituters, trusted keys, cores, ...) come through AGENTIX_NIX_ARGS
+# below, forwarded verbatim to `nix build` — no bespoke ARG per option.
 RUN echo "experimental-features = nix-command flakes" >> /etc/nix/nix.conf \
  && echo "accept-flake-config = true" >> /etc/nix/nix.conf \
- && echo "filter-syscalls = false" >> /etc/nix/nix.conf \
- && if [ -n "${AGENTIX_NIX_SUBSTITUTERS}" ]; then \
-        echo "substituters = ${AGENTIX_NIX_SUBSTITUTERS}" >> /etc/nix/nix.conf; \
-    fi \
- && if [ -n "${AGENTIX_NIX_TRUSTED_PUBLIC_KEYS}" ]; then \
-        echo "trusted-public-keys = ${AGENTIX_NIX_TRUSTED_PUBLIC_KEYS}" >> /etc/nix/nix.conf; \
-    fi
+ && echo "filter-syscalls = false" >> /etc/nix/nix.conf
 
 # Where the project sits inside the copied repo (a uv-workspace member
 # or cookbook example lives in a subdirectory). Passed by `agentix build`.
 ARG AGENTIX_PROJECT_SUBPATH=.
 ENV AGENTIX_PROJECT_SUBPATH=${AGENTIX_PROJECT_SUBPATH}
+
+# Raw passthrough args forwarded verbatim to the in-container build engines,
+# set by `agentix build --nix-arg ... --uv-arg ...`. bundle-build.sh word-splits
+# them onto `nix build` / `uv sync`.
+ARG AGENTIX_NIX_ARGS=
+ARG AGENTIX_UV_ARGS=
+ENV AGENTIX_NIX_ARGS=${AGENTIX_NIX_ARGS} \
+    AGENTIX_UV_ARGS=${AGENTIX_UV_ARGS}
 
 COPY . /build
 WORKDIR /build

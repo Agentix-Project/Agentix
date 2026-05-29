@@ -26,7 +26,7 @@ appears at `/nix` inside every sandbox.
 Examples:
     agentix deploy docker dist/hello.bundle.tar
     agentix deploy podman dist/hello.bundle.tar
-    agentix deploy podman dist/hello.bundle.tar --run-arg --runtime=crun --run-arg --cgroups=disabled
+    agentix deploy podman dist/hello.bundle.tar --container-run-arg --runtime=crun
     agentix deploy docker dist/hello.bundle.tar --format json   # machine-readable bundle ref
 
 Capture the materialized bundle reference programmatically with `--format json`:
@@ -48,11 +48,11 @@ Capture the materialized bundle reference programmatically with `--format json`:
 @click.option("--platform", default=None, metavar="PLATFORM", help="Optional bundle runtime platform.")
 @click.option("--container-bin", default=None, metavar="BIN", help="Docker-compatible CLI override.")
 @click.option(
-    "--run-arg",
+    "--container-run-arg",
     "run_args",
     multiple=True,
     metavar="ARG",
-    help="Extra argument for Docker-compatible runtime containers; repeat for multiple args.",
+    help="Raw argument appended to the sandbox `docker run`; repeat for multiple args.",
 )
 @click.option(
     "--format",

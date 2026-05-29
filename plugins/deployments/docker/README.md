@@ -46,8 +46,8 @@ async with session(
 ```bash
 agentix build . --output dist/my-agent.bundle.tar
 agentix deploy podman dist/my-agent.bundle.tar \
-  --run-arg --runtime=crun \
-  --run-arg --cgroups=disabled
+  --container-run-arg --runtime=crun \
+  --container-run-arg --cgroups=disabled
 ```
 
 `network="host"` skips port publishing and relies on the runtime binding
