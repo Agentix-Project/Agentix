@@ -80,6 +80,28 @@ async def test_subprocess_worker_ignores_cwd_agentix_package(
         await mp.shutdown()
 
 
+async def test_subprocess_worker_child_reading_stdin_does_not_steal_frames():
+    """A remote call that spawns a child reading stdin (like the `claude`
+    CLI) must not consume control-pipe bytes — later calls still work.
+
+    Guards the fd-isolation invariant: the worker repoints fd 0 to
+    /dev/null so inherited stdin is harmless to the frame stream.
+    """
+    mp = _make_worker()
+    try:
+        r1 = await mp.call(request_for(target.spawn_stdin_reading_child))
+        assert r1.ok, r1.error
+        assert pickle.loads(r1.value) == 0
+
+        # If the child had stolen frame bytes, the pipe would be desynced
+        # and this call would hang or return garbage.
+        r2 = await mp.call(request_for(target.echo, kwargs={"msg": "after"}))
+        assert r2.ok, r2.error
+        assert pickle.loads(r2.value).msg == "echo:after"
+    finally:
+        await mp.shutdown()
+
+
 async def test_subprocess_worker_death_fails_in_flight_call():
     """Killing the worker mid-call surfaces WorkerExited to the caller."""
     mp = _make_worker()

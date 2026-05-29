@@ -25,7 +25,7 @@ from typing import Any
 import socketio
 from pydantic import ValidationError
 
-from agentix.runtime.server.worker import RuntimeWorkerClient
+from agentix.runtime.server.worker import RuntimeWorkerClient, WorkerExited
 from agentix.runtime.shared import MAX_MESSAGE_BYTES
 from agentix.runtime.shared.callables import RemoteCallable
 from agentix.runtime.shared.codec import pack, unpack
@@ -135,7 +135,17 @@ def make_sio(
                 },
             )
 
-        resp = await worker.call(request)
+        try:
+            resp = await worker.call(request)
+        except WorkerExited as exc:
+            # Worker died mid-call (crash / OOM-kill / exit). Surface it
+            # as a typed error instead of letting the task fail silently
+            # (which would hang the host's SIO wait forever).
+            error = RemoteError(type="WorkerDied", message=str(exc)).model_dump()
+            return "call:error", {"call_id": call_id, "error": error}
+        except Exception as exc:
+            error = RemoteError(type=type(exc).__name__, message=str(exc)).model_dump()
+            return "call:error", {"call_id": call_id, "error": error}
         if resp.ok:
             return "call:result", {"call_id": call_id, "value": resp.value}
         error = (resp.error or RemoteError(type="Unknown", message="")).model_dump()
@@ -144,12 +154,21 @@ def make_sio(
     async def _emit_task_result(task: asyncio.Task, call_id: str) -> None:
         if task.cancelled():
             return
-        with contextlib.suppress(BaseException):
+        try:
             event, frame = task.result()
-            # Store first, emit second. If the host is currently
-            # disconnected the emit is a no-op and the cached entry
-            # carries the result through to the next `resume`.
-            pending_results[call_id] = (event, frame)
+        except Exception as exc:
+            # Defensive: _execute_call shouldn't raise, but never let a
+            # failed task vanish — the host must always get something.
+            event = "call:error"
+            frame = {
+                "call_id": call_id,
+                "error": RemoteError(type=type(exc).__name__, message=str(exc)).model_dump(),
+            }
+        # Store first, emit second. If the host is currently disconnected
+        # the emit is a no-op and the cached entry carries the result
+        # through to the next `resume`.
+        pending_results[call_id] = (event, frame)
+        with contextlib.suppress(BaseException):
             await sio.emit(event, pack(frame), namespace=RPC_NAMESPACE)
 
     def _track_call(call_id: str, task: asyncio.Task) -> None:
@@ -161,7 +180,7 @@ def make_sio(
         _track_call(call_id, task)
         return task
 
-    async def submit_http_call(payload: dict[str, Any], *, prefer_sync_ms: int = 1000) -> dict[str, Any]:
+    async def submit_http_call(payload: dict[str, Any], *, wait_s: float = 1.0) -> dict[str, Any]:
         call_id = payload.get("call_id")
         if not isinstance(call_id, str):
             _event, frame = _missing_call_id()
@@ -174,7 +193,7 @@ def make_sio(
 
         task = _start_call(payload, call_id)
 
-        timeout_s = max(prefer_sync_ms, 0) / 1000
+        timeout_s = max(wait_s, 0.0)
         try:
             event, frame = await asyncio.wait_for(asyncio.shield(task), timeout=timeout_s)
         except TimeoutError:

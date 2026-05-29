@@ -1,13 +1,20 @@
 """Worker-side callable execution.
 
-The worker unpickles the callable + args/kwargs, calls it (awaiting if
-it returns a coroutine), and pickles the result back. No shape
-detection, no TypeAdapter validation — pickle preserves Python object
-identity end to end.
+The worker unpickles the callable + args/kwargs, calls it, and pickles
+the result back. No shape detection, no TypeAdapter validation — pickle
+preserves Python object identity end to end.
+
+A coroutine function is awaited directly on the worker's event loop; a
+plain (sync) function runs in a thread via ``asyncio.to_thread`` so a
+blocking body can never stall the loop — and therefore can never stall
+concurrent calls or the ``/log`` / ``/trace`` side channels. The
+per-call ``DISPATCH_CALL_ID`` contextvar is copied into the thread by
+``to_thread``, so log/trace stamping still works.
 """
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 import pickle
@@ -35,9 +42,14 @@ class CallableInvoker:
                 ),
             )
         try:
-            result = fn(*args, **kwargs)
-            if inspect.isawaitable(result):
-                result = await result
+            if inspect.iscoroutinefunction(fn):
+                result = await fn(*args, **kwargs)
+            else:
+                result = await asyncio.to_thread(fn, *args, **kwargs)
+                # A sync callable may still return an awaitable (e.g. a
+                # plain def that returns a coroutine); await it here.
+                if inspect.isawaitable(result):
+                    result = await result
         except Exception as exc:
             logger.exception("remote callable '%s' raised", display_name_for(fn))
             return RemoteResponse(

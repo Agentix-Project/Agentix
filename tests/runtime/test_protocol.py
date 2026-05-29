@@ -135,8 +135,11 @@ async def test_same_call_id_via_mixed_paths_runs_fn_exactly_once(use_inprocess_w
         async with httpx.AsyncClient(base_url=base_url) as http:
             r = await http.post(
                 "/call",
-                content=pack({**req.model_dump(), "prefer_sync_ms": 50}),
-                headers={"content-type": "application/msgpack"},
+                content=pack(req.model_dump()),
+                headers={
+                    "content-type": "application/msgpack",
+                    "prefer": "respond-async, wait=0.05",
+                },
             )
             r.raise_for_status()
 

@@ -26,6 +26,29 @@ from agentix.runtime.shared.models import RemoteError, RemoteRequest, RemoteResp
 
 logger = logging.getLogger("agentix.runtime.server.worker.client")
 
+
+class WorkerExited(RuntimeError):
+    """The worker subprocess died (crash, OOM-kill, exit) mid-call.
+
+    `returncode` is the process exit status when known: negative means
+    killed by that signal (e.g. -9 = SIGKILL, the OOM-killer's signature).
+    """
+
+    def __init__(self, message: str, returncode: int | None = None):
+        super().__init__(message)
+        self.returncode = returncode
+
+
+def _exit_detail(returncode: int | None) -> str:
+    if returncode is None:
+        return "stdout closed"
+    if returncode < 0:
+        sig = -returncode
+        hint = " (likely OOM-killed)" if sig == 9 else ""
+        return f"killed by signal {sig}{hint}"
+    return f"exit code {returncode}"
+
+
 _WORKER_START_TIMEOUT = 15.0
 _WORKER_BOOTSTRAP = """
 import os
@@ -249,10 +272,21 @@ class _SubprocessWorker:
             logger.exception("runtime worker read loop crashed")
         finally:
             self._closed.set()
-            err = RemoteError(type="WorkerExited", message="runtime worker exited")
+            returncode = self._proc.returncode if self._proc is not None else None
+            if returncode is None and self._proc is not None:
+                # EOF can beat the child reaper, leaving returncode unset;
+                # wait briefly so we can report the real exit signal
+                # (e.g. -9 = SIGKILL, the OOM-killer's signature).
+                with contextlib.suppress(Exception):
+                    returncode = await asyncio.wait_for(self._proc.wait(), 2.0)
+            detail = _exit_detail(returncode)
+            # An OOM/crash gives no Python traceback (the process is gone),
+            # so this log line is the only place the cause surfaces.
+            logger.error("runtime worker exited: %s", detail)
+            exc = WorkerExited(f"runtime worker exited: {detail}", returncode)
             for fut in list(self._pending.values()):
                 if not fut.done():
-                    fut.set_exception(RuntimeError(err.message))
+                    fut.set_exception(exc)
             self._pending.clear()
 
     async def _on_frame(self, frame: dict[str, Any]) -> None:
@@ -310,6 +344,11 @@ class _SubprocessWorker:
             logger.debug("cancel send failed for call %r", cid)
 
     async def call(self, request: RemoteRequest) -> RemoteResponse:
+        # If the worker already died, the read loop has exited and will
+        # never resolve a future — fail fast instead of hanging forever.
+        if self._closed.is_set():
+            returncode = self._proc.returncode if self._proc is not None else None
+            raise WorkerExited(f"runtime worker exited: {_exit_detail(returncode)}", returncode)
         cid = request.call_id or _new_id()
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending[cid] = fut

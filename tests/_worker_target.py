@@ -64,3 +64,29 @@ async def reset_exec_counter() -> None:
 def print_stdout(message: str) -> str:
     print(message)
     return "printed"
+
+
+def self_sigkill() -> None:
+    """Simulate an OOM-kill: the worker process kills itself with SIGKILL
+    (the same signal the kernel OOM-killer uses), so no result ever comes
+    back and no Python traceback is produced."""
+    import os
+    import signal
+
+    os.kill(os.getpid(), signal.SIGKILL)
+
+
+def spawn_stdin_reading_child() -> int:
+    """Spawn a child that reads all of stdin to EOF — exactly what the
+    `claude` CLI does. The worker repoints fd 0 at /dev/null, so the child
+    must see immediate EOF and must NOT consume bytes from the
+    server↔worker control pipe (which would desync every later call).
+    Returns the child's exit code (0)."""
+    import subprocess
+    import sys
+
+    proc = subprocess.run(
+        [sys.executable, "-c", "import sys; sys.stdin.read()"],
+        timeout=10,
+    )
+    return proc.returncode
