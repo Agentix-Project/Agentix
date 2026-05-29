@@ -14,27 +14,21 @@
 ARG AGENTIX_BUILDER_BASE=nixos/nix:latest
 FROM ${AGENTIX_BUILDER_BASE}
 
-ARG http_proxy
-ARG https_proxy
-ARG no_proxy
-ARG HTTP_PROXY
-ARG HTTPS_PROXY
-ARG NO_PROXY
-ARG AGENTIX_NIX_SUBSTITUTERS
-ARG AGENTIX_NIX_TRUSTED_PUBLIC_KEYS
+# Project-side Nix configuration override. Forwarded verbatim from the
+# host environment by `agentix build` (see _ENV_BUILD_ARG_NAMES). Use it
+# for `extra-substituters = ...`, `extra-trusted-public-keys = ...`,
+# timeouts, or any other nix.conf setting. Nix reads NIX_CONFIG from the
+# process environment, so the matching ENV makes it visible to every
+# `RUN nix ...` step below.
+ARG NIX_CONFIG=""
+ENV NIX_CONFIG=${NIX_CONFIG}
 
 # Flakes + the modern CLI; accept flake `nixConfig` for substituters.
 # Syscall filtering can fail under Docker buildx emulation; the Docker
 # build sandbox is already the outer isolation boundary here.
 RUN echo "experimental-features = nix-command flakes" >> /etc/nix/nix.conf \
  && echo "accept-flake-config = true" >> /etc/nix/nix.conf \
- && echo "filter-syscalls = false" >> /etc/nix/nix.conf \
- && if [ -n "${AGENTIX_NIX_SUBSTITUTERS}" ]; then \
-        echo "substituters = ${AGENTIX_NIX_SUBSTITUTERS}" >> /etc/nix/nix.conf; \
-    fi \
- && if [ -n "${AGENTIX_NIX_TRUSTED_PUBLIC_KEYS}" ]; then \
-        echo "trusted-public-keys = ${AGENTIX_NIX_TRUSTED_PUBLIC_KEYS}" >> /etc/nix/nix.conf; \
-    fi
+ && echo "filter-syscalls = false" >> /etc/nix/nix.conf
 
 # Where the project sits inside the copied repo (a uv-workspace member
 # or cookbook example lives in a subdirectory). Passed by `agentix build`.
@@ -45,13 +39,9 @@ COPY . /build
 WORKDIR /build
 
 # nix build (toolchain + runtime), uv venv + uv sync, closure discovery.
-RUN export http_proxy="${http_proxy:-$HTTP_PROXY}" \
- && export https_proxy="${https_proxy:-$HTTPS_PROXY}" \
- && export no_proxy="${no_proxy:-$NO_PROXY}" \
- && export HTTP_PROXY="${HTTP_PROXY:-$http_proxy}" \
- && export HTTPS_PROXY="${HTTPS_PROXY:-$https_proxy}" \
- && export NO_PROXY="${NO_PROXY:-$no_proxy}" \
- && sh ./bundle-build.sh
+# HTTP/HTTPS proxies, when needed, are inherited from BuildKit via the
+# host's `~/.docker/config.json` `proxies` section — no per-build plumbing.
+RUN sh ./bundle-build.sh
 
 ENV PATH="/nix/runtime/venv/bin:/nix/runtime/bin:${PATH}" \
     LD_LIBRARY_PATH="/nix/runtime/lib" \

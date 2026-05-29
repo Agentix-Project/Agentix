@@ -397,7 +397,6 @@ class TestDockerBuild:
             calls.append(cmd)
             return subprocess.CompletedProcess(cmd, 0)
 
-        monkeypatch.setenv("https_proxy", "http://proxy.example:3128")
         monkeypatch.setattr(docker, "_run", _fake_run)
 
         docker._docker_build_image(
@@ -408,23 +407,55 @@ class TestDockerBuild:
             config=docker.ContainerBuildConfig(
                 container_bin="podman",
                 container_args=("--isolation=chroot",),
-                builder_base="ghcr.io/nixos/nix:latest",
-                nix_substituters=("https://mirrors.tencent.com/nix-channels/store",),
             ),
         )
 
         cmd = calls[0]
         assert cmd[:4] == ["podman", "build", "--platform", "linux/amd64"]
         assert "--isolation=chroot" in cmd
-        build_arg_pairs = list(zip(cmd, cmd[1:], strict=False))
-        assert ("--build-arg", "https_proxy=http://proxy.example:3128") in build_arg_pairs
-        assert ("--build-arg", "AGENTIX_BUILDER_BASE=ghcr.io/nixos/nix:latest") in build_arg_pairs
-        assert (
-            "--build-arg",
-            "AGENTIX_NIX_SUBSTITUTERS=https://mirrors.tencent.com/nix-channels/store",
-        ) in build_arg_pairs
         assert "buildx" not in cmd
         assert "--load" not in cmd
+
+    def test_env_build_args_forward_nix_config_and_builder_base(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`NIX_CONFIG` and `AGENTIX_BUILDER_BASE` set on the host must be
+        forwarded into the build as `--build-arg`; unset names contribute
+        nothing. Proxy env vars are intentionally NOT forwarded — that's
+        BuildKit's job via `~/.docker/config.json`.
+        """
+        calls: list[list[str]] = []
+
+        def _fake_run(cmd: list[str], *, cwd: Path | None = None, capture: bool = False) -> subprocess.CompletedProcess:
+            del cwd, capture
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0)
+
+        monkeypatch.setenv("NIX_CONFIG", "extra-substituters = https://mirror.example\n")
+        monkeypatch.setenv("AGENTIX_BUILDER_BASE", "ghcr.io/nixos/nix@sha256:deadbeef")
+        monkeypatch.setenv("https_proxy", "http://proxy.example:3128")
+        monkeypatch.setattr(docker, "_run", _fake_run)
+
+        docker._docker_build_image(
+            tmp_path,
+            tags=["demo:1.0.0"],
+            project_subpath=Path("."),
+            platform="linux/amd64",
+        )
+
+        cmd = calls[0]
+        build_arg_pairs = list(zip(cmd, cmd[1:], strict=False))
+        assert (
+            "--build-arg",
+            "NIX_CONFIG=extra-substituters = https://mirror.example\n",
+        ) in build_arg_pairs
+        assert (
+            "--build-arg",
+            "AGENTIX_BUILDER_BASE=ghcr.io/nixos/nix@sha256:deadbeef",
+        ) in build_arg_pairs
+        for _, value in build_arg_pairs:
+            assert not value.startswith("https_proxy=")
+            assert not value.startswith("HTTPS_PROXY=")
 
 
 # ── build: tar bundle artifacts ────────────────────────────────────
@@ -796,10 +827,6 @@ class TestMainBuild:
                     "podman",
                     "--container-arg",
                     "--isolation=chroot",
-                    "--builder-base",
-                    "ghcr.io/nixos/nix:latest",
-                    "--nix-substituter",
-                    "https://mirrors.tencent.com/nix-channels/store",
                 ]
             )
             == 0
@@ -808,8 +835,6 @@ class TestMainBuild:
             docker.ContainerBuildConfig(
                 container_bin="podman",
                 container_args=("--isolation=chroot",),
-                builder_base="ghcr.io/nixos/nix:latest",
-                nix_substituters=("https://mirrors.tencent.com/nix-channels/store",),
             )
         ]
 
