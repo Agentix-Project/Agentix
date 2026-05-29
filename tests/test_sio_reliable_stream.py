@@ -17,6 +17,7 @@ coroutines) has somewhere to attach.
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import Any
 
 import pytest
@@ -107,6 +108,44 @@ async def test_resume_with_since_seq_filters_already_seen(_isolated_bridge):
 
     replayed = _emitted(sent, "record")
     assert [f["data"]["_seq"] for f in replayed] == [4, 5]
+
+
+async def test_wrap_runs_under_the_lock(_isolated_bridge):
+    """`_wrap` must perform its seq allocation + buffer mutation under
+    `_lock`. Hold the lock and a concurrent `emit_nowait` blocks inside
+    `_wrap` until it's released. This is a deterministic regression guard:
+    on the unsynchronized version `_wrap` doesn't take the lock, so the
+    emit would complete immediately instead of blocking.
+
+    (A plain "do concurrent emits collide?" stress test is NOT a useful
+    guard here: on GIL CPython the short read-modify-write of `_next_seq`
+    rarely interleaves, so it passes with or without the lock. The lock's
+    value is correctness by construction and safety under free-threaded /
+    no-GIL CPython, where the RMW and the deque op are not atomic.)"""
+    ns = _sio.Namespace("/test")
+    _sio.register_namespace(ns)
+    stream = _sio.ReliableStream(ns)
+
+    done = threading.Event()
+
+    def emit_one() -> None:
+        stream.emit_nowait("record", {})
+        done.set()
+
+    stream._lock.acquire()
+    worker = threading.Thread(target=emit_one)
+    try:
+        worker.start()
+        # While we hold the lock, the emit cannot finish — it is parked on
+        # `_lock` inside `_wrap`.
+        assert not done.wait(timeout=0.3), "emit completed without taking _lock"
+    finally:
+        stream._lock.release()
+
+    worker.join(timeout=2)
+    assert done.is_set()
+    assert [seq for seq, _, _ in stream._buffer] == [1]
+    assert stream._next_seq == 2
 
 
 async def test_buffer_cap_drops_oldest(_isolated_bridge):
