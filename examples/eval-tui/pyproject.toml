@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentix-eval-tui"
+version = "0.1.0"
+description = "Live Textual dashboard for Agentix batch rollouts"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Agentiix" }]
+urls = { Homepage = "https://github.com/Agentiix/Agentix" }
+dependencies = [
+    "agentixx",
+    "agentix-runner>=0.1.0",
+    "textual>=0.80",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+agentix-eval-tui = "eval_tui.cli:main"
+
+# Standalone project (not a workspace member) — its TUI deps stay out of the
+# core-dev venv. Path-depends on the monorepo, editable.
+[tool.uv.sources]
+agentixx = { path = "../..", editable = true }
+agentix-runner = { path = "../../plugins/runner", editable = true }
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.hatch.build.targets.wheel]
+packages = ["eval_tui"]
