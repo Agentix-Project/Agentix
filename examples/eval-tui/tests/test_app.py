@@ -5,11 +5,12 @@ from __future__ import annotations
 from eval_tui.app import AgentixTUI
 from eval_tui.demo import DemoAgent, DemoDataset, DemoProvider
 from eval_tui.models import RunSpec
+from eval_tui.views.build import BuildView
 from eval_tui.views.catalog import discover_catalog
 from eval_tui.views.observability import ObservabilityView
 from eval_tui.views.overview import OverviewView
 from eval_tui.views.rollouts import RolloutsView
-from textual.widgets import DataTable
+from textual.widgets import DataTable, Input, TabbedContent
 
 
 def _demo_spec(n: int = 8) -> RunSpec:
@@ -82,6 +83,26 @@ async def test_observability_demo_streams_events() -> None:
         await app.workers.wait_for_complete()
         await pilot.pause()
         assert app.query_one(ObservabilityView)._emitted > 0
+
+
+async def test_build_view_constructs_command_from_path() -> None:
+    app = AgentixTUI(rollout_spec=None)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        build = app.query_one(BuildView)
+        build.query_one("#build-path", Input).value = "examples/run-swe-rollouts"
+        await pilot.pause()
+        assert build._command.startswith("agentix build examples/run-swe-rollouts")
+        assert "run-swe-rollouts.bundle.tar" in build._command
+
+
+async def test_tab_keybinding_switches_active_tab() -> None:
+    app = AgentixTUI(rollout_spec=None)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("3")  # -> Catalog
+        await pilot.pause()
+        assert app.query_one(TabbedContent).active == "catalog"
 
 
 def test_discover_catalog_finds_agentix_distributions() -> None:

@@ -1,9 +1,9 @@
 """Agentix TUI — a modern Textual control room for Agentix.
 
-A tabbed shell that surfaces each Agentix area as its own view. Today: live
-**Rollouts** (over `agentix.runner`) and a **Catalog** of the installed
-ecosystem; **Sandboxes**, **Build**, and **Observability** are signposted and
-land in follow-up PRs. See `DESIGN.md` for the rubrics this iterates against.
+A tabbed shell that surfaces each Agentix area as its own view: an Overview
+landing dashboard, live **Rollouts** over `agentix.runner`, a plugin
+**Catalog**, **Sandboxes** readiness, a **Build** planner, and live
+**Observability**. See `DESIGN.md` for the rubrics this iterates against.
 
 Run a no-Docker demo with `agentix-eval-tui --demo 40`, point it at real
 adapters like `agentix-run`, or launch it bare to browse the Catalog.
@@ -16,10 +16,10 @@ from textual.widgets import Footer, Header, TabbedContent, TabPane
 
 from .models import RunSpec
 from .views import (
+    BuildView,
     CatalogView,
     ObservabilityView,
     OverviewView,
-    PlaceholderView,
     RolloutsView,
     SandboxesView,
 )
@@ -74,9 +74,20 @@ class AgentixTUI(App):
     #obs-body { height: 1fr; }
     #obs-trace { width: 1fr; height: 1fr; border: round $primary; padding: 0 1; }
     #obs-log { width: 1fr; height: 1fr; border: round $primary; padding: 0 1; }
+
+    #build-title { height: 1; padding: 0 1; }
+    #build-path { margin: 0 1; }
+    #build-cmd { height: auto; padding: 1 2; }
+    #build-info { height: 1fr; padding: 0 2; }
     """
 
     BINDINGS = [
+        ("1", "show_tab('overview')", "Overview"),
+        ("2", "show_tab('rollouts')", "Rollouts"),
+        ("3", "show_tab('catalog')", "Catalog"),
+        ("4", "show_tab('sandboxes')", "Sandboxes"),
+        ("5", "show_tab('build')", "Build"),
+        ("6", "show_tab('observability')", "Obs"),
         ("q", "quit", "Quit"),
     ]
 
@@ -109,7 +120,10 @@ class AgentixTUI(App):
             with TabPane("Sandboxes", id="sandboxes"):
                 yield SandboxesView()
             with TabPane("Build", id="build"):
-                yield PlaceholderView("Build", "Trigger and stream `agentix build` bundles.")
+                yield BuildView()
             with TabPane("Observability", id="observability"):
                 yield ObservabilityView()
         yield Footer()
+
+    def action_show_tab(self, tab: str) -> None:
+        self.query_one(TabbedContent).active = tab
