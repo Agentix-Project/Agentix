@@ -51,13 +51,29 @@ import click
 from agentix.cli.build.bundle import _build_tar_bundle
 from agentix.cli.build.context import resolve_context, stage_context
 from agentix.cli.build.docker import ContainerBuildConfig
-from agentix.cli.build.naming import _tar_output_path, parse_name
+from agentix.cli.build.naming import _artifact_component, _tar_output_path, parse_name
 from agentix.cli.build.platform import (
     detect_default_platform,
     nix_system_for_platform,
     normalize_platform,
 )
 from agentix.cli.build.pyproject import REPO_ROOT, detect_python_version, read_pyproject
+
+
+def _dry_run_out_dir(name: str) -> Path:
+    """Resolve the `--dry-run` staging directory under `build/`.
+
+    `name` comes straight from `--name` (only the filesystem sanitizers for tar
+    names / Docker tags are applied elsewhere), so it must be sanitized and
+    containment-checked before it is used as a path that gets `rmtree`'d — a
+    `--name ../../x` or `--name /abs` would otherwise escape `build/`.
+    """
+    build_root = (REPO_ROOT / "build").resolve()
+    out = (build_root / _artifact_component(name)).resolve()
+    if out == build_root or not out.is_relative_to(build_root):
+        raise SystemExit(f"--name {name!r} does not resolve to a path under {build_root}")
+    return out
+
 
 # Click's default help formatter rewraps each paragraph, which would
 # mangle the indented examples and the bundle-layout tree below. A `\b`
@@ -235,7 +251,7 @@ def build(
     )
 
     if dry_run:
-        out = REPO_ROOT / "build" / name
+        out = _dry_run_out_dir(name)
         if out.exists():
             shutil.rmtree(out)
         stage_context(out, context_root=context_root, python_version=python_version, platform=platform)

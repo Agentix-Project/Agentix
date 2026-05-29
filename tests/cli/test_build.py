@@ -194,6 +194,24 @@ class TestParseName:
             build.parse_name(bad, {"project": {"name": "demo", "version": "1.0"}})
 
 
+# ── build: --dry-run name safety ───────────────────────────────────
+
+
+class TestDryRunNameSafety:
+    @pytest.mark.parametrize("bad", ["..", "."])
+    def test_escaping_name_rejected(self, bad: str) -> None:
+        # A name that sanitizes to a traversal/self segment must not resolve to
+        # (or above) build/ — guards against `rmtree`-ing an arbitrary dir.
+        with pytest.raises(SystemExit, match="does not resolve to a path under"):
+            build._dry_run_out_dir(bad)
+
+    @pytest.mark.parametrize("name", ["demo", "../../etc", "/abs/evil"])
+    def test_safe_or_sanitized_name_stays_under_build(self, name: str) -> None:
+        out = build._dry_run_out_dir(name)
+        assert out.parent.name == "build"
+        assert out.name not in ("", ".", "..") and "/" not in out.name
+
+
 # ── build: platform resolution ─────────────────────────────────────
 
 
