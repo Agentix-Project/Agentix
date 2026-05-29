@@ -109,19 +109,17 @@ Portable bundle tar layout:
     nix/runtime/{bin,lib,...}    symlinkJoin of every closure
 
 \b
-Environment (forwarded into the build container if set on the host):
-    NIX_CONFIG               Nix configuration override applied during the
-                             in-container `nix build` — e.g.
-                             `extra-substituters = https://mirror...`,
-                             `extra-trusted-public-keys = ...`. See
-                             https://nix.dev/manual/nix/stable/command-ref/conf-file
-                             for the full setting list.
-    AGENTIX_BUILDER_BASE     Builder base image; defaults to
-                             `nixos/nix:latest`. Useful for pinning a digest
-                             or pointing at a registry mirror.
+Passthrough flags (forwarded verbatim to the underlying engine; quote a whole
+sub-flag as one value, repeat for more):
+    --nix-arg     -> in-container `nix build` (point nix at a mirror with
+                     --nix-arg "--option extra-substituters https://mirror...")
+    --uv-arg      -> in-container `uv sync`
+    --container-arg / --container-run-arg -> the container build / export run
+                     (override the builder base with
+                     --container-arg "--build-arg AGENTIX_BUILDER_BASE=...")
 
 \b
-Proxies (HTTP/HTTPS) are no longer auto-forwarded — configure them once in
+Proxies (HTTP/HTTPS) are not auto-forwarded — configure them once in
 `~/.docker/config.json` under `proxies` and BuildKit will inherit them for
 every `docker build`, agentix included.
 """
@@ -181,6 +179,21 @@ every `docker build`, agentix included.
     metavar="ARG",
     help="Extra argument passed when extracting a tar bundle with container run; repeat for multiple args.",
 )
+@click.option(
+    "--nix-arg",
+    "nix_args",
+    multiple=True,
+    metavar="ARG",
+    help="Raw argument forwarded verbatim to the in-container `nix build`; repeat for more. "
+    'E.g. --nix-arg "--option extra-substituters https://mirror...". Covers any nix knob.',
+)
+@click.option(
+    "--uv-arg",
+    "uv_args",
+    multiple=True,
+    metavar="ARG",
+    help="Raw argument forwarded verbatim to the in-container `uv sync`; repeat for more.",
+)
 def build(
     path: Path,
     name: str | None,
@@ -190,6 +203,8 @@ def build(
     container_bin: str | None,
     container_args: tuple[str, ...],
     container_run_args: tuple[str, ...],
+    nix_args: tuple[str, ...],
+    uv_args: tuple[str, ...],
 ) -> int:
     """Package a Python project into a bundle artifact."""
     src = path.resolve()
@@ -215,6 +230,8 @@ def build(
         container_bin=container_bin or "docker",
         container_args=container_args,
         container_run_args=container_run_args,
+        nix_args=nix_args,
+        uv_args=uv_args,
     )
 
     if dry_run:

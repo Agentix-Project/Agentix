@@ -14,15 +14,6 @@
 ARG AGENTIX_BUILDER_BASE=nixos/nix:latest
 FROM ${AGENTIX_BUILDER_BASE}
 
-# Project-side Nix configuration override. Forwarded verbatim from the
-# host environment by `agentix build` (see _ENV_BUILD_ARG_NAMES). Use it
-# for `extra-substituters = ...`, `extra-trusted-public-keys = ...`,
-# timeouts, or any other nix.conf setting. Nix reads NIX_CONFIG from the
-# process environment, so the matching ENV makes it visible to every
-# `RUN nix ...` step below.
-ARG NIX_CONFIG=""
-ENV NIX_CONFIG=${NIX_CONFIG}
-
 # Flakes + the modern CLI; accept flake `nixConfig` for substituters.
 # Syscall filtering can fail under Docker buildx emulation; the Docker
 # build sandbox is already the outer isolation boundary here.
@@ -34,6 +25,15 @@ RUN echo "experimental-features = nix-command flakes" >> /etc/nix/nix.conf \
 # or cookbook example lives in a subdirectory). Passed by `agentix build`.
 ARG AGENTIX_PROJECT_SUBPATH=.
 ENV AGENTIX_PROJECT_SUBPATH=${AGENTIX_PROJECT_SUBPATH}
+
+# Raw passthrough args from `agentix build --nix-arg ... --uv-arg ...`,
+# word-split by bundle-build.sh onto `nix build` / `uv sync`. This is how nix
+# knobs (substituters, trusted keys, cores, ...) reach the build — e.g.
+# --nix-arg "--option extra-substituters https://mirror...".
+ARG AGENTIX_NIX_ARGS=
+ARG AGENTIX_UV_ARGS=
+ENV AGENTIX_NIX_ARGS=${AGENTIX_NIX_ARGS} \
+    AGENTIX_UV_ARGS=${AGENTIX_UV_ARGS}
 
 COPY . /build
 WORKDIR /build

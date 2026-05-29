@@ -12,7 +12,7 @@ once buildx kicks off; the host never sees Python or Nix directly.
 
 from __future__ import annotations
 
-import os
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -20,28 +20,24 @@ from pathlib import Path
 
 from agentix.cli.build.platform import normalize_platform
 
-# Host env vars that, when present, are forwarded into the build container
-# verbatim as `--build-arg KEY=VALUE`. They're declared as `ARG` in the
-# Dockerfile and propagated to subsequent `RUN` steps via matching `ENV`.
-#
-#   NIX_CONFIG            Nix's official `nix.conf` override hatch — covers
-#                         substituters, trusted-public-keys, timeouts, and
-#                         every other setting in one knob.
-#   AGENTIX_BUILDER_BASE  Builder base image, used directly in `FROM`.
-#
-# HTTP proxies are intentionally not in this list: Docker BuildKit reads
-# them from `~/.docker/config.json`'s `proxies` section, which is the
-# durable, daemon-level place to configure them.
-_ENV_BUILD_ARG_NAMES = ("NIX_CONFIG", "AGENTIX_BUILDER_BASE")
-
 
 @dataclass(frozen=True)
 class ContainerBuildConfig:
-    """Docker-compatible build executor settings."""
+    """Docker-compatible build executor settings + raw engine passthrough args.
+
+    `nix_args` / `uv_args` are forwarded verbatim into the in-container
+    `nix build` / `uv sync`; `container_args` / `container_run_args` go to the
+    container build / export `run`. Raw passthrough keeps the CLI free of a
+    bespoke flag (or magic env var) per engine knob — point nix at a mirror
+    with `--nix-arg "--option extra-substituters https://..."`, override the
+    builder base with `--container-arg "--build-arg AGENTIX_BUILDER_BASE=..."`.
+    """
 
     container_bin: str = "docker"
     container_args: tuple[str, ...] = ()
     container_run_args: tuple[str, ...] = ()
+    nix_args: tuple[str, ...] = ()
+    uv_args: tuple[str, ...] = ()
 
 
 def _run(
@@ -72,22 +68,30 @@ def _build_container_bin(config: ContainerBuildConfig | None = None) -> str:
     return (config or ContainerBuildConfig()).container_bin
 
 
+def _split_passthrough(values: tuple[str, ...]) -> list[str]:
+    """Shlex-split each passthrough value so a whole shell-style sub-flag can be
+    given as one quoted arg, e.g. --container-arg '--build-arg FOO=bar'."""
+    return [token for value in values for token in shlex.split(value)]
+
+
 def _build_container_args(config: ContainerBuildConfig | None = None) -> list[str]:
-    return list((config or ContainerBuildConfig()).container_args)
+    return _split_passthrough((config or ContainerBuildConfig()).container_args)
 
 
 def _build_container_run_args(config: ContainerBuildConfig | None = None) -> list[str]:
-    return list((config or ContainerBuildConfig()).container_run_args)
+    return _split_passthrough((config or ContainerBuildConfig()).container_run_args)
 
 
-def _env_build_args() -> list[str]:
-    """Forward known host env vars into the build as `--build-arg KEY=VALUE`."""
-    return [
-        arg
-        for name in _ENV_BUILD_ARG_NAMES
-        if (value := os.environ.get(name))
-        for arg in ("--build-arg", f"{name}={value}")
-    ]
+def _passthrough_build_args(config: ContainerBuildConfig | None = None) -> list[str]:
+    """Pack raw nix/uv passthrough args into Docker build-args the in-container
+    `bundle-build.sh` word-splits back onto `nix build` / `uv sync`."""
+    config = config or ContainerBuildConfig()
+    args: list[str] = []
+    if config.nix_args:
+        args.extend(["--build-arg", f"AGENTIX_NIX_ARGS={' '.join(config.nix_args)}"])
+    if config.uv_args:
+        args.extend(["--build-arg", f"AGENTIX_UV_ARGS={' '.join(config.uv_args)}"])
+    return args
 
 
 def _docker_build_image(
@@ -113,7 +117,7 @@ def _docker_build_image(
             normalize_platform(platform),
             "--load",
             *_build_container_args(config),
-            *_env_build_args(),
+            *_passthrough_build_args(config),
             *tags_args,
             "--build-arg",
             f"AGENTIX_PROJECT_SUBPATH={project_subpath}",
@@ -127,7 +131,7 @@ def _docker_build_image(
             "--platform",
             normalize_platform(platform),
             *_build_container_args(config),
-            *_env_build_args(),
+            *_passthrough_build_args(config),
             *tags_args,
             "--build-arg",
             f"AGENTIX_PROJECT_SUBPATH={project_subpath}",

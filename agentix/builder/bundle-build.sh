@@ -27,7 +27,7 @@ git config user.name agentix-build
 git add -A
 
 echo ">>> [1/5] building Nix toolchain (interpreter + uv)"
-nix build .#toolchain -o toolchain-result --print-build-logs
+nix build .#toolchain ${AGENTIX_NIX_ARGS:-} -o toolchain-result --print-build-logs
 TOOLCHAIN="$(readlink -f toolchain-result)"
 
 echo ">>> [2/5] creating venv + syncing Python deps"
@@ -38,7 +38,7 @@ mkdir -p /nix/runtime
 if [ -f "${PROJECT}/uv.lock" ]; then UV_FROZEN="--frozen"; else UV_FROZEN=""; echo ">>>     no uv.lock — resolving dependencies fresh"; fi
 ( cd "${PROJECT}" \
   && VIRTUAL_ENV=/nix/runtime/venv "${TOOLCHAIN}/bin/uv" sync \
-        --active ${UV_FROZEN} --no-dev --no-editable )
+        --active ${UV_FROZEN} --no-dev --no-editable ${AGENTIX_UV_ARGS:-} )
 
 echo ">>> [3/5] discovering system-dep closures"
 /nix/runtime/venv/bin/python -m agentix.cli.build.closures \
@@ -46,7 +46,7 @@ echo ">>> [3/5] discovering system-dep closures"
 git add -A
 
 echo ">>> [4/5] building Nix runtime closure"
-nix build .#runtime -o runtime-result --print-build-logs
+nix build .#runtime ${AGENTIX_NIX_ARGS:-} -o runtime-result --print-build-logs
 
 echo ">>> [5/6] placing /nix/runtime"
 cp -a runtime-result/. /nix/runtime/

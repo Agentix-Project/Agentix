@@ -43,6 +43,21 @@ and tag are derived from `[project].name` and `[project].version`;
 | `-o`, `--output` | Output file or directory; defaults to `dist/<name>-<tag>-<platform>.bundle.tar` |
 | `--platform` | Sandbox runtime platform, `linux/amd64` or `linux/arm64`; defaults to local CPU |
 | `--dry-run` | Stage the Dockerfile and build context without running Docker |
+| `--container-bin` | Docker-compatible build CLI (`docker`, `podman`, …); default `docker` |
+| `--container-arg` / `--container-run-arg` | Raw args for the container build / export `run`; repeatable |
+| `--nix-arg` | Raw arg forwarded verbatim to the in-container `nix build`; repeatable |
+| `--uv-arg` | Raw arg forwarded verbatim to the in-container `uv sync`; repeatable |
+
+`--nix-arg`, `--uv-arg`, and `--container-arg` are **raw passthroughs** — each
+value is a shell-style string forwarded to the underlying engine (quote a whole
+sub-flag as one value), so any knob is reachable without a bespoke flag or env
+var. Point nix at a CN mirror, or override the builder base image:
+
+```bash
+agentix build . \
+  --nix-arg "--option extra-substituters https://mirrors.ustc.edu.cn/nix-channels/store" \
+  --container-arg "--build-arg AGENTIX_BUILDER_BASE=ghcr.io/nixos/nix:latest"
+```
 
 `--platform` describes the Linux container platform where the sandbox
 will run, not the machine that invokes the build. For example, use
@@ -53,9 +68,10 @@ remote x86 sandbox.
 
 The CLI never enumerates integrations. It installs the project into the
 runtime venv, and `uv sync` resolves and installs everything declared by
-the project. The in-container build runs
-`uv sync --frozen --no-dev --no-editable`, so the bundle gets the locked,
-production-only dependency closure.
+the project. With a committed `uv.lock` the in-container build runs
+`uv sync --frozen --no-dev --no-editable` (locked, reproducible); without one
+it resolves fresh. Either way the bundle gets a non-editable, production-only
+dependency closure.
 
 ```toml title="pyproject.toml"
 [project]

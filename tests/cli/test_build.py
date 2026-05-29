@@ -416,13 +416,11 @@ class TestDockerBuild:
         assert "buildx" not in cmd
         assert "--load" not in cmd
 
-    def test_env_build_args_forward_nix_config_and_builder_base(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """`NIX_CONFIG` and `AGENTIX_BUILDER_BASE` set on the host must be
-        forwarded into the build as `--build-arg`; unset names contribute
-        nothing. Proxy env vars are intentionally NOT forwarded — that's
-        BuildKit's job via `~/.docker/config.json`.
+    def test_passthrough_build_args_nix_uv(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """`--nix-arg` / `--uv-arg` (config.nix_args / uv_args) are packed into
+        AGENTIX_NIX_ARGS / AGENTIX_UV_ARGS build-args; the in-container script
+        word-splits them onto `nix build` / `uv sync`. A whole `--option ...`
+        sub-flag rides as one value.
         """
         calls: list[list[str]] = []
 
@@ -431,9 +429,6 @@ class TestDockerBuild:
             calls.append(cmd)
             return subprocess.CompletedProcess(cmd, 0)
 
-        monkeypatch.setenv("NIX_CONFIG", "extra-substituters = https://mirror.example\n")
-        monkeypatch.setenv("AGENTIX_BUILDER_BASE", "ghcr.io/nixos/nix@sha256:deadbeef")
-        monkeypatch.setenv("https_proxy", "http://proxy.example:3128")
         monkeypatch.setattr(docker, "_run", _fake_run)
 
         docker._docker_build_image(
@@ -441,21 +436,26 @@ class TestDockerBuild:
             tags=["demo:1.0.0"],
             project_subpath=Path("."),
             platform="linux/amd64",
+            config=docker.ContainerBuildConfig(
+                nix_args=("--option extra-substituters https://mirror.example", "--cores=4"),
+                uv_args=("--no-build-isolation",),
+            ),
         )
 
-        cmd = calls[0]
-        build_arg_pairs = list(zip(cmd, cmd[1:], strict=False))
+        build_arg_pairs = list(zip(calls[0], calls[0][1:], strict=False))
         assert (
             "--build-arg",
-            "NIX_CONFIG=extra-substituters = https://mirror.example\n",
+            "AGENTIX_NIX_ARGS=--option extra-substituters https://mirror.example --cores=4",
         ) in build_arg_pairs
-        assert (
-            "--build-arg",
-            "AGENTIX_BUILDER_BASE=ghcr.io/nixos/nix@sha256:deadbeef",
-        ) in build_arg_pairs
-        for _, value in build_arg_pairs:
-            assert not value.startswith("https_proxy=")
-            assert not value.startswith("HTTPS_PROXY=")
+        assert ("--build-arg", "AGENTIX_UV_ARGS=--no-build-isolation") in build_arg_pairs
+
+    def test_container_arg_shlex_splits_quoted_value(self) -> None:
+        cfg = docker.ContainerBuildConfig(
+            container_args=("--build-arg FOO=bar",),
+            container_run_args=("--device /dev/fuse",),
+        )
+        assert docker._build_container_args(cfg) == ["--build-arg", "FOO=bar"]
+        assert docker._build_container_run_args(cfg) == ["--device", "/dev/fuse"]
 
 
 # ── build: tar bundle artifacts ────────────────────────────────────
