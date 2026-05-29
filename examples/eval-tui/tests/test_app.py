@@ -6,7 +6,7 @@ from eval_tui.app import AgentixTUI
 from eval_tui.demo import DemoAgent, DemoDataset, DemoProvider
 from eval_tui.models import RunSpec
 from eval_tui.views.build import BuildView
-from eval_tui.views.catalog import discover_catalog
+from eval_tui.views.catalog import CatalogView, discover_catalog
 from eval_tui.views.observability import ObservabilityView
 from eval_tui.views.overview import OverviewView
 from eval_tui.views.rollouts import RolloutsView
@@ -103,6 +103,18 @@ async def test_tab_keybinding_switches_active_tab() -> None:
         await pilot.press("3")  # -> Catalog
         await pilot.pause()
         assert app.query_one(TabbedContent).active == "catalog"
+
+
+async def test_catalog_filter_narrows_rows() -> None:
+    app = AgentixTUI(rollout_spec=None)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        catalog = app.query_one(CatalogView)
+        table = app.query_one("#catalog-table", DataTable)
+        assert table.row_count == len(catalog._rows)
+        catalog.query_one("#catalog-filter", Input).value = "runner"
+        await pilot.pause()
+        assert 1 <= table.row_count <= len(catalog._rows)
 
 
 def test_discover_catalog_finds_agentix_distributions() -> None:

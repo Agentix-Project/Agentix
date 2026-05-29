@@ -49,9 +49,8 @@ class AgentixTUI(App):
     #rollouts-log { height: 3fr; border: round $primary; padding: 0 1; }
 
     #catalog-title { height: 1; padding: 0 1; }
+    #catalog-filter { margin: 0 1; }
     #catalog-table { height: 1fr; border: round $primary; }
-
-    #placeholder { text-align: center; width: auto; }
 
     #ov-banner { height: auto; padding: 1 2; content-align: center middle; text-align: center; }
     #ov-cards { height: 7; padding: 0 1; }
