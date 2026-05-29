@@ -82,6 +82,7 @@ packages = ["agentix"]
 [tool.uv.workspace]
 members = [
     "plugins/abridge",
+    "plugins/runner",
     "plugins/runtime-basic",
     "plugins/trace-otel",
     "plugins/agents/*",
@@ -111,6 +112,7 @@ select = ["E", "F", "I", "W", "UP"]
 include = [
     "agentix",
     "plugins/abridge/agentix",
+    "plugins/runner/src",
     "plugins/agents/claude-code/src",
     "plugins/agents/mini-swe-agent/src",
     "plugins/datasets/swebench/src",
@@ -129,6 +131,7 @@ exclude = ["**/__pycache__", "**/.venv", ".venv", "**/build"]
 # statically (it doesn't run `pkgutil.extend_path`).
 extraPaths = [
     "plugins/abridge",
+    "plugins/runner/src",
     "plugins/agents/claude-code/src",
     "plugins/agents/mini-swe-agent/src",
     "plugins/datasets/swebench/src",
