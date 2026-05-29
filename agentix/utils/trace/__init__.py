@@ -440,19 +440,32 @@ def trace(name: str, *, trace_id: str | None = None, **metadata: Any) -> Iterato
 
 
 @contextlib.contextmanager
-def span(name: str, *, span_id: str | None = None, **attrs: Any) -> Iterator[Span]:
+def span(name: str, *, span_id: str | None = None, parent: Span | None = None, **attrs: Any) -> Iterator[Span]:
     """Open an operation span. Auto-parents to the current span via
     contextvar; auto-attached to the current trace.
 
     If no trace is open the span still works — it gets a synthetic
     `trace_id` and skips the trace_start/end callbacks. Recommended:
-    wrap top-level work in `with trace(...)`."""
+    wrap top-level work in `with trace(...)`.
+
+    A `ContextVar` does not cross thread / executor boundaries, so a span
+    opened inside `run_in_executor` / `threading.Thread` work won't see a
+    parent opened on the originating task. To keep the trace tree intact when
+    fanning out, capture `get_current_span()` on the originating task and pass
+    it as `parent=` inside the worker; the child then inherits that span's id
+    and `trace_id` directly, regardless of the contextvar."""
     t = _current_trace.get()
-    parent = _current_span.get()
+    if parent is not None:
+        parent_id: str | None = parent.span_id
+        trace_id = parent.trace_id
+    else:
+        ctx_parent = _current_span.get()
+        parent_id = ctx_parent.span_id if ctx_parent is not None else None
+        trace_id = t.trace_id if t is not None else "trace_unbound"
     s = Span(
         span_id=span_id or gen_span_id(),
-        trace_id=t.trace_id if t is not None else "trace_unbound",
-        parent_id=parent.span_id if parent is not None else None,
+        trace_id=trace_id,
+        parent_id=parent_id,
         name=name,
         attrs=dict(attrs),
         started_at=_now_iso(),
