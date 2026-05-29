@@ -14,6 +14,23 @@ Upstream reference for Nix binary packaging:
 
 CLI invocation logic (argv, env, flag flow) typically comes from the upstream agent's own docs or any existing wrapper you have handy; this skill describes how to land it in the Agentix closure shape.
 
+> **Current layout (this monorepo, today).** Integrations now live *in-repo* as
+> uv-workspace members under `plugins/agents/<name>/` and
+> `plugins/datasets/<name>/`, following `docs/integrate-agent.mdx` and
+> `docs/integrate-dataset.mdx`. Each is a plain Python package
+> (`agentix.agents.<name>` / `agentix.plugins.datasets.<name>`) that exports a
+> normal `run` / `score` callable invoked via `client.remote(fn, ...)`, with an
+> optional `default.nix` (`{ pkgs }: drv`) registered through
+> `[project.entry-points."agentix.nix"]`. Working references to copy:
+> `plugins/agents/claude-code/` and `plugins/datasets/swebench/`.
+>
+> The self-contained closure ABI described below (`agentix_closures.<name>`,
+> `manifest.json`, `Dispatcher`, per-closure `Dockerfile`, separate
+> `Agentix-Agents-Hub` / `Agentix-Datasets` repos) is the **planned post-split
+> target** for when integrations graduate into their own repos. When working
+> inside this monorepo, follow the `plugins/` convention above and treat the
+> sections below as the direction of travel.
+
 ## When to activate
 
 - "add claude-code / aider / opencode / gemini-cli / qwen-code ... to agents-hub"
@@ -375,6 +392,7 @@ See `Agentix-Datasets/swebench/` for a working reference.
 ## Worked example pointer
 
 - llm-agents.nix source: `llm-agents.nix/packages/claude-code/{package.nix,hashes.json}`
-- Agentix target: `Agentix-Agents-Hub/claude-code/`
+- In-repo reference (today): `plugins/agents/claude-code/` (agent) and `plugins/datasets/swebench/` (dataset)
+- Post-split target: `Agentix-Agents-Hub/claude-code/`
 
-When migrating a *new* agent, diff your work against claude-code's target — it's the canonical reference for the typed-Python-closure shape.
+When migrating a *new* agent, diff your work against `plugins/agents/claude-code/` — it's the canonical reference for the current `plugins/` integration shape.

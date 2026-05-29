@@ -229,7 +229,7 @@ Full walkthrough: [quickstart](https://agentiix.github.io/quickstart).
 </table>
 
 These are separate PyPI packages but are maintained together in this
-monorepo under [`plugins/`](https://github.com/Agentiix/Agentix/tree/main/plugins).
+monorepo under [`plugins/`](https://github.com/Agentiix/Agentix/tree/master/plugins).
 
 ## Development
 
