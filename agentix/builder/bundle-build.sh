@@ -33,9 +33,12 @@ TOOLCHAIN="$(readlink -f toolchain-result)"
 echo ">>> [2/5] creating venv + syncing Python deps"
 mkdir -p /nix/runtime
 "${TOOLCHAIN}/bin/uv" venv /nix/runtime/venv --python "${TOOLCHAIN}/bin/python3"
+# A committed uv.lock pins the closure (`--frozen`); without one uv resolves
+# fresh. Either way the bundle gets a non-editable, prod-only dependency set.
+if [ -f "${PROJECT}/uv.lock" ]; then UV_FROZEN="--frozen"; else UV_FROZEN=""; echo ">>>     no uv.lock — resolving dependencies fresh"; fi
 ( cd "${PROJECT}" \
   && VIRTUAL_ENV=/nix/runtime/venv "${TOOLCHAIN}/bin/uv" sync \
-        --active --frozen --no-dev --no-editable ${AGENTIX_UV_ARGS:-} )
+        --active ${UV_FROZEN} --no-dev --no-editable ${AGENTIX_UV_ARGS:-} )
 
 echo ">>> [3/5] discovering system-dep closures"
 /nix/runtime/venv/bin/python -m agentix.cli.build.closures \

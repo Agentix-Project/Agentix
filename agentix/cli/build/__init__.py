@@ -19,8 +19,10 @@ The user-visible CLI surface is the `build` click command exported
 here; `cli/__init__.py` registers it on the top-level `agentix` group
 so `agentix build [PATH]` works as a subcommand.
 
-`agentix build` takes one project root — a directory with
-`pyproject.toml` + `uv.lock`. The build splits cleanly along one line:
+`agentix build` takes one project root — a directory with a
+`pyproject.toml`. A committed `uv.lock` is optional: with one the build
+is reproducible; without one uv resolves dependencies fresh. The build
+splits cleanly along one line:
 
   * Python deps are uv's job. Inside the build container `uv venv` +
     `uv sync` materialize the project's full dependency closure into
@@ -64,8 +66,10 @@ from agentix.cli.build.pyproject import REPO_ROOT, detect_python_version, read_p
 _BUILD_HELP = """\
 Package a Python project into a bundle artifact.
 
-The argument is a project root — a directory with `pyproject.toml` +
-`uv.lock`. The build splits cleanly along one line:
+The argument is a project root — a directory with a `pyproject.toml`. A
+committed `uv.lock` is optional: with one the build is reproducible
+(`uv sync --frozen`); without one uv resolves dependencies fresh. The
+build splits cleanly along one line:
 
 \b
   - Python deps are uv's job. Inside the build container `uv venv` +
@@ -197,7 +201,13 @@ def build(
 
     pyproject = read_pyproject(src)
     if not (src / "uv.lock").is_file():
-        raise SystemExit(f"{src}/uv.lock missing — run `uv lock` first")
+        # A lock is optional: with one the in-container build pins the closure
+        # via `uv sync --frozen`; without one uv resolves dependencies fresh.
+        print(
+            f"{src}/uv.lock not found — dependencies will be resolved fresh "
+            "(commit a uv.lock for reproducible builds).",
+            file=sys.stderr,
+        )
 
     name, tag = parse_name(name, pyproject)
     python_version = detect_python_version(pyproject)

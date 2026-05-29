@@ -17,8 +17,9 @@ This quickstart walks the shortest end-to-end Agentix flow:
 
 - Python 3.11 or newer
 - Docker or Podman for the build executor and local sandbox backend
-- `uv` for dependency locking (`uv.lock` is mandatory; the build
-  container runs `uv sync` against it)
+- `uv` (optional) to commit a `uv.lock`. With a lock the build is
+  reproducible (`uv sync --frozen`); without one the build container
+  resolves dependencies fresh
 
 ## One project, two images
 
@@ -44,7 +45,7 @@ project: one `main.py` and one `default.nix`.
 ```text
 hello-world/
 ├── pyproject.toml
-├── uv.lock                       # run `uv lock`
+├── uv.lock                       # optional — `uv lock` for reproducible builds
 ├── default.nix                   # adds ripgrep (rg) to the runtime PATH
 ├── main.py                       # defines hello(); also host orchestrator
 └── README.md
@@ -109,15 +110,15 @@ hello-world/
     The builder hands it the pinned Nixpkgs and merges the result into
     `/nix/runtime/bin`.
   </Tab>
-  <Tab title="uv.lock">
-    Run once and commit:
+  <Tab title="uv.lock (optional)">
+    A committed lock makes the build reproducible. Generate it with:
 
     ```bash
     uv lock
     ```
 
-    `agentix build` refuses to run without it because the builder runs
-    `uv sync` against the project lock.
+    Without a `uv.lock`, `agentix build` still works — the build container
+    resolves dependencies fresh instead of running `uv sync --frozen`.
   </Tab>
 </Tabs>
 

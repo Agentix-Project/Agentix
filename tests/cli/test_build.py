@@ -825,10 +825,11 @@ class TestMainErrors:
         with pytest.raises(SystemExit):
             build.main([str(empty), "--dry-run"])
 
-    def test_missing_uv_lock(self, tmp_path: Path) -> None:
+    def test_missing_uv_lock_is_allowed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A uv.lock is optional — the build proceeds (resolving fresh in-container).
         proj = _make_project(tmp_path / "proj", with_lock=False)
-        with pytest.raises(SystemExit):
-            build.main([str(proj), "--dry-run"])
+        monkeypatch.setattr("agentix.cli.build.REPO_ROOT", tmp_path / "out")
+        assert build.main([str(proj), "--dry-run"]) == 0
 
 
 # ── closures: plugin closure discovery ─────────────────────────────
