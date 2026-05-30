@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
-from agentix.runner import AgentResult, run_rollouts
+from agentix.runner import AgentResult, Rollout, run_rollouts
 
 
 class _Sandbox:
@@ -186,4 +186,59 @@ async def test_invalid_concurrency_raises() -> None:
             provider=_Provider(),
             bundle="b:0",
             n_concurrent=0,
+        )
+
+
+async def test_on_result_exception_does_not_abort_batch() -> None:
+    def boom(rollout: Rollout) -> None:
+        raise RuntimeError("callback boom")
+
+    rollouts = await run_rollouts(
+        dataset=_Dataset([_inst("a"), _inst("b")]),
+        agent=_OracleAgent(),
+        provider=_Provider(),
+        bundle="b:0",
+        on_result=boom,
+    )
+    assert sorted(r.instance_id for r in rollouts) == ["a", "b"]
+
+
+async def test_bad_image_is_isolated() -> None:
+    class _BadImageDataset(_Dataset):
+        def image(self, instance: dict[str, Any]) -> str:
+            if instance.get("bad_image"):
+                raise RuntimeError("no image for this instance")
+            return super().image(instance)
+
+    rollouts = await run_rollouts(
+        dataset=_BadImageDataset([_inst("bad", bad_image=True), _inst("good")]),
+        agent=_OracleAgent(),
+        provider=_Provider(),
+        bundle="b:0",
+    )
+    by_id = {r.instance_id: r for r in rollouts}
+    assert by_id["bad"].error is not None
+    assert by_id["good"].resolved
+
+
+async def test_timeout_yields_error_rollout() -> None:
+    [rollout] = await run_rollouts(
+        dataset=_Dataset([_inst("slow", delay=5.0)]),
+        agent=_OracleAgent(),
+        provider=_Provider(),
+        bundle="b:0",
+        timeout_s=0.1,
+    )
+    assert rollout.error is not None
+    assert "timeout" in rollout.error
+
+
+async def test_invalid_timeout_raises() -> None:
+    with pytest.raises(ValueError, match="timeout_s"):
+        await run_rollouts(
+            dataset=_Dataset([_inst("a")]),
+            agent=_OracleAgent(),
+            provider=_Provider(),
+            bundle="b:0",
+            timeout_s=0,
         )

@@ -145,9 +145,12 @@ async def rollout_one(
     returned `Rollout`; this never raises for them."""
     iid = _instance_id(instance)
     started = clock()
-    config = SandboxConfig(image=dataset.image(instance), bundle=bundle, platform=platform)
 
     try:
+        # `dataset.image(instance)` is part of the isolated work: a bad image
+        # key for one instance must surface as this instance's error, not
+        # escape and abort the whole batch.
+        config = SandboxConfig(image=dataset.image(instance), bundle=bundle, platform=platform)
         async with provider.session(config) as sandbox:
             if not await dataset.setup(sandbox, instance):
                 return Rollout(instance_id=iid, skipped="setup_failed", duration_s=clock() - started)
@@ -204,15 +207,24 @@ async def run_rollouts(
     n_concurrent: int = 1,
     platform: str | None = None,
     score: bool = True,
+    timeout_s: float | None = None,
     on_result: Callable[[Rollout], None] | None = None,
 ) -> list[Rollout]:
     """Run `agent` over every instance in `dataset` (or the explicit
     `instances`), at most `n_concurrent` at a time. Returns one `Rollout`
     per instance, in input order. Safe to call directly from an RL/eval
     loop — per-instance failures surface as `Rollout.error`, not
-    exceptions. `on_result`, if given, fires as each instance finishes."""
+    exceptions.
+
+    `timeout_s`, if set, bounds each instance: one that runs longer is
+    cancelled (its sandbox torn down) and recorded as `Rollout(error=...)`,
+    so a hung agent can't pin a concurrency slot forever. `on_result`, if
+    given, fires as each instance finishes; a callback that raises is logged
+    and never aborts the batch."""
     if n_concurrent < 1:
         raise ValueError("n_concurrent must be >= 1")
+    if timeout_s is not None and timeout_s <= 0:
+        raise ValueError("timeout_s must be > 0")
 
     items = list(instances) if instances is not None else list(dataset.instances())
     if not items:
@@ -222,7 +234,7 @@ async def run_rollouts(
 
     async def _run(instance: dict[str, Any]) -> Rollout:
         async with semaphore:
-            rollout = await rollout_one(
+            coro = rollout_one(
                 instance,
                 dataset=dataset,
                 agent=agent,
@@ -232,8 +244,28 @@ async def run_rollouts(
                 platform=platform,
                 score=score,
             )
+            try:
+                rollout = await (asyncio.wait_for(coro, timeout_s) if timeout_s is not None else coro)
+            except TimeoutError:
+                rollout = Rollout(instance_id=_instance_id(instance), error=f"timeout after {timeout_s}s")
         if on_result is not None:
-            on_result(rollout)
+            try:
+                on_result(rollout)
+            except Exception:
+                logger.exception("on_result callback failed for %s", rollout.instance_id)
         return rollout
 
-    return await asyncio.gather(*(_run(instance) for instance in items))
+    # return_exceptions=True so a single unexpected escape can never discard
+    # the rollouts that already completed. rollout_one + _run handle task-level
+    # failures, so this is a last-resort net; real cancellation still bubbles.
+    results = await asyncio.gather(*(_run(instance) for instance in items), return_exceptions=True)
+    rollouts: list[Rollout] = []
+    for instance, res in zip(items, results, strict=True):
+        if isinstance(res, Rollout):
+            rollouts.append(res)
+        elif isinstance(res, (asyncio.CancelledError, KeyboardInterrupt)):
+            raise res
+        else:
+            logger.error("rollout for %s raised", _instance_id(instance), exc_info=res)
+            rollouts.append(Rollout(instance_id=_instance_id(instance), error=_error(res)))
+    return rollouts
