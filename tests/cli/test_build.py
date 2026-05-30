@@ -303,6 +303,50 @@ class TestStageContext:
         assert not (stage / "repo" / ".venv").exists()
         assert not (stage / "repo" / "__pycache__").exists()
 
+    def test_gitignored_files_excluded(self, tmp_path: Path) -> None:
+        # Secrets / junk that .gitignore excludes must never enter the build
+        # context (and the image layers built from it).
+        repo = _make_project(tmp_path / "repo")
+        _git_init(repo)
+        (repo / ".gitignore").write_text("secret.env\n*.key\n")
+        (repo / "secret.env").write_text("TOKEN=shh")
+        (repo / "id.key").write_text("PRIVATE KEY")
+        (repo / "keep.py").write_text("x = 1\n")
+
+        stage = tmp_path / "stage"
+        build.stage_context(stage, context_root=repo, python_version="311", platform="linux/amd64")
+
+        assert not (stage / "repo" / "secret.env").exists()
+        assert not (stage / "repo" / "id.key").exists()
+        # Untracked-but-not-ignored source is still included.
+        assert (stage / "repo" / "keep.py").is_file()
+        assert (stage / "repo" / ".gitignore").is_file()
+
+    def test_non_git_project_uses_filtered_copy(self, tmp_path: Path) -> None:
+        # Outside a git work tree there's no .gitignore to honor; fall back to
+        # the filtered working-tree copy (skip-list still applies).
+        repo = _make_project(tmp_path / "proj")  # no _git_init
+        (repo / ".venv").mkdir()
+        (repo / ".venv" / "junk").write_text("x")
+
+        stage = tmp_path / "stage"
+        build.stage_context(stage, context_root=repo, python_version="311", platform="linux/amd64")
+
+        assert (stage / "repo" / "pyproject.toml").is_file()
+        assert not (stage / "repo" / ".venv").exists()
+
+    def test_empty_git_repo_still_creates_repo_dir(self, tmp_path: Path) -> None:
+        # A git work tree with nothing to copy must still produce `repo/` —
+        # the in-container `COPY repo/` needs it to exist.
+        repo = tmp_path / "empty"
+        repo.mkdir()
+        _git_init(repo)
+
+        stage = tmp_path / "stage"
+        build.stage_context(stage, context_root=repo, python_version="311", platform="linux/amd64")
+
+        assert (stage / "repo").is_dir()
+
     def test_nested_build_dir_not_skipped(self, tmp_path: Path) -> None:
         """The repo-root `build/` dir is a `python -m build` / dry-run
         output that's correctly skipped — but a *nested* `build/` like

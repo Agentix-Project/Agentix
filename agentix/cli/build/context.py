@@ -69,6 +69,59 @@ def _make_ignore(context_root: Path) -> Callable[[str, list[str]], set[str]]:
 
     return ignore
 
+
+def _skip_relpath(rel: str) -> bool:
+    """Whether a repo-relative path should be skipped — the same skip-list as
+    `_make_ignore`, applied to a `git ls-files` path: `_SKIP_ANYWHERE` names at
+    any depth, `_SKIP_TOP_LEVEL` names only at the repo root."""
+    parts = rel.split("/")
+    if any(part in _SKIP_ANYWHERE for part in parts):
+        return True
+    return bool(parts) and parts[0] in _SKIP_TOP_LEVEL
+
+
+def _git_listed_files(context_root: Path) -> list[str] | None:
+    """Repo-relative paths git would include: tracked files plus
+    untracked-but-not-ignored ones (`--exclude-standard` honors `.gitignore`,
+    `.git/info/exclude`, and the global excludes). Returns None when
+    `context_root` is not a git work tree."""
+    proc = subprocess.run(
+        ["git", "-C", str(context_root), "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return None
+    # Read bytes and split on NUL: `text=True` would translate newlines and
+    # mangle a path containing a CR, defeating the `-z` delimiting.
+    return [p.decode() for p in proc.stdout.split(b"\0") if p]
+
+
+def _copy_repo(context_root: Path, repo_dest: Path) -> None:
+    """Stage the project's repo into `repo_dest`.
+
+    Prefer the set of files git tracks or leaves untracked-but-not-ignored, so
+    `.gitignore`'d content — caches, virtualenvs, `.env`/secrets, large local
+    data — never enters the build context or the image layers built from it.
+    Falls back to a filtered working-tree copy when the project isn't in a git
+    repo. The `_SKIP_*` list still applies as a backstop for un-ignored caches.
+    """
+    listed = _git_listed_files(context_root)
+    if listed is None:
+        shutil.copytree(context_root, repo_dest, ignore=_make_ignore(context_root), symlinks=True)
+        return
+    # Always create the destination, even if the listing is empty — the build
+    # context's `repo/` directory must exist for the in-container `COPY`.
+    repo_dest.mkdir(parents=True, exist_ok=True)
+    for rel in listed:
+        if _skip_relpath(rel):
+            continue
+        src = context_root / rel
+        if not src.is_symlink() and not src.exists():
+            continue  # listed but removed from the working tree
+        dest = repo_dest / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest, follow_symlinks=False)
+
 # Files staged verbatim from `agentix/builder/` into the build context.
 _BUILDER_FILES = (
     "flake.nix",
@@ -149,12 +202,7 @@ def stage_context(
     stage.mkdir(parents=True, exist_ok=True)
 
     repo_dest = stage / "repo"
-    shutil.copytree(
-        context_root,
-        repo_dest,
-        ignore=_make_ignore(context_root),
-        symlinks=True,
-    )
+    _copy_repo(context_root, repo_dest)
 
     for name in _BUILDER_FILES:
         (stage / name).write_bytes(_shipped(name))
