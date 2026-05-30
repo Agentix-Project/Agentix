@@ -200,7 +200,13 @@ class _SubprocessWorker:
         self._worker_id = _new_id()[:8]
 
         self._proc: asyncio.subprocess.Process | None = None
-        self._send_lock = asyncio.Lock()
+        # Outbound frames go through a queue drained by a single task, rather
+        # than holding a lock across `writer.drain()`. Holding a lock across
+        # drain serializes every submission behind one back-pressured write and
+        # risks a two-way pipe deadlock; and concurrent `drain()` calls hit
+        # asyncio's "drain() under way" assertion. One drainer avoids both.
+        self._outbound: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._drainer: asyncio.Task | None = None
         self._ready = asyncio.Event()
         self._boot_error: dict[str, Any] | None = None
         self._read_task: asyncio.Task | None = None
@@ -230,6 +236,7 @@ class _SubprocessWorker:
             env=env,
         )
         self._read_task = asyncio.create_task(self._read_loop())
+        self._drainer = asyncio.create_task(self._drain_outbound())
         ready_task = asyncio.create_task(self._ready.wait())
         closed_task = asyncio.create_task(self._closed.wait())
         assert self._proc is not None
@@ -320,9 +327,24 @@ class _SubprocessWorker:
             logger.warning("runtime worker: unknown frame %r", kind)
 
     async def _send(self, payload: dict[str, Any]) -> None:
+        # Enqueue; the single drainer task does the actual write + drain so no
+        # caller ever blocks another on back-pressure, and `drain()` is only
+        # ever awaited from one place.
+        await self._outbound.put(payload)
+
+    async def _drain_outbound(self) -> None:
         assert self._proc is not None and self._proc.stdin is not None
-        async with self._send_lock:
-            await write_frame(self._proc.stdin, payload)
+        try:
+            while True:
+                payload = await self._outbound.get()
+                try:
+                    await write_frame(self._proc.stdin, payload)
+                except Exception:
+                    logger.debug("worker stdin write failed", exc_info=True)
+                finally:
+                    self._outbound.task_done()
+        except asyncio.CancelledError:
+            pass
 
     def _call_frame(self, cid: str, request: RemoteRequest) -> dict[str, Any]:
         return {
@@ -376,6 +398,9 @@ class _SubprocessWorker:
             return
         try:
             await self._send({"type": "shutdown"})
+            # Let the drainer flush the shutdown frame before we stop waiting.
+            with contextlib.suppress(BaseException):
+                await asyncio.wait_for(self._outbound.join(), timeout=2)
         except Exception:
             pass
         try:
@@ -387,10 +412,11 @@ class _SubprocessWorker:
             except TimeoutError:
                 self._proc.kill()
                 await self._proc.wait()
-        if self._read_task is not None:
-            self._read_task.cancel()
-            with contextlib.suppress(BaseException):
-                await self._read_task
+        for task in (self._read_task, self._drainer):
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(BaseException):
+                    await task
 
 
 def _new_id() -> str:

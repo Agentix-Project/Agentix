@@ -40,6 +40,25 @@ async def test_subprocess_worker_round_trip():
         await mp.shutdown()
 
 
+async def test_subprocess_worker_handles_many_concurrent_calls():
+    """Smoke test: many concurrent calls funnel through the single outbound
+    drainer without deadlock and every result comes back correctly.
+
+    This exercises the queue design under concurrency; it is not a strict
+    regression guard against the old lock-across-`drain()` (which only
+    deadlocks under sustained two-way pipe backpressure, impractical to force
+    deterministically with a real subprocess here)."""
+    mp = _make_worker()
+    try:
+        responses = await asyncio.gather(
+            *(mp.call(request_for(target.echo, kwargs={"msg": str(i)})) for i in range(25))
+        )
+        msgs = sorted(pickle.loads(r.value).msg for r in responses)
+        assert msgs == sorted(f"echo:{i}" for i in range(25))
+    finally:
+        await mp.shutdown()
+
+
 async def test_subprocess_worker_bad_callable_fails_fast():
     """A garbage `callable` string yields an error, not a hang."""
     from agentix.runtime.shared.callables import RemoteCallable
