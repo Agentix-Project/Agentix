@@ -20,6 +20,7 @@ resolution-markers = [
 members = [
     "agentix-agent-claude-code",
     "agentix-agent-mini-swe-agent",
+    "agentix-agent-opencode",
     "agentix-bridge",
     "agentix-dataset-swe",
     "agentix-deployment-apptainer",
@@ -57,6 +58,17 @@ requires-dist = [
     { name = "agentixx", editable = "." },
     { name = "mini-swe-agent" },
 ]
+
+[[package]]
+name = "agentix-agent-opencode"
+version = "0.1.0"
+source = { editable = "plugins/agents/opencode" }
+dependencies = [
+    { name = "agentixx" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "agentixx", editable = "." }]
 
 [[package]]
 name = "agentix-bridge"
