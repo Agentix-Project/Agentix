@@ -36,6 +36,7 @@ import asyncio
 import collections
 import logging
 import os
+import threading
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -331,6 +332,11 @@ class ReliableStream:
         self._buffer: collections.deque[tuple[int, str, dict[str, Any]]] = collections.deque(
             maxlen=max_buffer,
         )
+        # `_wrap` runs on worker threads (sync remote callables emit logs /
+        # spans via `asyncio.to_thread`), while `_on_ack` / `_on_resume` run on
+        # the event loop. Guard the shared sequence + buffer so the seq counter
+        # stays strictly monotonic and the deque isn't mutated concurrently.
+        self._lock = threading.Lock()
         # The host emits these on (re)connect / after delivery; the
         # namespace's auto-register only catches `on_<identifier>`
         # methods, so we wire them explicitly here.
@@ -348,25 +354,34 @@ class ReliableStream:
         return self.emit_nowait(event, data)
 
     def _wrap(self, event: str, data: Any) -> tuple[int, dict[str, Any]]:
-        maxlen = self._buffer.maxlen
-        if maxlen is not None and len(self._buffer) >= maxlen:
-            # Buffer full: this append evicts the oldest *unacked* event,
-            # so at-least-once is degraded until the host catches up.
-            # Surface it instead of dropping silently.
-            self._dropped += 1
-            if self._dropped == 1 or self._dropped % 1000 == 0:
-                logger.warning(
-                    "ReliableStream %s buffer full (max_buffer=%d): dropping oldest "
-                    "unacked events; at-least-once delivery degraded (dropped=%d). "
-                    "Raise AGENTIX_LOG_BUFFER / AGENTIX_TRACE_BUFFER or ack faster.",
-                    self._ns.namespace,
-                    maxlen,
-                    self._dropped,
-                )
-        seq = self._next_seq
-        self._next_seq += 1
-        wrapped = {"_seq": seq, "data": data}
-        self._buffer.append((seq, event, wrapped))
+        # The maxlen-full check, the eviction it implies, the `_dropped`
+        # counter, the seq allocation, and the append must be one atomic step,
+        # or two concurrent emits can collide on `_next_seq`/the deque.
+        dropped_total: int | None = None
+        with self._lock:
+            maxlen = self._buffer.maxlen
+            if maxlen is not None and len(self._buffer) >= maxlen:
+                # Buffer full: this append evicts the oldest *unacked* event,
+                # so at-least-once is degraded until the host catches up.
+                # Surface it instead of dropping silently.
+                self._dropped += 1
+                if self._dropped == 1 or self._dropped % 1000 == 0:
+                    dropped_total = self._dropped
+            seq = self._next_seq
+            self._next_seq += 1
+            wrapped = {"_seq": seq, "data": data}
+            self._buffer.append((seq, event, wrapped))
+        if dropped_total is not None:
+            # Log outside the lock — the bridged logger must not re-enter the
+            # locked region.
+            logger.warning(
+                "ReliableStream %s buffer full (max_buffer=%d): dropping oldest "
+                "unacked events; at-least-once delivery degraded (dropped=%d). "
+                "Raise AGENTIX_LOG_BUFFER / AGENTIX_TRACE_BUFFER or ack faster.",
+                self._ns.namespace,
+                self._buffer.maxlen,
+                dropped_total,
+            )
         return seq, wrapped
 
     async def _on_ack(self, payload: Any) -> None:
@@ -376,8 +391,9 @@ class ReliableStream:
         if not isinstance(ack_seq, int):
             return
         # Drop everything the host has confirmed it processed.
-        while self._buffer and self._buffer[0][0] <= ack_seq:
-            self._buffer.popleft()
+        with self._lock:
+            while self._buffer and self._buffer[0][0] <= ack_seq:
+                self._buffer.popleft()
 
     async def _on_resume(self, payload: Any) -> None:
         if not isinstance(payload, dict):
@@ -385,9 +401,10 @@ class ReliableStream:
         since = payload.get("since_seq", 0)
         if not isinstance(since, int):
             since = 0
-        # Replay in order. We snapshot first because replays can
-        # interleave with new emits arriving on the same loop.
-        snapshot = list(self._buffer)
+        # Snapshot under the lock (replays can interleave with new emits), then
+        # replay outside it so the emit path isn't held under the lock.
+        with self._lock:
+            snapshot = list(self._buffer)
         for seq, event, wrapped in snapshot:
             if seq > since:
                 _emit_nowait(self._ns.namespace, event, wrapped)
