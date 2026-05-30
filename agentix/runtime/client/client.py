@@ -293,6 +293,11 @@ class RuntimeClient:
                         err = RemoteError.model_validate(data["error"])
                         terminated = True
                         _raise_remote_error(display_name, err)
+                    if kind == "fatal":
+                        # The connection was terminally lost (reconnection
+                        # disabled) — no result will ever arrive on this queue.
+                        terminated = True
+                        raise data
         except TimeoutError:
             raise CallTimeout(
                 f"remote call '{display_name}' exceeded deadline of {self._call_deadline}s"
@@ -348,13 +353,25 @@ class RuntimeClient:
                     )
 
             async def _on_disconnect(*_args):
-                # Tasks survive on the server side; results are buffered
-                # until ack. We rely on socketio's auto-reconnect to come
-                # back, then `_on_connect` will re-emit `resume`.
-                logger.debug("sio disconnect; will resume after reconnect")
+                # With reconnection on (the default), tasks survive server-side
+                # and `_on_connect` re-emits `resume` to recover results, so we
+                # just wait. With reconnection explicitly disabled, this
+                # disconnect is terminal — no resume will ever deliver the
+                # pending results, so fail them now instead of hanging until
+                # `call_deadline` (which defaults to unbounded).
+                if self._sio_options.get("reconnection") is False:
+                    self._fail_pending(RuntimeUnreachable(f"runtime server connection lost: {self._base_url}"))
+                else:
+                    logger.debug("sio disconnect; will resume after reconnect")
+
+            async def _on_connect_error(*args):
+                # Previously unobserved: surface (re)connection failures so
+                # they aren't silently dropped.
+                logger.debug("sio connect_error for %s: %s", self._base_url, args[0] if args else "")
 
             sio.on("connect", _on_connect, namespace=RPC_NAMESPACE)
             sio.on("disconnect", _on_disconnect, namespace=RPC_NAMESPACE)
+            sio.on("connect_error", _on_connect_error, namespace=RPC_NAMESPACE)
 
             namespaces = [RPC_NAMESPACE]
             for ns in self._namespaces:
@@ -395,6 +412,14 @@ class RuntimeClient:
             return
         with contextlib.suppress(BaseException):
             await sio.emit("ack", pack({"call_id": call_id}), namespace=RPC_NAMESPACE)
+
+    def _fail_pending(self, exc: BaseException) -> None:
+        """Drain every in-flight call's queue with a fatal error so each
+        waiting `remote(...)` stops and raises, instead of blocking forever on
+        a connection that will never deliver a result."""
+        for q in self._pending.values():
+            with contextlib.suppress(BaseException):
+                q.put_nowait(("fatal", exc))
 
 
 __all__ = ["CallTimeout", "RemoteCallError", "RuntimeClient", "RuntimeUnreachable"]
