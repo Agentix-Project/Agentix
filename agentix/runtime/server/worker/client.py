@@ -469,8 +469,15 @@ class RuntimeWorkerClient:
             if worker is not None:
                 # The previous worker exited (crash, OOM kill). Its read loop
                 # already failed every in-flight call; replace it so the
-                # sandbox keeps serving instead of erroring out forever.
+                # sandbox keeps serving instead of erroring out forever. Tear
+                # the dead worker down first: its subprocess is gone but its
+                # drain task is still parked on the outbound queue, so without
+                # this every respawn would leak one task (and the process
+                # transport it holds). The subprocess is already dead, so this
+                # only cancels the orphaned reader/drainer and returns at once.
                 logger.warning("runtime worker is gone; spawning a replacement")
+                with contextlib.suppress(Exception):
+                    await worker.shutdown()
             worker = _SubprocessWorker(
                 self._python,
                 runtime_bin_dir=self._runtime_bin_dir,

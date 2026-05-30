@@ -315,8 +315,12 @@ class ReliableStream:
         behind, the oldest unacked events are evicted (logged at
         WARNING) and at-least-once is degraded for those events.
 
-    Wire envelope: `{"_seq": N, "data": <event payload>}`. The host
-    extracts `data` after dedup. New events outside this envelope are
+    Wire envelope: `{"_sid": id, "_seq": N, "data": <event payload>}`.
+    `_sid` identifies this stream instance; it is fixed for the life of
+    the stream and distinct per worker process, so when a crashed worker
+    is respawned the host sees a new `_sid` and knows the `_seq` counter
+    has restarted (see `HostTraceNamespace` / `HostLogNamespace`). The
+    host extracts `data` after dedup. Events outside this envelope are
     treated as legacy (no-seq) and pass through.
     """
 
@@ -327,6 +331,10 @@ class ReliableStream:
         max_buffer: int = 10_000,
     ) -> None:
         self._ns = namespace
+        # A per-instance stream id. A respawned worker builds a fresh
+        # ReliableStream whose `_seq` restarts at 1; the changed `_sid` is
+        # how the host tells "stream restarted" apart from "duplicate".
+        self._sid = uuid.uuid4().hex[:8]
         self._next_seq = 1
         self._dropped = 0
         self._buffer: collections.deque[tuple[int, str, dict[str, Any]]] = collections.deque(
@@ -369,7 +377,7 @@ class ReliableStream:
                     dropped_total = self._dropped
             seq = self._next_seq
             self._next_seq += 1
-            wrapped = {"_seq": seq, "data": data}
+            wrapped = {"_sid": self._sid, "_seq": seq, "data": data}
             self._buffer.append((seq, event, wrapped))
         if dropped_total is not None:
             # Log outside the lock — the bridged logger must not re-enter the

@@ -58,7 +58,7 @@ async def test_seq_monotonic_and_envelope_shape(_isolated_bridge):
     frames = _emitted(sent, "record")
     assert len(frames) == 5
     for i, frame in enumerate(frames):
-        assert frame["data"] == {"_seq": i + 1, "data": {"i": i}}
+        assert frame["data"] == {"_sid": stream._sid, "_seq": i + 1, "data": {"i": i}}
 
 
 async def test_ack_releases_buffered_entries(_isolated_bridge):

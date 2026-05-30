@@ -177,6 +177,7 @@ class HostLogNamespace(socketio.AsyncClientNamespace):
     def __init__(self) -> None:
         super().__init__(NAMESPACE)
         self._last_seq = 0
+        self._sid: str | None = None
 
     async def trigger_event(self, event: str, *args: Any) -> Any:
         if event == "connect":
@@ -195,12 +196,22 @@ class HostLogNamespace(socketio.AsyncClientNamespace):
             return
 
         seq = envelope.get("_seq")
+        sid = envelope.get("_sid")
         payload = envelope.get("data")
         if not isinstance(seq, int) or not isinstance(payload, dict):
             # Legacy / malformed payload — fall through without dedup.
             if isinstance(envelope, dict) and isinstance(payload, dict):
                 _replay_record(payload)
             return
+
+        if sid != self._sid:
+            # A new stream id means the sandbox-side stream restarted — e.g.
+            # the worker subprocess crashed and was respawned with a fresh
+            # ReliableStream whose `_seq` counter starts back at 1. Adopt the
+            # new stream and reset the cursor so its early records aren't
+            # mistaken for duplicates of the old stream and silently dropped.
+            self._sid = sid
+            self._last_seq = 0
 
         if seq <= self._last_seq:
             # Duplicate from a resume + already-delivered race. Re-ack

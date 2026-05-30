@@ -139,6 +139,7 @@ class HostTraceNamespace(socketio.AsyncClientNamespace):
     def __init__(self) -> None:
         super().__init__(NAMESPACE)
         self._last_seq = 0
+        self._sid: str | None = None
 
     async def trigger_event(self, event: str, *args: Any) -> Any:
         if event == "connect":
@@ -155,12 +156,22 @@ class HostTraceNamespace(socketio.AsyncClientNamespace):
             return
 
         seq = envelope.get("_seq")
+        sid = envelope.get("_sid")
         payload = envelope.get("data")
         if not isinstance(seq, int) or not isinstance(payload, dict):
             # Legacy / malformed: best-effort dispatch, no ack.
             if isinstance(envelope, dict):
                 _dispatch(event, envelope)
             return
+
+        if sid != self._sid:
+            # A new stream id means the sandbox-side stream restarted — e.g.
+            # the worker subprocess crashed and was respawned with a fresh
+            # ReliableStream whose `_seq` counter starts back at 1. Adopt the
+            # new stream and reset the cursor so its early events aren't
+            # mistaken for duplicates of the old stream and silently dropped.
+            self._sid = sid
+            self._last_seq = 0
 
         if seq <= self._last_seq:
             await self._emit_ack(seq)

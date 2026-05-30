@@ -173,9 +173,20 @@ async def test_subprocess_worker_respawns_after_death():
             await asyncio.sleep(0.05)
         assert worker1.closed
 
+        drainer1 = worker1._drainer  # type: ignore[attr-defined]
+        read1 = worker1._read_task  # type: ignore[attr-defined]
+        assert drainer1 is not None
+
         r2 = await mp.call(request_for(target.echo, kwargs={"msg": "two"}))
         assert r2.ok, r2.error
         assert pickle.loads(r2.value).msg == "echo:two"
         assert mp._worker is not worker1  # a fresh worker was spawned
+
+        # The dead worker must be torn down on respawn, not leaked: its drain
+        # task is otherwise parked on the outbound queue forever. Give the
+        # cancellation a tick to settle, then assert both background tasks ended.
+        await asyncio.sleep(0)
+        assert drainer1.done(), "respawn leaked the dead worker's drain task"
+        assert read1 is not None and read1.done()
     finally:
         await mp.shutdown()
