@@ -116,3 +116,13 @@ async def test_read_frame_under_cap_still_round_trips(monkeypatch: pytest.Monkey
     monkeypatch.setattr(framing, "MAX_FRAME_BYTES", 4096)
     payload = {"type": "result", "call_id": "ok"}
     assert (await read_frame(_reader(pack_frame(payload)))) == payload
+
+
+async def test_read_frame_rejects_non_dict_body():
+    # A valid-length but non-dict body (a desynced pipe) is rejected at the
+    # framing boundary, not passed to consumers that `frame.get(...)` and crash.
+    from agentix.runtime.shared.codec import pack
+
+    body = pack([1, 2, 3])
+    with pytest.raises(ValueError):
+        await read_frame(_reader(struct.pack("<I", len(body)) + body))

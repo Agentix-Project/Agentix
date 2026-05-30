@@ -46,6 +46,10 @@ class RemoteError(BaseModel):
     message: str
     traceback: str | None = None
     cancelled: bool = False
+    # Worker process exit status when the call died with the subprocess
+    # (type == "WorkerDied"): negative means killed by that signal
+    # (e.g. -9 = SIGKILL, the OOM-killer's signature). None otherwise.
+    returncode: int | None = None
 
 
 class RemoteResponse(BaseModel):

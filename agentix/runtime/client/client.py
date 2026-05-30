@@ -68,9 +68,32 @@ class CallTimeout(RuntimeError):
     """
 
 
+class WorkerExited(RemoteCallError):
+    """The sandbox worker subprocess died mid-call (crash / OOM-kill / exit).
+
+    A subclass of `RemoteCallError`, so existing `except RemoteCallError`
+    handlers still catch it; catch `WorkerExited` specifically to branch on
+    the worker's process exit status. `returncode` is negative when the
+    worker was killed by a signal — `-9` (SIGKILL) is the OOM-killer's
+    signature, the most common RL/eval failure:
+
+        try:
+            await sandbox.remote(agent.run, task=task)
+        except WorkerExited as exc:
+            if exc.returncode == -9:
+                retry_with_more_memory()
+    """
+
+    @property
+    def returncode(self) -> int | None:
+        return self.error.returncode
+
+
 def _raise_remote_error(display_name: str, error: RemoteError):
     if error.cancelled:
         raise asyncio.CancelledError(error.message)
+    if error.type == "WorkerDied":
+        raise WorkerExited(display_name=display_name, error=error)
     raise RemoteCallError(display_name=display_name, error=error)
 
 
@@ -181,7 +204,14 @@ class RuntimeClient:
     # ── public API ───────────────────────────────────────────────
 
     async def health(self) -> HealthResponse:
-        r = await self._client.get("/health")
+        try:
+            r = await self._client.get("/health")
+        except httpx.RequestError as exc:
+            # Same wrapped, URL-bearing error `remote()` raises, so the
+            # designated "is it up?" probe never leaks a bare httpx error.
+            raise RuntimeUnreachable(
+                f"runtime server unreachable at {self._base_url}: {exc}"
+            ) from exc
         r.raise_for_status()
         return HealthResponse.model_validate(r.json())
 
@@ -422,4 +452,10 @@ class RuntimeClient:
                 q.put_nowait(("fatal", exc))
 
 
-__all__ = ["CallTimeout", "RemoteCallError", "RuntimeClient", "RuntimeUnreachable"]
+__all__ = [
+    "CallTimeout",
+    "RemoteCallError",
+    "RuntimeClient",
+    "RuntimeUnreachable",
+    "WorkerExited",
+]

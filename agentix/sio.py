@@ -145,6 +145,14 @@ class Namespace:
             )
         self._handlers: dict[str, list[Handler]] = {}
         self._pending_requests: dict[str, asyncio.Future] = {}
+        # Strong refs to in-flight coroutine-handler tasks. asyncio only
+        # weakly references running tasks, so without this a handler can be
+        # GC'd mid-await — dropping a reply / ack / resume and hanging the
+        # peer. Mirrors `AsyncClientNamespace._detached_tasks` on the host.
+        self._detached_tasks: set[asyncio.Task] = set()
+        # Events already warned about as unhandled — warn once each, not per
+        # inbound event, so a steady stream doesn't flood the log.
+        self._warned_unhandled: set[str] = set()
         self._auto_register()
 
     def _auto_register(self) -> None:
@@ -245,6 +253,7 @@ class Namespace:
     def _dispatch(self, event: str, data: Any) -> None:
         handlers = list(self._handlers.get(event, ()))
         if not handlers:
+            self._warn_unhandled(event)
             return
         for h in handlers:
             try:
@@ -257,7 +266,26 @@ class Namespace:
                 )
                 continue
             if asyncio.iscoroutine(result):
-                asyncio.create_task(_swallow_exc(result, self.namespace, event))
+                task = asyncio.create_task(_swallow_exc(result, self.namespace, event))
+                self._detached_tasks.add(task)
+                task.add_done_callback(self._detached_tasks.discard)
+
+    def _warn_unhandled(self, event: str) -> None:
+        """An inbound event found no handler — almost always a typo'd
+        `on_<event>` method or a namespace-string mismatch between the two
+        plugin halves, both of which otherwise silently drop the event with
+        zero signal. Warn once per event name."""
+        if event in self._warned_unhandled:
+            return
+        self._warned_unhandled.add(event)
+        logger.warning(
+            "namespace %s received event %r with no handler (registered: %s). "
+            "A typo in an on_<event> method or a mismatched namespace string "
+            "silently drops the event.",
+            self.namespace,
+            event,
+            sorted(self._handlers),
+        )
 
 
 async def _swallow_exc(coro: Awaitable[None], namespace: str, event: str) -> None:

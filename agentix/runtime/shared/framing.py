@@ -65,7 +65,14 @@ def pack_frame(payload: dict[str, Any]) -> bytes:
 
 
 async def read_frame(reader: asyncio.StreamReader) -> dict[str, Any] | None:
-    """Read one frame from `reader`. Returns None on EOF."""
+    """Read one frame from `reader`. Returns None on EOF.
+
+    Raises `FrameTooLarge` if the declared length exceeds `MAX_FRAME_BYTES`,
+    and `ValueError` if the body does not decode to a dict — both indicate a
+    desynced control pipe and are caught by the read loops (which then fail
+    pending calls), never a silent giant allocation or a downstream
+    `AttributeError` on `frame.get(...)`.
+    """
     try:
         header = await reader.readexactly(4)
     except asyncio.IncompleteReadError:
@@ -78,7 +85,12 @@ async def read_frame(reader: asyncio.StreamReader) -> dict[str, Any] | None:
     if n == 0:
         return {}
     body = await reader.readexactly(n)
-    return unpack(body)
+    frame = unpack(body)
+    if not isinstance(frame, dict):
+        raise ValueError(
+            f"frame body decoded to {type(frame).__name__}, expected dict; control pipe desynchronized"
+        )
+    return frame
 
 
 async def write_frame(writer: asyncio.StreamWriter, payload: dict[str, Any]) -> None:

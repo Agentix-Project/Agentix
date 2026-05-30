@@ -8,7 +8,10 @@ live here so the core file stays small.
 
 from __future__ import annotations
 
+import json
 import sys
+import threading
+from pathlib import Path
 from typing import Any
 
 from agentix.utils.trace import Processor, Span, Trace
@@ -58,4 +61,63 @@ class ConsoleProcessor(Processor):
         self._write(f"{indent}[span.end]   {s.name}{status}{ev}{err}")
 
 
-__all__ = ["ConsoleProcessor"]
+class JsonlProcessor(Processor):
+    """Append every span (and trace) to a JSON Lines file — one
+    `Span.export()` / `Trace.export()` per line.
+
+    The batteries-included sink for rollout-data collection: with no
+    processor registered, `/trace` data is silently dropped, so the marquee
+    "collect the rollout" workflow otherwise means hand-rolling this class.
+    Prefer the `trace.collect(path)` helper, which constructs one, registers
+    it, and returns it.
+
+    Records share `trace_id` (the `trace_id` field on spans, `id` on the
+    trace), so a whole rollout's spans group by it. Writes are flushed per
+    record and guarded by a lock — `on_span_end` can fire from multiple
+    threads (sync remote callables run in `asyncio.to_thread`). The file is
+    opened in append mode; pass a fresh `path` per run for isolation.
+    """
+
+    def __init__(self, path: str | Path, *, spans: bool = True, traces: bool = True) -> None:
+        self._path = Path(path)
+        if self._path.parent != Path():
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._spans = spans
+        self._traces = traces
+        self._lock = threading.Lock()
+        self._file = self._path.open("a", encoding="utf-8")
+
+    def _write(self, record: dict[str, Any]) -> None:
+        # `default=str` keeps a stray non-JSON value in span.attrs from
+        # sinking the whole record — best-effort capture beats a crash.
+        line = json.dumps(record, default=str)
+        with self._lock:
+            if self._file.closed:
+                return
+            self._file.write(line + "\n")
+            self._file.flush()
+
+    def on_span_end(self, s: Span) -> None:
+        if self._spans:
+            self._write(s.export())
+
+    def on_trace_end(self, t: Trace) -> None:
+        if self._traces:
+            self._write(t.export())
+
+    def force_flush(self) -> None:
+        with self._lock:
+            if not self._file.closed:
+                self._file.flush()
+
+    def shutdown(self) -> None:
+        """Flush and close the file. Idempotent. Spans that end afterward are
+        dropped (the sink is closed); call `trace.remove_processor(self)` too
+        if you want to stop receiving them entirely."""
+        with self._lock:
+            if not self._file.closed:
+                self._file.flush()
+                self._file.close()
+
+
+__all__ = ["ConsoleProcessor", "JsonlProcessor"]

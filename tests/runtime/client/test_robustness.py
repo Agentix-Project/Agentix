@@ -17,6 +17,7 @@ from agentix.runtime.client.client import (
     RemoteCallError,
     RuntimeClient,
     RuntimeUnreachable,
+    WorkerExited,
 )
 from tests._worker_target import count_exec_and_sleep, self_sigkill
 
@@ -56,6 +57,10 @@ async def test_worker_death_surfaces_as_typed_error(live_server):
     # The host gets a clean typed error, not a hang or a generic 500.
     assert excinfo.value.error.type == "WorkerDied"
     assert "signal 9" in excinfo.value.error.message
+    # Surfaced as the public WorkerExited (a RemoteCallError subclass) with the
+    # structured process exit status, so callers branch on OOM without string-matching.
+    assert isinstance(excinfo.value, WorkerExited)
+    assert excinfo.value.returncode == -9
 
 
 @pytest.mark.asyncio

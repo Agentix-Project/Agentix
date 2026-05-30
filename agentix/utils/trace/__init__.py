@@ -74,6 +74,8 @@ __all__ = [
     "Processor",
     "Exporter",
     "ConsoleProcessor",
+    "JsonlProcessor",
+    "collect",
     # provider control
     "add_processor",
     "remove_processor",
@@ -310,6 +312,7 @@ class _Provider:
         self._processors: list[Processor] = []
         self._lock = threading.RLock()
         self._disabled = False
+        self._warned_no_processor = False
 
     def add(self, p: Processor) -> None:
         with self._lock:
@@ -363,11 +366,29 @@ class _Provider:
     def fan_span_end(self, s: Span) -> None:
         if self._disabled:
             return
-        for p in self.snapshot():
+        processors = self.snapshot()
+        if not processors:
+            self._warn_no_processor()
+            return
+        for p in processors:
             try:
                 p.on_span_end(s)
             except Exception:
                 _logger.exception("processor.on_span_end raised")
+
+    def _warn_no_processor(self) -> None:
+        """A span ended with no Processor registered — its data is being
+        dropped. Warn once so the marquee data-collection journey doesn't
+        silently produce nothing."""
+        if self._warned_no_processor:
+            return
+        self._warned_no_processor = True
+        _logger.warning(
+            "trace span ended but no trace Processor is registered — spans are being "
+            "dropped. Call agentix.utils.trace.collect(path) to write them to a JSONL "
+            "file, add_processor(...) for a custom sink, or set_tracing_disabled(True) "
+            "to silence this."
+        )
 
     def force_flush(self) -> None:
         for p in self.snapshot():
@@ -485,9 +506,32 @@ def span(name: str, *, span_id: str | None = None, parent: Span | None = None, *
 
 
 # Built-in Processor implementations live in submodules. Re-exporting
-# the most common one here lets `from agentix.utils.trace import ConsoleProcessor`
+# the most common ones here lets `from agentix.utils.trace import ConsoleProcessor`
 # work, but the implementation stays out of __init__.py so this file
 # remains the core abstractions only.
-from agentix.utils.trace.processors import ConsoleProcessor  # noqa: E402
+from agentix.utils.trace.processors import ConsoleProcessor, JsonlProcessor  # noqa: E402
+
+
+def collect(path: Any, *, spans: bool = True, traces: bool = True) -> JsonlProcessor:
+    """Register a `JsonlProcessor` writing every span/trace to `path` as
+    JSON Lines, and return it. The one-call rollout-data sink — collection
+    now matches the zero-config logging story instead of forcing every user
+    to hand-roll a Processor:
+
+        from agentix.utils import trace
+
+        sink = trace.collect("runs/spans.jsonl")
+        # ... run rollouts; their spans stream to disk ...
+        sink.shutdown()
+
+    Records share `trace_id`, so group a rollout's spans by it. Call
+    `sink.shutdown()` to flush + close (a global `trace.shutdown()` / process
+    exit also flushes it). `spans=False` / `traces=False` filter what's
+    written.
+    """
+    processor = JsonlProcessor(path, spans=spans, traces=traces)
+    add_processor(processor)
+    return processor
+
 
 _atexit.register(shutdown)

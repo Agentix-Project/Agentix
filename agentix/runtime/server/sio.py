@@ -25,7 +25,7 @@ from typing import Any
 import socketio
 from pydantic import ValidationError
 
-from agentix.runtime.server.worker import RuntimeWorkerClient, WorkerExited
+from agentix.runtime.server.worker import RuntimeWorkerClient, WorkerProcessExited
 from agentix.runtime.shared import MAX_MESSAGE_BYTES
 from agentix.runtime.shared.callables import RemoteCallable
 from agentix.runtime.shared.codec import pack, unpack
@@ -164,11 +164,14 @@ def make_sio(
 
         try:
             resp = await worker.call(request)
-        except WorkerExited as exc:
+        except WorkerProcessExited as exc:
             # Worker died mid-call (crash / OOM-kill / exit). Surface it
             # as a typed error instead of letting the task fail silently
-            # (which would hang the host's SIO wait forever).
-            error = RemoteError(type="WorkerDied", message=str(exc)).model_dump()
+            # (which would hang the host's SIO wait forever). Carry the
+            # process exit status so the host can branch on OOM (-9).
+            error = RemoteError(
+                type="WorkerDied", message=str(exc), returncode=exc.returncode
+            ).model_dump()
             return "call:error", {"call_id": call_id, "error": error}
         except Exception as exc:
             error = RemoteError(type=type(exc).__name__, message=str(exc)).model_dump()
