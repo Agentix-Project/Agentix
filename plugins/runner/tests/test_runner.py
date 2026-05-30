@@ -168,6 +168,30 @@ async def test_on_result_called_per_instance() -> None:
     assert sorted(seen) == ["a", "b"]
 
 
+async def test_on_event_reports_phases_in_order() -> None:
+    events: list[tuple[str, str]] = []
+    await run_rollouts(
+        dataset=_Dataset([_inst("a")]),
+        agent=_OracleAgent(),
+        provider=_Provider(),
+        bundle="b:0",
+        on_event=lambda iid, phase: events.append((iid, phase)),
+    )
+    assert events == [("a", "setup"), ("a", "agent"), ("a", "score")]
+
+
+async def test_on_event_stops_at_empty_patch() -> None:
+    events: list[tuple[str, str]] = []
+    await run_rollouts(
+        dataset=_Dataset([_inst("a", produce="")]),  # empty patch -> no score phase
+        agent=_OracleAgent(),
+        provider=_Provider(),
+        bundle="b:0",
+        on_event=lambda iid, phase: events.append((iid, phase)),
+    )
+    assert events == [("a", "setup"), ("a", "agent")]
+
+
 async def test_empty_dataset_returns_empty() -> None:
     rollouts = await run_rollouts(
         dataset=_Dataset([]),

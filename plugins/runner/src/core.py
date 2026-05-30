@@ -138,11 +138,14 @@ async def rollout_one(
     model: str | None = None,
     platform: str | None = None,
     score: bool = True,
+    on_event: Callable[[str, str], None] | None = None,
     clock: Callable[[], float] = time.monotonic,
 ) -> Rollout:
     """Run a single instance: agent sandbox (setup then solve), then a fresh
     sandbox to score the patch. Task-level failures are recorded on the
-    returned `Rollout`; this never raises for them."""
+    returned `Rollout`; this never raises for them. `on_event(instance_id,
+    phase)`, if given, fires as the instance enters each phase: `"setup"`,
+    `"agent"`, `"score"`."""
     iid = _instance_id(instance)
     started = clock()
 
@@ -152,8 +155,12 @@ async def rollout_one(
         # escape and abort the whole batch.
         config = SandboxConfig(image=dataset.image(instance), bundle=bundle, platform=platform)
         async with provider.session(config) as sandbox:
+            if on_event is not None:
+                on_event(iid, "setup")
             if not await dataset.setup(sandbox, instance):
                 return Rollout(instance_id=iid, skipped="setup_failed", duration_s=clock() - started)
+            if on_event is not None:
+                on_event(iid, "agent")
             result = await agent.solve(sandbox, instance, model=model)
     except Exception as exc:
         logger.exception("[%s] agent phase failed", iid)
@@ -176,6 +183,8 @@ async def rollout_one(
 
     try:
         async with provider.session(config) as sandbox:
+            if on_event is not None:
+                on_event(iid, "score")
             report = await dataset.score(sandbox, instance, result.patch)
     except Exception as exc:
         logger.exception("[%s] score phase failed", iid)
@@ -209,6 +218,7 @@ async def run_rollouts(
     score: bool = True,
     timeout_s: float | None = None,
     on_result: Callable[[Rollout], None] | None = None,
+    on_event: Callable[[str, str], None] | None = None,
 ) -> list[Rollout]:
     """Run `agent` over every instance in `dataset` (or the explicit
     `instances`), at most `n_concurrent` at a time. Returns one `Rollout`
@@ -218,9 +228,12 @@ async def run_rollouts(
 
     `timeout_s`, if set, bounds each instance: one that runs longer is
     cancelled (its sandbox torn down) and recorded as `Rollout(error=...)`,
-    so a hung agent can't pin a concurrency slot forever. `on_result`, if
-    given, fires as each instance finishes; a callback that raises is logged
-    and never aborts the batch."""
+    so a hung agent can't pin a concurrency slot forever.
+
+    `on_result`, if given, fires as each instance finishes; a callback that
+    raises is logged and never aborts the batch. `on_event`, if given, fires
+    as each instance enters a phase as `on_event(instance_id, phase)` with
+    phase in `"setup"` / `"agent"` / `"score"` — for live progress."""
     if n_concurrent < 1:
         raise ValueError("n_concurrent must be >= 1")
     if timeout_s is not None and timeout_s <= 0:
@@ -243,6 +256,7 @@ async def run_rollouts(
                 model=model,
                 platform=platform,
                 score=score,
+                on_event=on_event,
             )
             try:
                 rollout = await (asyncio.wait_for(coro, timeout_s) if timeout_s is not None else coro)
