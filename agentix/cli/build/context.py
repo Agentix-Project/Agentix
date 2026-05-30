@@ -118,6 +118,11 @@ def _copy_repo(context_root: Path, repo_dest: Path) -> None:
         src = context_root / rel
         if not src.is_symlink() and not src.exists():
             continue  # listed but removed from the working tree
+        if src.is_dir() and not src.is_symlink():
+            # `git ls-files` reports a submodule as a single directory entry;
+            # its contents aren't ours to stage. Skip it rather than letting
+            # shutil.copy2 raise IsADirectoryError and abort the build.
+            continue
         dest = repo_dest / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dest, follow_symlinks=False)

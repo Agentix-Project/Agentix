@@ -370,6 +370,24 @@ class TestStageContext:
 
         assert (stage / "repo").is_dir()
 
+    def test_submodule_dir_entry_does_not_abort(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # `git ls-files` reports a submodule as a single directory entry; copying
+        # it with shutil.copy2 would raise IsADirectoryError. The staging must
+        # skip directory entries, not crash.
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "keep.txt").write_text("x")
+        (repo / "submod").mkdir()
+        (repo / "submod" / "inner").write_text("y")
+        # Simulate git listing a tracked file plus a submodule directory entry.
+        monkeypatch.setattr(context, "_git_listed_files", lambda _root: ["keep.txt", "submod"])
+
+        stage = tmp_path / "stage"
+        build.stage_context(stage, context_root=repo, python_version="311", platform="linux/amd64")
+
+        assert (stage / "repo" / "keep.txt").is_file()
+        assert not (stage / "repo" / "submod").exists()  # dir entry skipped, no crash
+
     def test_nested_build_dir_not_skipped(self, tmp_path: Path) -> None:
         """The repo-root `build/` dir is a `python -m build` / dry-run
         output that's correctly skipped — but a *nested* `build/` like
