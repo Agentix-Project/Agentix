@@ -162,18 +162,25 @@ class Sandbox:
     Register host-side plugin namespaces with `register_namespace(...)`
     before the first `remote()` (the connection plan is fixed at connect
     time).
+
+    `call_deadline` (seconds; None = unbounded) is the upper bound applied
+    to every `remote()` on this handle: a hung worker / lost sandbox raises
+    `CallTimeout` instead of blocking forever. `provider.session(config,
+    call_deadline=...)` sets it; it threads into the lazily-created
+    `RuntimeClient`.
     """
 
     sandbox_id: SandboxId
     runtime_url: str
     status: str
+    call_deadline: float | None = None
     _client: RuntimeClient | None = field(default=None, init=False, repr=False, compare=False)
 
     def _runtime_client(self) -> RuntimeClient:
         if self._client is None:
             from agentix.runtime.client import RuntimeClient as _RuntimeClient
 
-            self._client = _RuntimeClient(self.runtime_url)
+            self._client = _RuntimeClient(self.runtime_url, call_deadline=self.call_deadline)
         return self._client
 
     def register_namespace(self, namespace: Any) -> None:
@@ -221,14 +228,24 @@ class SandboxProvider(Protocol):
     async def get(self, sandbox_id: SandboxId) -> SandboxInfo: ...
 
     @asynccontextmanager
-    async def session(self, config: SandboxConfig) -> AsyncIterator[Sandbox]:
+    async def session(
+        self, config: SandboxConfig, *, call_deadline: float | None = None
+    ) -> AsyncIterator[Sandbox]:
         """Scoped sandbox: created on entry; its client closed and the
         container deleted on exit.
 
             async with provider.session(SandboxConfig(...)) as sandbox:
                 result = await sandbox.remote(fn, ...)
+
+        `call_deadline` (seconds; None = unbounded) bounds every
+        `remote()` on the sandbox — a hung call raises `CallTimeout`
+        rather than blocking forever:
+
+            async with provider.session(cfg, call_deadline=1800) as sandbox:
+                result = await sandbox.remote(agent.run, task=task)
         """
         sandbox = await self.create(config)
+        sandbox.call_deadline = call_deadline
         try:
             yield sandbox
         finally:

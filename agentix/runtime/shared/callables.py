@@ -67,6 +67,37 @@ def _main_module_name() -> str | None:
     return None
 
 
+def _reject_reason(fn: Any) -> str:
+    """Explain — naming the function and the specific rule it broke — why
+    `fn` can't be a remote target. `remote(self.run, ...)` is the canonical
+    first mistake, so the message must point at the real fix, not just say
+    "not importable"."""
+    name = display_name_for(fn)
+    if inspect.ismethod(fn):
+        return (
+            f"cannot remote {name!r}: it is a bound method. Pass the unbound function "
+            f"and send the instance as an argument, or move the logic into a "
+            f"module-level def."
+        )
+    if getattr(fn, "__name__", "") == "<lambda>":
+        return f"cannot remote {name!r}: lambdas have no importable name — use a module-level def."
+    if "<locals>" in getattr(fn, "__qualname__", ""):
+        return (
+            f"cannot remote {name!r}: it is a local/nested function. Define it at module "
+            f"top level so the worker can import it by name."
+        )
+    if not (inspect.isfunction(fn) or inspect.isbuiltin(fn)):
+        return (
+            f"cannot remote {name!r}: only importable top-level functions are remote targets "
+            f"(got a {type(fn).__name__}). functools.partial, callable instances, and closures "
+            f"aren't importable by name — wrap the call in a module-level def."
+        )
+    return (
+        f"cannot remote {name!r}: it has no importable module path. Define it in an "
+        f"importable module (not a REPL / exec context)."
+    )
+
+
 def _callable_ref(fn: Callable[..., Any]) -> tuple[str, str] | None:
     if not (inspect.isfunction(fn) or inspect.isbuiltin(fn)):
         return None
@@ -99,12 +130,10 @@ class RemoteCallable(str):
     def _resolve(cls, fn: Callable[..., Any]) -> RemoteCallable:
         """Encode a Python callable as a `RemoteCallable` string."""
         if not callable(fn):
-            raise TypeError(f"remote value must be callable (got {type(fn).__name__})")
+            raise TypeError(f"remote target must be callable (got {type(fn).__name__})")
         ref = _callable_ref(fn)
         if ref is None:
-            raise TypeError(
-                "remote callable must be an importable top-level function",
-            )
+            raise TypeError(_reject_reason(fn))
         module, qualname = ref
         return cls(f"{module}::{qualname}")
 

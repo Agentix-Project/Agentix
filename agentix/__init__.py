@@ -21,30 +21,41 @@ from agentix.provider.base import (
     providers,
     register_provider,
 )
-from agentix.runtime.client import RemoteCallError, RuntimeClient
+from agentix.runtime.client import (
+    CallTimeout,
+    RemoteCallError,
+    RuntimeClient,
+    RuntimeUnreachable,
+    WorkerExited,
+)
 from agentix.runtime.client._sio_facade import AsyncClientNamespace, request_handler
 from agentix.runtime.shared.callables import RemoteCallable
 from agentix.sio import Namespace, RemoteSioError, register_namespace
 from agentix.utils import log, trace
+from agentix.utils.log import configure_logging
 
 __version__ = "0.2.7"
 
 __all__ = [
     "AsyncClientNamespace",
     "BundleMaterializer",
+    "CallTimeout",
     "MaterializedBundle",
     "Namespace",
     "RemoteCallable",
     "RemoteCallError",
     "RemoteSioError",
     "RuntimeClient",
+    "RuntimeUnreachable",
     "Sandbox",
     "SandboxConfig",
     "SandboxId",
     "SandboxInfo",
     "SandboxProvider",
     "SandboxResource",
+    "WorkerExited",
     "__version__",
+    "configure_logging",
     "log",
     "providers",
     "register_namespace",

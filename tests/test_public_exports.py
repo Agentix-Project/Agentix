@@ -1,0 +1,39 @@
+"""The first-failure vocabulary and `configure_logging` are reachable from
+the top-level `agentix` surface — a caller writing `except <Timeout>:` after
+a failed run should not have to reach into private `agentix.runtime.client.*`.
+"""
+
+from __future__ import annotations
+
+import agentix
+
+
+def test_failure_vocabulary_importable_from_agentix() -> None:
+    from agentix import (
+        CallTimeout,
+        RemoteCallError,
+        RuntimeUnreachable,
+        WorkerExited,
+        configure_logging,
+    )
+
+    # WorkerExited is a RemoteCallError subclass, so `except RemoteCallError`
+    # still catches a dead-worker call while `except WorkerExited` branches on it.
+    assert issubclass(WorkerExited, RemoteCallError)
+    assert callable(configure_logging)
+    for name in (CallTimeout, RuntimeUnreachable):
+        assert issubclass(name, Exception)
+
+
+def test_failure_vocabulary_in_dunder_all() -> None:
+    for name in ("CallTimeout", "RuntimeUnreachable", "WorkerExited", "configure_logging"):
+        assert name in agentix.__all__
+
+
+def test_providers_importable_from_provider_package() -> None:
+    # The documented `from agentix.provider import providers` must work
+    # (previously only `agentix.provider.base` exported it -> ImportError).
+    from agentix.provider import SandboxConfig, providers, register_provider
+
+    reg = providers()
+    assert hasattr(reg, "get") and callable(register_provider) and SandboxConfig is not None

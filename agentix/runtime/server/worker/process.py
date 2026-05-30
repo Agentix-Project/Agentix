@@ -20,8 +20,9 @@ from typing import Any
 
 from agentix import sio as _sio
 from agentix.runtime.server.worker.invoker import CallableInvoker
+from agentix.runtime.shared import MAX_MESSAGE_BYTES
 from agentix.runtime.shared.callables import RemoteCallable
-from agentix.runtime.shared.framing import read_frame, write_frame
+from agentix.runtime.shared.framing import FrameTooLarge, read_frame, write_frame
 from agentix.runtime.shared.idents import CallId
 from agentix.runtime.shared.models import RemoteError, RemoteRequest
 from agentix.utils import log as _log
@@ -106,6 +107,12 @@ class Worker:
                 frame = await read_frame(reader)
             except asyncio.IncompleteReadError:
                 break
+            except (FrameTooLarge, ValueError):
+                # Control stream desynced (oversized/garbled header). Nothing
+                # downstream is trustworthy — log and shut down gracefully
+                # rather than crash mid-loop or allocate a giant buffer.
+                logger.exception("worker: control stream desynced; shutting down")
+                break
             if frame is None:
                 break
             await self._handle(frame)
@@ -134,10 +141,35 @@ class Worker:
                     await write_frame(self._writer, frame)
                 except Exception:
                     logger.exception("outbound frame write failed")
+                    self._recover_failed_frame(frame)
                 finally:
                     self._outbound_q.task_done()
         except asyncio.CancelledError:
             pass
+
+    def _recover_failed_frame(self, frame: dict[str, Any]) -> None:
+        """A `result` frame that couldn't be written (typically an oversized
+        pickled return value hitting `FrameTooLarge`) must not vanish — the
+        host's future would hang forever. Replace it with a small, writable
+        `error` frame for the same call so the caller fails fast. An `error`
+        frame that itself fails to write has nothing left to fall back to."""
+        if frame.get("type") != "result":
+            return
+        call_id = frame.get("call_id")
+        if not call_id:
+            return
+        err = RemoteError(
+            type="FrameTooLarge",
+            message=(
+                "remote call result could not be delivered: the pickled return value "
+                f"exceeds the {MAX_MESSAGE_BYTES}-byte frame limit. Return a smaller "
+                "value, or write large artifacts to a file/volume and return a reference."
+            ),
+        ).model_dump()
+        try:
+            self._outbound_q.put_nowait({"type": "error", "call_id": call_id, "error": err})
+        except Exception:
+            logger.exception("failed to enqueue FrameTooLarge error for call %r", call_id)
 
     async def _send(self, payload: dict[str, Any]) -> None:
         await self._outbound_q.put(payload)
@@ -149,16 +181,35 @@ class Worker:
             lambda: asyncio.StreamReaderProtocol(reader),
             os.fdopen(fd, "rb", buffering=0),
         )
+        # Read fixed-size chunks and split into lines ourselves. `readline()`
+        # raises on a line longer than the StreamReader limit (64 KiB); that
+        # error was swallowed and KILLED this loop, so fd 1 stopped draining
+        # and the next `print()` blocked on a full pipe — deadlocking the
+        # in-flight call. Chunked reads can never overflow, so the pipe is
+        # always drained regardless of line length.
+        buf = bytearray()
         try:
             while True:
-                line = await reader.readline()
-                if not line:
+                chunk = await reader.read(65536)
+                if not chunk:
                     break
-                _emit_stdio_line("stdout", line)
+                buf.extend(chunk)
+                *lines, buf_rest = bytes(buf).split(b"\n")
+                for line in lines:
+                    _emit_stdio_line("stdout", line)
+                buf = bytearray(buf_rest)
+                # A newline-less spew (e.g. a binary blob) must not grow `buf`
+                # without bound — flush it as a partial line.
+                if len(buf) >= 65536:
+                    _emit_stdio_line("stdout", bytes(buf))
+                    buf.clear()
         except asyncio.CancelledError:
             pass
         except Exception:
             logger.debug("stdout drain failed", exc_info=True)
+        finally:
+            if buf:
+                _emit_stdio_line("stdout", bytes(buf))
 
     def _enqueue_frame(self, frame: dict[str, Any]) -> None:
         """Sync put for the agentix.sio bridge — must never block."""

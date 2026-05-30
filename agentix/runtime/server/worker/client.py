@@ -27,8 +27,11 @@ from agentix.runtime.shared.models import RemoteError, RemoteRequest, RemoteResp
 logger = logging.getLogger("agentix.runtime.server.worker.client")
 
 
-class WorkerExited(RuntimeError):
-    """The worker subprocess died (crash, OOM-kill, exit) mid-call.
+class WorkerProcessExited(RuntimeError):
+    """Server-internal: the worker subprocess died (crash, OOM-kill, exit)
+    mid-call. The runtime serializes this into a `RemoteError(type="WorkerDied",
+    returncode=...)`; the host surfaces it as the public `WorkerExited`
+    (see `agentix.runtime.client.client`).
 
     `returncode` is the process exit status when known: negative means
     killed by that signal (e.g. -9 = SIGKILL, the OOM-killer's signature).
@@ -306,7 +309,7 @@ class _SubprocessWorker:
             # An OOM/crash gives no Python traceback (the process is gone),
             # so this log line is the only place the cause surfaces.
             logger.error("runtime worker exited: %s", detail)
-            exc = WorkerExited(f"runtime worker exited: {detail}", returncode)
+            exc = WorkerProcessExited(f"runtime worker exited: {detail}", returncode)
             for fut in list(self._pending.values()):
                 if not fut.done():
                     fut.set_exception(exc)
@@ -386,7 +389,7 @@ class _SubprocessWorker:
         # never resolve a future — fail fast instead of hanging forever.
         if self._closed.is_set():
             returncode = self._proc.returncode if self._proc is not None else None
-            raise WorkerExited(f"runtime worker exited: {_exit_detail(returncode)}", returncode)
+            raise WorkerProcessExited(f"runtime worker exited: {_exit_detail(returncode)}", returncode)
         cid = request.call_id or _new_id()
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending[cid] = fut
