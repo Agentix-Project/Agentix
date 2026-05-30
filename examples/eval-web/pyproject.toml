@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentix-eval-web"
+version = "0.1.0"
+description = "Live web dashboard for Agentix batch rollouts (FastAPI + WebSocket)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Agentiix" }]
+urls = { Homepage = "https://github.com/Agentiix/Agentix" }
+dependencies = [
+    "agentixx",
+    "agentix-runner>=0.1.0",
+    # Reuse the TUI's engine: the demo provider, phase-tracing adapters, and
+    # catalog discovery. The web UI and the TUI are two frontends over one core.
+    "agentix-eval-tui",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "httpx>=0.27"]
+
+[project.scripts]
+agentix-eval-web = "eval_web.cli:main"
+
+# Standalone project (not a workspace member) — web deps stay out of the
+# core-dev venv. Path-depends on the monorepo + the TUI example, editable.
+[tool.uv.sources]
+agentixx = { path = "../..", editable = true }
+agentix-runner = { path = "../../plugins/runner", editable = true }
+agentix-eval-tui = { path = "../eval-tui", editable = true }
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.hatch.build.targets.wheel]
+packages = ["eval_web"]

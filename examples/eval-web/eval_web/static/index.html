@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Agentix · rollout runs</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=UnifrakturCook:wght@700&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #08080a; --panel: #0d0d10; --line: #1c1c22;
+    --text: #d0cfc6; --dim: #6c6c64; --faint: #3a3a40;
+    --accent: #cc785c;                 /* ember */
+    --ok: #8fae8f; --fail: #c47a71;    /* muted pass / fail */
+    --setup: #b8a25e; --agent: #6fa0b2; --score: #9a82b4; --pending: #26262c;
+    --mono: ui-monospace, "JetBrains Mono", "SFMono-Regular", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background:
+      radial-gradient(1200px 600px at 50% -10%, #121218 0%, transparent 60%),
+      var(--bg);
+    color: var(--text); font-family: var(--mono); font-size: 13px; line-height: 1.5;
+    -webkit-font-smoothing: antialiased; padding: 28px clamp(16px, 4vw, 56px) 64px;
+  }
+  a { color: var(--accent); }
+  header { display: flex; align-items: baseline; gap: 18px; border-bottom: 1px solid var(--line); padding-bottom: 14px; }
+  h1 { font-family: "UnifrakturCook", var(--mono); font-weight: 700; font-size: 42px; letter-spacing: 1px;
+       margin: 0; color: var(--text); text-shadow: 0 0 18px rgba(204,120,92,0.18); }
+  .sub { color: var(--dim); text-transform: uppercase; letter-spacing: 3px; font-size: 11px; }
+  .spacer { flex: 1; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); display: inline-block; margin-right: 6px; }
+  .dot.live { background: var(--ok); box-shadow: 0 0 8px var(--ok); animation: pulse 1.4s infinite; }
+  @keyframes pulse { 50% { opacity: 0.35; } }
+
+  .controls { display: flex; align-items: center; gap: 14px; margin: 18px 0; flex-wrap: wrap; }
+  .field { color: var(--dim); }
+  .field input { width: 64px; background: var(--panel); color: var(--text); border: 1px solid var(--line);
+                 border-radius: 3px; padding: 5px 8px; font-family: var(--mono); font-size: 13px; }
+  button { background: transparent; color: var(--accent); border: 1px solid var(--accent); border-radius: 3px;
+           padding: 7px 18px; font-family: var(--mono); font-size: 12px; letter-spacing: 2px; text-transform: uppercase;
+           cursor: pointer; transition: all .15s; }
+  button:hover:not(:disabled) { background: var(--accent); color: var(--bg); box-shadow: 0 0 16px rgba(204,120,92,0.4); }
+  button:disabled { opacity: .4; cursor: default; }
+
+  .stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin: 8px 0 22px; }
+  .stat { border: 1px solid var(--line); border-radius: 4px; background: var(--panel); padding: 12px 14px; }
+  .stat .k { color: var(--dim); font-size: 10px; letter-spacing: 2px; text-transform: uppercase; }
+  .stat .v { font-size: 26px; font-weight: 500; margin-top: 4px; }
+  .stat .v.ok { color: var(--ok); } .stat .v.fail { color: var(--fail); } .stat .v.accent { color: var(--accent); }
+
+  .columns { display: grid; grid-template-columns: 1.4fr 1fr; gap: 18px; align-items: start; }
+  @media (max-width: 900px) { .columns { grid-template-columns: 1fr; } }
+  .panel { border: 1px solid var(--line); border-radius: 4px; background: var(--panel); }
+  .panel > .title { color: var(--dim); font-size: 10px; letter-spacing: 2px; text-transform: uppercase;
+                    padding: 10px 14px; border-bottom: 1px solid var(--line); }
+  .panel > .body { padding: 14px; }
+
+  #grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(16px, 1fr)); gap: 4px; }
+  .cell { aspect-ratio: 1; border-radius: 2px; background: var(--pending); border: 1px solid #00000040;
+          transition: background .2s, box-shadow .2s; }
+  .cell.setup { background: var(--setup); } .cell.agent { background: var(--agent); }
+  .cell.score { background: var(--score); }
+  .cell.pass  { background: var(--ok); box-shadow: 0 0 6px rgba(143,174,143,.5); }
+  .cell.fail  { background: var(--fail); box-shadow: 0 0 6px rgba(196,122,113,.5); }
+
+  canvas { width: 100%; height: 80px; display: block; }
+  #log { height: 320px; overflow: auto; margin: 0; padding: 12px 14px; font-size: 12px; }
+  #log .ln { white-space: pre; color: var(--dim); }
+  #log .ln b { color: var(--text); font-weight: 400; }
+  #log .pass { color: var(--ok); } #log .fail { color: var(--fail); }
+  #cat { width: 100%; border-collapse: collapse; font-size: 12px; }
+  #cat td { padding: 4px 8px; border-bottom: 1px solid var(--line); color: var(--dim); }
+  #cat td.n { color: var(--text); }
+  footer { color: var(--faint); margin-top: 28px; font-size: 11px; letter-spacing: 1px; }
+  .legend { display: flex; gap: 14px; color: var(--dim); font-size: 11px; margin-top: 10px; flex-wrap: wrap; }
+  .legend span::before { content: "■ "; }
+  .lg-setup::before { color: var(--setup); } .lg-agent::before { color: var(--agent); }
+  .lg-score::before { color: var(--score); } .lg-pass::before { color: var(--ok); } .lg-fail::before { color: var(--fail); }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Agentix</h1>
+    <span class="sub">rollout&nbsp;runs</span>
+    <span class="spacer"></span>
+    <span class="sub"><span class="dot" id="dot"></span><span id="state">idle</span></span>
+  </header>
+
+  <div class="controls">
+    <label class="field">instances <input id="n" type="number" value="48" min="1" max="500" /></label>
+    <label class="field">concurrency <input id="c" type="number" value="6" min="1" max="64" /></label>
+    <button id="run">▶ run</button>
+    <span class="spacer"></span>
+    <span class="sub" id="rate">0.0 / s</span>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><div class="k">total</div><div class="v" id="s-total">—</div></div>
+    <div class="stat"><div class="k">done</div><div class="v accent" id="s-done">0</div></div>
+    <div class="stat"><div class="k">resolved</div><div class="v ok" id="s-ok">0</div></div>
+    <div class="stat"><div class="k">failed</div><div class="v fail" id="s-fail">0</div></div>
+    <div class="stat"><div class="k">running</div><div class="v" id="s-run">0</div></div>
+  </div>
+
+  <div class="columns">
+    <div>
+      <div class="panel">
+        <div class="title">run · instance grid</div>
+        <div class="body"><div id="grid"></div>
+          <div class="legend">
+            <span class="lg-setup">setup</span><span class="lg-agent">agent</span>
+            <span class="lg-score">scoring</span><span class="lg-pass">resolved</span><span class="lg-fail">failed</span>
+          </div>
+        </div>
+      </div>
+      <div class="panel" style="margin-top:18px">
+        <div class="title">throughput</div>
+        <div class="body"><canvas id="spark" width="600" height="80"></canvas></div>
+      </div>
+    </div>
+    <div>
+      <div class="panel">
+        <div class="title">event log</div>
+        <div id="log" class="body"></div>
+      </div>
+      <div class="panel" style="margin-top:18px">
+        <div class="title">catalog · installed agentix ecosystem</div>
+        <div class="body" style="max-height:240px;overflow:auto;padding:6px"><table id="cat"></table></div>
+      </div>
+    </div>
+  </div>
+
+  <footer>two faces of one engine — the same <code>agentix.runner</code> drives this dashboard and the Textual TUI.</footer>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const cells = new Map();
+let total = 0, done = 0, ok = 0, fail = 0, running = 0, startT = 0;
+const series = [];
+
+function setState(s, live) {
+  $("state").textContent = s;
+  $("dot").className = "dot" + (live ? " live" : "");
+}
+function log(html, cls) {
+  const d = document.createElement("div");
+  d.className = "ln" + (cls ? " " + cls : "");
+  d.innerHTML = html;
+  const box = $("log"); box.appendChild(d); box.scrollTop = box.scrollHeight;
+}
+function refreshStats() {
+  $("s-total").textContent = total; $("s-done").textContent = done;
+  $("s-ok").textContent = ok; $("s-fail").textContent = fail; $("s-run").textContent = Math.max(0, running);
+  const dt = (performance.now() - startT) / 1000;
+  $("rate").textContent = (dt > 0 ? (done / dt).toFixed(1) : "0.0") + " / s";
+}
+function drawSpark() {
+  const c = $("spark"), ctx = c.getContext("2d");
+  const W = c.width, H = c.height; ctx.clearRect(0, 0, W, H);
+  if (series.length < 2) return;
+  const maxY = Math.max(...series, 1);
+  ctx.strokeStyle = "#cc785c"; ctx.lineWidth = 1.5; ctx.beginPath();
+  series.forEach((y, i) => {
+    const x = (i / (series.length - 1)) * W, py = H - (y / maxY) * (H - 6) - 3;
+    i ? ctx.lineTo(x, py) : ctx.moveTo(x, py);
+  });
+  ctx.stroke();
+  ctx.lineTo(W, H); ctx.lineTo(0, H); ctx.closePath();
+  ctx.fillStyle = "rgba(204,120,92,0.12)"; ctx.fill();
+}
+
+function reset(instances) {
+  total = instances.length; done = ok = fail = 0; running = 0; series.length = 0;
+  startT = performance.now();
+  cells.clear(); $("grid").innerHTML = ""; $("log").innerHTML = "";
+  for (const iid of instances) {
+    const el = document.createElement("div");
+    el.className = "cell"; el.title = iid; cells.set(iid, el); $("grid").appendChild(el);
+  }
+  refreshStats(); drawSpark();
+}
+
+function onEvent(ev) {
+  if (ev.type === "start") { reset(ev.instances); log(`<b>▶ started</b> ${ev.n} rollouts`); return; }
+  if (ev.type === "phase") {
+    const el = cells.get(ev.iid); if (el) el.className = "cell " + ev.phase;
+    if (ev.phase === "setup") running++;
+    refreshStats(); return;
+  }
+  if (ev.type === "result") {
+    const el = cells.get(ev.instance_id);
+    const good = ev.resolved;
+    if (el) el.className = "cell " + (good ? "pass" : "fail");
+    done++; running = Math.max(0, running - 1); good ? ok++ : fail++;
+    series.push(done);
+    const verdict = good ? "✓ resolved"
+      : (ev.skipped ? "⊘ " + ev.skipped : (ev.error ? "✗ error" : "✗ unresolved"));
+    log(`<span class="${good ? "pass" : "fail"}">${verdict}</span>  <b>${ev.instance_id}</b> · ${ev.duration_s}s`,
+        good ? "pass" : "fail");
+    refreshStats(); drawSpark(); return;
+  }
+  if (ev.type === "done") {
+    setState("done", false); $("run").disabled = false;
+    log(`<b>■ done</b> — ${ev.resolved}/${ev.total} resolved`);
+  }
+}
+
+$("run").addEventListener("click", () => {
+  const n = $("n").value, c = $("c").value;
+  $("run").disabled = true; setState("running", true);
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const ws = new WebSocket(`${proto}://${location.host}/ws/run?n=${n}&concurrency=${c}`);
+  ws.onmessage = (m) => onEvent(JSON.parse(m.data));
+  ws.onclose = () => { if ($("run").disabled) { setState("idle", false); $("run").disabled = false; } };
+  ws.onerror = () => log(`<span class="fail">connection error</span>`, "fail");
+});
+
+fetch("/api/catalog").then((r) => r.json()).then((rows) => {
+  const t = $("cat");
+  for (const r of rows) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td class="n">${r.name}</td><td>${r.kind}</td><td>${r.version || ""}</td>`;
+    t.appendChild(tr);
+  }
+}).catch(() => {});
+</script>
+</body>
+</html>
