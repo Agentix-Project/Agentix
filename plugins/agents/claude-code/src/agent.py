@@ -33,6 +33,7 @@ class ClaudeCodeResult:
 
 
 async def run(args: ClaudeCodeArgs) -> ClaudeCodeResult:
+    os.makedirs(args.workdir, exist_ok=True)  # the claude CLI's cwd must exist
     cmd: list[str] = [
         "claude",
         "--verbose",
