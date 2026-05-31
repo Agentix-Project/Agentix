@@ -20,8 +20,9 @@ import uuid
 
 from agent import solve
 from agentix.bridge import BridgeConfig, InMemoryStore, OpenAICompatibleClient, bridged
-from agentix.provider.base import SandboxConfig
 from agentix.provider.docker import DockerProvider
+
+from agentix.provider.base import SandboxConfig
 from agentix.utils.log import configure_logging
 
 DEFAULT_IMAGE = "python:3.13-slim"

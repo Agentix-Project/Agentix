@@ -12,7 +12,8 @@ import agentix.bridge.proxy as proxy_mod
 import pytest
 from agentix.bridge import detect
 from agentix.bridge.detection import ApiFamily
-from agentix.bridge.storage import CompletionRecord, make_record
+from agentix.bridge.storage import make_record
+
 from agentix.utils import trace
 
 
