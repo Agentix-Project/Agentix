@@ -222,7 +222,7 @@ async def _run(command: str, workdir: str, env: dict[str, str], timeout: float, 
 
 
 def _get_env() -> dict[str, str]:
-    from agentix.runtime.env import get_env_without_agentix
+    from agentix.runtime.shared.env import get_env_without_agentix
 
     env = get_env_without_agentix()
     bashrc = Path.home() / ".bashrc"

@@ -1,164 +1,231 @@
-"""Tests for `agentix deploy`."""
+"""Tests for the `agentix deploy` discovery shell + shared rendering.
+
+The core CLI now owns *no* per-backend logic — provider plugins each
+register their own `click.Command` via the `agentix.deploy.commands`
+entry-point group. These tests cover:
+
+  * the discovery mechanism (subcommands appear in `agentix deploy --help`)
+  * the shared output rendering (`print_deploy_result` text + JSON,
+    including the shell-comment `hints` block)
+  * graceful handling of unknown / broken plugin entries
+
+Per-backend deploy CLI behavior lives in each plugin's own tests (e.g.
+`plugins/providers/docker/tests/test_deploy_cli.py`).
+"""
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
+import click
 import pytest
-from agentix.provider.docker import DockerProviderConfig
+from click.testing import CliRunner
 
 import agentix.cli.deploy as deploy_mod
-from agentix.provider.base import MaterializedBundle
+from agentix.cli.deploy import print_deploy_result
+from agentix.provider.base import DeployedBundle
+
+# ── discovery: plugin subcommands appear in the deploy group ─────────
 
 
-class _Resolver:
-    """Stand-in for `providers()` — `.get(name)` returns the resolved class."""
-
-    def __init__(self, fn, names: tuple[str, ...] = ()) -> None:
-        self._fn = fn
-        self._names = names
-
-    def get(self, name: str):
-        return self._fn(name)
-
-    def all(self) -> dict[str, object]:
-        return dict.fromkeys(self._names, object())
+def test_deploy_group_includes_installed_provider_subcommands() -> None:
+    """The docker plugin (workspace-installed) registers `docker` and
+    `podman` deploy subcommands; both must show up in the group."""
+    cmds = deploy_mod.deploy.commands
+    assert "docker" in cmds
+    assert "podman" in cmds
+    assert isinstance(cmds["docker"], click.Command)
+    assert isinstance(cmds["podman"], click.Command)
 
 
-class FakeMaterializer:
-    def __init__(self) -> None:
-        self.calls: list[tuple[Path, str | None, str | None]] = []
-
-    async def materialize_bundle(
-        self,
-        bundle: Path,
-        *,
-        name: str | None = None,
-        platform: str | None = None,
-    ) -> MaterializedBundle:
-        self.calls.append((bundle, name, platform))
-        return MaterializedBundle(
-            bundle=name or "demo:1.0.0",
-            platform=platform,
-            metadata={"cache": "/tmp/agentix-runtime-pytest"},
-        )
-
-
-def test_deploy_unknown_backend_reports_available(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+def test_deploy_unknown_backend_reports_no_such_command(tmp_path) -> None:
+    """Click owns the `no such command` error path now that every
+    backend is a click subcommand — the discovery shell adds nothing."""
     bundle = tmp_path / "bundle.tar"
     bundle.write_text("placeholder")
 
-    def _raise(name: str):
-        raise KeyError(f"no plugin {name!r}")
+    result = CliRunner().invoke(deploy_mod.deploy, ["bogus-backend", str(bundle)])
 
-    monkeypatch.setattr(
-        deploy_mod,
-        "providers",
-        lambda: _Resolver(_raise, names=("docker", "podman")),
-    )
-
-    with pytest.raises(SystemExit, match="unknown deploy backend 'bogus'; available: docker, podman"):
-        deploy_mod.main(["bogus", str(bundle)])
+    assert result.exit_code != 0
+    # Click's wording varies slightly between versions but the message
+    # always names the bad command. `result.output` includes both
+    # streams in newer Click; `result.stderr` only exists when
+    # they were captured separately.
+    assert "bogus-backend" in result.output
 
 
-def test_deploy_broken_backend_reports_load_failure(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+def test_deploy_help_lists_subcommands() -> None:
+    """`agentix deploy --help` prints the subcommand list assembled from
+    installed plugins (here: docker + podman, from agentix-provider-docker)
+    plus the built-in `list` discovery subcommand."""
+    result = CliRunner().invoke(deploy_mod.deploy, ["--help"])
+    assert result.exit_code == 0, result.output
+    assert "docker" in result.output
+    assert "podman" in result.output
+    assert "list" in result.output
+
+
+# ── built-in `list` discovery subcommand ─────────────────────────────
+
+
+def test_deploy_list_text_output_includes_installed_backends() -> None:
+    """`agentix deploy list` text output shows one row per installed
+    deploy subcommand with `<name>  <source>@<version>  <short_help>`."""
+    result = CliRunner().invoke(deploy_mod.deploy, ["list"])
+    assert result.exit_code == 0, result.output
+    out = result.output
+
+    # docker + podman come from the workspace-installed agentix-provider-docker.
+    assert "docker" in out
+    assert "podman" in out
+    assert "agentix-provider-docker" in out
+
+
+def test_deploy_list_text_output_separates_providers_without_deploy() -> None:
+    """Providers registered in the `agentix.provider` registry but without a
+    matching `agentix.deploy.commands` entry are surfaced under a separate
+    'without a deploy subcommand' section — distinguishing 'not installed' from
+    'installed but not yet wired'."""
+    result = CliRunner().invoke(deploy_mod.deploy, ["list"])
+    assert result.exit_code == 0, result.output
+    out = result.output
+
+    # e2b ships SandboxProvider class but no deploy command — must appear here.
+    assert "without a deploy subcommand" in out
+    assert "e2b" in out
+
+
+def test_deploy_list_json_format_emits_structured_payload() -> None:
+    result = CliRunner().invoke(deploy_mod.deploy, ["list", "--format", "json"])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+
+    assert "deploy" in data
+    assert "providers_without_deploy" in data
+
+    names = {entry["name"] for entry in data["deploy"]}
+    assert {"docker", "podman"} <= names
+    for entry in data["deploy"]:
+        assert set(entry.keys()) >= {"name", "source", "version", "summary"}
+        if entry["name"] in {"docker", "podman"}:
+            assert entry["source"] == "agentix-provider-docker"
+            assert entry["version"]  # non-empty
+
+
+def test_deploy_list_cannot_be_shadowed_by_plugin(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    bundle = tmp_path / "bundle.tar"
-    bundle.write_text("placeholder")
+    """A plugin that registers an `agentix.deploy.commands` entry named
+    `list` must NOT replace the core's built-in introspection command."""
+    import importlib.metadata as md
 
-    def _broken(name: str):
-        # Registered name whose plugin fails to load — the registry re-raises
-        # the original (non-KeyError) exception.
-        raise RuntimeError("plugin import boom")
+    class _FakeEntryPoint:
+        name = "list"
+        value = "evil_plugin:bad_cmd"
+        dist = None
 
-    monkeypatch.setattr(deploy_mod, "providers", lambda: _Resolver(_broken, names=("docker",)))
+        def load(self):  # pragma: no cover — should never be called
+            return click.Command("list")
 
-    with pytest.raises(SystemExit, match="deploy backend 'docker' failed to load: plugin import boom"):
-        deploy_mod.main(["docker", str(bundle)])
+    # Patch only the deploy-commands selector; everything else stays real.
+    original_entry_points = md.entry_points
+
+    def fake_entry_points(*args, **kwargs):
+        eps = original_entry_points(*args, **kwargs)
+        if hasattr(eps, "select"):
+            real_selected = list(eps.select(group="agentix.deploy.commands"))
+        else:  # pragma: no cover
+            real_selected = list(eps.get("agentix.deploy.commands", []))
+        original_select = eps.select if hasattr(eps, "select") else None
+
+        class _Wrapped:
+            def select(self_inner, *, group: str):
+                if group == "agentix.deploy.commands":
+                    return [_FakeEntryPoint(), *real_selected]
+                return original_select(group=group) if original_select else []
+
+        return _Wrapped()
+
+    monkeypatch.setattr(deploy_mod.importlib.metadata, "entry_points", fake_entry_points)
+
+    with caplog.at_level("WARNING", logger="agentix.cli.deploy"):
+        group = deploy_mod._make_deploy_group()
+
+    list_cmd = group.commands["list"]
+    assert list_cmd is deploy_mod.deploy_list_cmd
+    assert any("reserved subcommand" in record.message for record in caplog.records)
 
 
-def test_deploy_invokes_materializer(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+# ── rendering: print_deploy_result text + JSON ───────────────────────
+
+
+def _bundle(**overrides) -> DeployedBundle:
+    defaults = {
+        "bundle": "/tmp/agentix-runtime-pytest/sha256-abc/",
+        "platform": "linux/amd64",
+        "metadata": {"cache": "/tmp/agentix-runtime-pytest/sha256-abc/", "name": "demo:1.0.0"},
+        "hints": {},
+    }
+    defaults.update(overrides)
+    return DeployedBundle(**defaults)
+
+
+def test_print_deploy_result_text_renders_bundle_platform_and_metadata(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    instance = FakeMaterializer()
-    bundle = tmp_path / "bundle.tar"
-    bundle.write_text("placeholder")
-
-    monkeypatch.setattr(deploy_mod, "providers", lambda: _Resolver(lambda name: lambda: instance))
-
-    assert deploy_mod.main(["fake", str(bundle), "--name", "demo:dev", "--platform", "linux/amd64"]) == 0
-
-    assert instance.calls == [(bundle, "demo:dev", "linux/amd64")]
-    output = capsys.readouterr().out
-    assert "bundle -> demo:dev" in output
-    assert "platform -> linux/amd64" in output
-    assert "cache -> /tmp/agentix-runtime-pytest" in output
+    print_deploy_result(_bundle(), output_format="text")
+    out = capsys.readouterr().out
+    assert "bundle -> /tmp/agentix-runtime-pytest/sha256-abc/" in out
+    assert "platform -> linux/amd64" in out
+    assert "cache -> /tmp/agentix-runtime-pytest/sha256-abc/" in out
+    assert "name -> demo:1.0.0" in out
 
 
-def test_deploy_passes_docker_compatible_config(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    configs: list[DockerProviderConfig] = []
-    bundle = tmp_path / "bundle.tar"
-    bundle.write_text("placeholder")
-
-    class FakeDockerProvider(FakeMaterializer):
-        def __init__(self, config: DockerProviderConfig) -> None:
-            super().__init__()
-            configs.append(config)
-
-    monkeypatch.setattr(deploy_mod, "providers", lambda: _Resolver(lambda name: FakeDockerProvider))
-
-    assert deploy_mod.main(["podman", str(bundle), "--run-arg", "--runtime=crun"]) == 0
-
-    assert configs == [
-        DockerProviderConfig(
-            container_bin="podman",
-            run_args=["--runtime=crun"],
-        )
-    ]
-
-
-def test_deploy_rejects_backend_without_materializer(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    class FakeProvider:
-        pass
-
-    bundle = tmp_path / "bundle.tar"
-    bundle.write_text("placeholder")
-    monkeypatch.setattr(deploy_mod, "providers", lambda: _Resolver(lambda name: FakeProvider))
-
-    with pytest.raises(SystemExit, match="cannot materialize"):
-        deploy_mod.main(["fake", str(bundle)])
-
-
-def test_deploy_format_json_emits_machine_readable_ref(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+def test_print_deploy_result_text_renders_hints_shell_comment_style(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    instance = FakeMaterializer()
-    bundle = tmp_path / "bundle.tar"
-    bundle.write_text("placeholder")
-
-    monkeypatch.setattr(deploy_mod, "providers", lambda: _Resolver(lambda name: lambda: instance))
-
-    assert (
-        deploy_mod.main(
-            ["fake", str(bundle), "--name", "demo:dev", "--platform", "linux/amd64", "--format", "json"]
-        )
-        == 0
+    """Hints render as `# label\\n<command>` so the whole block is
+    copy-pasteable into a terminal — only the command lines execute."""
+    result = _bundle(
+        hints={
+            "inspect contents": "ls -la /tmp/.../nix/",
+            "remove from cache": "rm -rf /tmp/...",
+        },
     )
+    print_deploy_result(result, output_format="text")
+    out = capsys.readouterr().out
+    assert "# inspect contents\nls -la /tmp/.../nix/" in out
+    assert "# remove from cache\nrm -rf /tmp/..." in out
+    # Provider order is preserved (dict insertion order, Python 3.7+).
+    assert out.index("# inspect contents") < out.index("# remove from cache")
 
+
+def test_print_deploy_result_text_omits_hint_section_when_empty(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Providers that don't surface hints get no trailing blank line or
+    `#` block — the output stays tight for the common case."""
+    print_deploy_result(_bundle(), output_format="text")
+    out = capsys.readouterr().out
+    assert "#" not in out
+    assert not out.endswith("\n\n")
+
+
+def test_print_deploy_result_text_omits_platform_when_none(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    print_deploy_result(_bundle(platform=None), output_format="text")
+    out = capsys.readouterr().out
+    assert "platform ->" not in out
+
+
+def test_print_deploy_result_json_emits_machine_readable_payload(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = _bundle(hints={"remove": "rm -rf /foo"})
+    print_deploy_result(result, output_format="json")
     data = json.loads(capsys.readouterr().out)
-    assert data["bundle"] == "demo:dev"
+    assert data["bundle"] == "/tmp/agentix-runtime-pytest/sha256-abc/"
     assert data["platform"] == "linux/amd64"
-    assert data["metadata"]["cache"] == "/tmp/agentix-runtime-pytest"
+    assert data["metadata"]["cache"] == "/tmp/agentix-runtime-pytest/sha256-abc/"
+    assert data["hints"] == {"remove": "rm -rf /foo"}

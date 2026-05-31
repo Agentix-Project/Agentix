@@ -1,6 +1,6 @@
 """Plugin registry for the `agentix.provider` entry-point group.
 
-Lives under `agentix.provider` because deployments are the only
+Lives under `agentix.provider` because providers are the only
 framework axis discovered via entry points. Remote callables do not need
 a framework registry; only sandbox lifecycle backends need a name-to-class
 registry.

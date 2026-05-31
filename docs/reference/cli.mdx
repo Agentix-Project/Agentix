@@ -7,9 +7,10 @@ The Agentix CLI has two core verbs plus a read-only inspector:
 
 - `agentix build` turns a Python project into a deploy-ready runtime
   bundle tar.
-- `agentix deploy` materializes that portable tar for a deployment
-  backend.
-- `agentix plugin list` lists the installed deployment backends and
+- `agentix deploy` deploys that portable tar to a provider backend
+  (local extract for docker/podman/apptainer; upload + register for
+  managed services like E2B / Daytona / Modal).
+- `agentix plugin list` lists the installed provider backends and
   whether each one loads.
 
 ```bash
@@ -43,7 +44,7 @@ and tag are derived from `[project].name` and `[project].version`;
 | `-o`, `--output` | Output file or directory; defaults to `dist/<name>-<tag>-<platform>.bundle.tar` |
 | `--platform` | Sandbox runtime platform, `linux/amd64` or `linux/arm64`; defaults to local CPU |
 | `--dry-run` | Stage the Dockerfile and build context without running Docker |
-| `--container-bin` | Docker-compatible build CLI (`docker`, `podman`, …); default `docker` |
+| `--container-engine` | Container engine (Docker-compatible CLI: `docker`, `podman`, …); default `docker` |
 | `--container-arg` / `--container-run-arg` | Raw args for the container build / export `run`; repeatable |
 | `--nix-arg` | Raw arg forwarded verbatim to the in-container `nix build`; repeatable |
 | `--uv-arg` | Raw arg forwarded verbatim to the in-container `uv sync`; repeatable |
@@ -101,33 +102,95 @@ Docker.
 
 ## `agentix deploy`
 
-Materialize a bundle tar for a backend:
+`agentix deploy` is a **plugin-owned subcommand group**. Each installed
+provider plugin (`agentix-provider-docker`, future `-e2b`, `-modal`, …)
+contributes its own `agentix deploy <name>` subcommand via the
+`agentix.deploy.commands` entry-point group. The core CLI knows nothing
+about backend-specific flags — it just discovers what's installed:
 
 ```bash
+agentix deploy list                         # focused: installed deploy backends
+agentix deploy --help                       # full help, also lists backends
+agentix deploy docker --help                # docker-specific flags
+agentix deploy podman --help                # podman-specific flags
 agentix deploy docker dist/my-rollout.bundle.tar
 agentix deploy podman dist/my-rollout.bundle.tar
 ```
 
-For Docker-compatible backends, deploy unpacks the portable tar into a
-content-addressed host cache and prints the cache root. Use that printed
-path as `SandboxConfig.bundle`.
+`agentix deploy list` is the structured discovery surface — text by
+default, JSON with `--format json`:
+
+```
+$ agentix deploy list
+docker  agentix-provider-docker@0.1.4  Deploy a bundle tar to docker (local cache extract).
+podman  agentix-provider-docker@0.1.4  Deploy a bundle tar to podman (local cache extract).
+
+3 provider(s) installed without a deploy subcommand (see `agentix plugin list`):
+  apptainer, daytona, e2b
+```
+
+The "without a deploy subcommand" line names providers whose
+`SandboxProvider` class is registered (i.e. `agentix plugin list` shows
+them) but who haven't wired up an `agentix.deploy.commands` entry yet —
+useful for telling "not installed" from "installed but not yet wired
+for deploy".
+
+The deploy operation is backend-specific:
+
+- **Local backends** (`docker`, `podman`) unpack the portable tar into a
+  content-addressed host cache and print the cache root.
+- **Managed services** (e2b, modal, daytona, fly — when wired) upload
+  the tar and print the service-side template / volume reference.
+
+Use whatever deploy prints as `SandboxConfig.bundle`. The three flags
+every backend supports (via the shared `common_options` helper):
 
 | Option | Meaning |
 | --- | --- |
-| `backend` | SandboxProvider backend name, e.g. `docker` or `podman` |
 | `bundle` | Bundle tar produced by `agentix build` |
 | `-n`, `--name` | Optional backend bundle label |
 | `--platform` | Optional runtime platform; defaults to manifest platform |
-| `--container-bin` | Docker-compatible CLI override |
-| `--run-arg` | Extra argument for Docker-compatible runtime containers; repeatable |
-| `--format` | Output format: `text` (default) or `json` (`{"bundle","platform","metadata"}`) |
+| `--format` | Output format: `text` (default) or `json` |
+
+Plus whatever flags the chosen backend declares (e.g. docker's
+`--container-engine` / `--run-arg`).
 
 With `--format json`, deploy prints a machine-readable object so the
-cache path can be read with `jq` instead of parsed from text:
+cache path can be read with `jq`:
 
 ```bash
 BUNDLE=$(agentix deploy docker dist/my-rollout.bundle.tar --format json | jq -r .bundle)
 ```
+
+Deploy output also includes a shell-comment block of copy-pasteable
+inspect / cleanup commands the provider surfaces via `DeployedBundle.hints`:
+
+```
+bundle -> /Users/me/.cache/agentix/bundles/sha256-abc/
+platform -> linux/amd64
+cache -> /Users/me/.cache/agentix/bundles/sha256-abc/
+name -> hello:1.0.0
+
+# inspect contents
+ls -la /Users/me/.cache/agentix/bundles/sha256-abc/nix/
+
+# remove from cache
+rm -rf /Users/me/.cache/agentix/bundles/sha256-abc/
+```
+
+### Adding a new deploy backend
+
+A plugin registers its deploy subcommand in its own `pyproject.toml`:
+
+```toml
+[project.entry-points."agentix.deploy.commands"]
+mybackend = "my_plugin.deploy:_deploy_cmd"
+```
+
+The subcommand is an ordinary `@click.command` that decorates with
+`common_options` (from `agentix.cli.deploy`) for the shared
+flags, layers its own backend-specific flags on top, and calls
+`print_deploy_result` to render.
 
 ### Bundle Tar
 
@@ -147,20 +210,20 @@ container builder can reuse it for incremental builds.
 
 ## `agentix plugin`
 
-A read-only inspector for the installed deployment backends.
+A read-only inspector for the installed provider backends.
 
 ```bash
 agentix plugin list
 ```
 
-`agentix plugin list` enumerates every deployment backend discovered
+`agentix plugin list` enumerates every provider backend discovered
 through the `agentix.provider` entry-point group and reports whether
 each one loaded OK or failed to import. Use it to confirm a backend such
 as `docker` or `podman` is installed and importable before you deploy.
 
 ## Configuration
 
-Most runtime configuration lives in explicit deployment config objects
+Most runtime configuration lives in explicit provider config objects
 or CLI flags. Runtime bootstrap uses a small internal env contract.
 
 | Variable | Used by | Purpose |

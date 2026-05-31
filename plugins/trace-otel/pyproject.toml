@@ -26,7 +26,7 @@ build-backend = "uv_build"
 
 # We ship a sibling module `agentix.utils.trace.otel` into the
 # existing `agentix.utils.trace` package; tell uv_build about the
-# namespace layout (this mirrors `agentix-bridge` and the deployment
+# namespace layout (this mirrors `agentix-bridge` and the provider
 # plugins).
 [tool.uv.build-backend]
 module-name = "agentix.utils.trace.otel"

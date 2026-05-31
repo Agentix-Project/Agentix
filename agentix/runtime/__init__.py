@@ -16,45 +16,52 @@ Reach for the leaf you need explicitly, e.g.
 `from agentix.runtime.client import RuntimeClient`, or use the
 top-level re-exports on `agentix`.
 
-Bundle contract
----------------
-These constants describe what every bundle produced by `agentix build`
-exposes to the outside world — the bind-mount layout, the entry point
-deployment backends exec, and the env var the bundle reads to choose
-its listen port. They live here because they're part of the *runtime's*
-external contract, not any one deployment backend's convention; every
-backend imports the same names instead of hardcoding the paths.
-
-Rename / move the bundle entry point in one place, not N.
+The bundle's runtime contract — runtime paths, env vars, and the
+entry point every backend execs — lives in `agentix.runtime.shared.env`
+(alongside the other cross-side primitives like `MAX_MESSAGE_BYTES` and
+`RemoteCallable`). It's re-exported here so
+`from agentix.runtime import BUNDLE_RUNTIME_ENTRYPOINT` keeps working
+for provider plugins; the canonical home is `shared/env.py`.
 """
 
 from __future__ import annotations
 
-BUNDLE_NIX_ROOT = "/nix"
-"""Fixed in-container mount point for the bundle's Nix runtime tree."""
-
-BUNDLE_RUNTIME_ROOT = "/nix/runtime"
-"""Runtime sub-tree under the fixed in-container `/nix` mount."""
-
-BUNDLE_RUNTIME_ENTRYPOINT = "/nix/runtime/bootstrap.sh"
-"""Path inside the bundle that deployment backends exec as the
-container entry point. The script preps Nix-managed runtime PATHs and
-launches uvicorn against `agentix.runtime.server.app:app`. Backends
-should never have to know what the script does — only that it exists
-at this path."""
-
-BIND_PORT_ENV = "AGENTIX_BIND_PORT"
-"""Env var the bundle's bootstrap script reads to choose its listen
-port. Backends pick a free host port and pass it via this name."""
-
-BIND_HOST_ENV = "AGENTIX_BIND_HOST"
-"""Env var the bundle's bootstrap script reads to choose its listen host."""
-
+from agentix.runtime.shared.env import (
+    AGENTIX_ADDED_LD_LIBRARY_PATH,
+    AGENTIX_ADDED_PATH,
+    BIND_HOST_ENV,
+    BIND_PORT_ENV,
+    BUNDLE_NIX_ROOT,
+    BUNDLE_RUNTIME_BASH,
+    BUNDLE_RUNTIME_BIN,
+    BUNDLE_RUNTIME_ENTRYPOINT,
+    BUNDLE_RUNTIME_ENV,
+    BUNDLE_RUNTIME_INCLUDE,
+    BUNDLE_RUNTIME_LIB,
+    BUNDLE_RUNTIME_PATH_ENTRIES,
+    BUNDLE_RUNTIME_PKGCONFIG_DIRS,
+    BUNDLE_RUNTIME_ROOT,
+    BUNDLE_RUNTIME_VENV,
+    BUNDLE_RUNTIME_VENV_BIN,
+    get_env_without_agentix,
+)
 
 __all__ = [
+    "AGENTIX_ADDED_LD_LIBRARY_PATH",
+    "AGENTIX_ADDED_PATH",
     "BIND_HOST_ENV",
     "BIND_PORT_ENV",
     "BUNDLE_NIX_ROOT",
+    "BUNDLE_RUNTIME_BASH",
+    "BUNDLE_RUNTIME_BIN",
     "BUNDLE_RUNTIME_ENTRYPOINT",
+    "BUNDLE_RUNTIME_ENV",
+    "BUNDLE_RUNTIME_INCLUDE",
+    "BUNDLE_RUNTIME_LIB",
+    "BUNDLE_RUNTIME_PATH_ENTRIES",
+    "BUNDLE_RUNTIME_PKGCONFIG_DIRS",
     "BUNDLE_RUNTIME_ROOT",
+    "BUNDLE_RUNTIME_VENV",
+    "BUNDLE_RUNTIME_VENV_BIN",
+    "get_env_without_agentix",
 ]

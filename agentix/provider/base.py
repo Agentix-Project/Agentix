@@ -1,7 +1,7 @@
 """SandboxProvider Protocol, the live Sandbox handle, and the plugin registry.
 
 A provider is anything that creates / deletes / inspects a sandbox. Backends
-ship in their own packages (`agentix-deployment-docker`, ...) and subclass
+ship in their own packages (`agentix-provider-docker`, ...) and subclass
 `SandboxProvider`: they implement the three lifecycle methods and inherit the
 `session(...)` helper.
 
@@ -113,9 +113,10 @@ class SandboxConfig(BaseModel):
             "Agentix runtime bundle reference — the runtime server, your code, and "
             "the Python deps that overlay onto `image` (read-only at `/nix`). "
             "`agentix build` produces the portable tar; `agentix deploy <backend>` "
-            "materializes it into this backend-native ref (for docker/podman, the "
-            "cache path it prints). `image` is the task environment, `bundle` is "
-            "the runtime that runs there — both are required."
+            "turns it into this backend-native ref (local cache path for "
+            "docker/podman, an uploaded template ID for managed services). "
+            "`image` is the task environment, `bundle` is the runtime that runs "
+            "there — both are required."
         ),
     )
     platform: str | None = Field(
@@ -140,12 +141,30 @@ class SandboxInfo(BaseModel):
 
 
 @dataclass
-class MaterializedBundle:
-    """Backend-specific bundle reference produced by `agentix deploy`."""
+class DeployedBundle:
+    """Backend-specific bundle reference produced by `agentix deploy`.
+
+    The `bundle` field is deliberately opaque — a local cache path for
+    docker/podman/apptainer, an `E2B template_id` / Modal volume name /
+    Fly image ref / etc. for managed services. Whatever the deploy
+    operation produces, `SandboxConfig.bundle = ref` is how it gets
+    threaded back into a later sandbox create.
+
+    `hints` is an ordered map of human-label → ready-to-paste shell
+    command the user can run themselves to inspect or remove the
+    deployed bundle. The `BundleDeployer` Protocol intentionally does
+    *not* expose `undeploy` / `list` methods (lifecycle ops would force
+    every backend to implement a uniform interface even when the
+    underlying mechanics differ wildly); instead each provider surfaces
+    the right invocation here, the CLI prints it shell-comment style so
+    the user can copy-paste, and the backend stays free to evolve its
+    own admin surface.
+    """
 
     bundle: str
     platform: str | None = None
     metadata: dict[str, str] = field(default_factory=dict)
+    hints: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -237,23 +256,34 @@ class SandboxProvider(Protocol):
 
 
 @runtime_checkable
-class BundleMaterializer(Protocol):
-    """Optional provider hook for `agentix deploy`.
+class BundleDeployer(Protocol):
+    """Optional provider hook for `agentix deploy <backend> <tar>`.
 
-    `agentix build` produces the backend-neutral tar bundle. A materializer
-    turns that portable artifact into the backend-native reference that
-    `SandboxConfig.bundle` should carry for later sandbox creation. That
-    reference is backend-side state; the sandbox still sees the runtime
-    at the fixed in-container path `/nix`.
+    `agentix build` produces a backend-neutral portable bundle tar. A
+    deployer turns that artifact into the backend-native reference that
+    `SandboxConfig.bundle` should carry for later sandbox creation. The
+    mechanism varies by backend:
+
+    - **Local backends** (docker, podman, apptainer): extract the tar
+      into a content-addressed host cache directory; the ref is the
+      cache path.
+    - **Managed services** (E2B, Daytona, Modal, Fly Machines): upload
+      the tar via the service's API and register it as a template /
+      volume / image; the ref is the service-side ID.
+
+    Either way the returned `DeployedBundle.bundle` is opaque to the
+    deploy CLI — it's a string the same backend's `create()` will know
+    how to consume. The sandbox itself always sees the runtime at the
+    fixed in-container path `/nix`.
     """
 
-    async def materialize_bundle(
+    async def deploy_bundle(
         self,
         bundle: Path,
         *,
         name: str | None = None,
         platform: str | None = None,
-    ) -> MaterializedBundle: ...
+    ) -> DeployedBundle: ...
 
 
 # The plugin registry — one `agentix.provider` group. Backend dists add

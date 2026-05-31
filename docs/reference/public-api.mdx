@@ -167,10 +167,10 @@ from agentix.provider.docker import DockerProvider, DockerProviderConfig
 provider = DockerProvider()
 
 # Same backend driven by podman.
-provider = DockerProvider(DockerProviderConfig(container_bin="podman"))
+provider = DockerProvider(DockerProviderConfig(container_engine="podman"))
 
 # A config can also build its provider directly.
-provider = DockerProviderConfig(container_bin="podman").to_provider()
+provider = DockerProviderConfig(container_engine="podman").to_provider()
 ```
 
 ## Namespace extension API
@@ -282,7 +282,7 @@ These modules are public once their plugin package is installed:
 - `agentix.plugins.datasets.swe`
   - `prepare_env(...)`
   - `score(...)`
-- deployment backends (contribute siblings into `agentix.provider`)
+- provider backends (contribute siblings into `agentix.provider`)
   - `agentix.provider.docker` (production; provides `docker` + `podman`)
   - `agentix.provider.apptainer` (production)
   - `agentix.provider.daytona` (stub)
@@ -297,7 +297,7 @@ Public command-line entrypoints:
   `--format json` prints `{"bundle": ..., "platform": ..., "metadata": {...}}`
   so the cache path can be read with `jq`, e.g.
   `BUNDLE=$(uv run agentix deploy docker dist/x.bundle.tar --format json | jq -r .bundle)`.
-- `agentix plugin list` — read-only listing of installed deployment backends
+- `agentix plugin list` — read-only listing of installed provider backends
   and their load status.
 
 The bundle's runtime server is *not* exposed as a console script; it is

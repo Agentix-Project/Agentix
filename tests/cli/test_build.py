@@ -490,7 +490,7 @@ class TestDockerBuild:
             project_subpath=Path("."),
             platform="linux/amd64",
             config=docker.ContainerBuildConfig(
-                container_bin="podman",
+                container_engine="podman",
                 container_args=("--isolation=chroot",),
             ),
         )
@@ -733,7 +733,7 @@ class TestTarBundle:
             tmp_path,
             platform="linux/amd64",
             config=docker.ContainerBuildConfig(
-                container_bin="podman",
+                container_engine="podman",
                 container_run_args=("--runtime=crun", "--cgroups=disabled"),
             ),
         )
@@ -918,7 +918,7 @@ class TestMainBuild:
                     str(proj),
                     "--name",
                     "demo:dev",
-                    "--container-bin",
+                    "--container-engine",
                     "podman",
                     "--container-arg",
                     "--isolation=chroot",
@@ -928,7 +928,7 @@ class TestMainBuild:
         )
         assert configs == [
             docker.ContainerBuildConfig(
-                container_bin="podman",
+                container_engine="podman",
                 container_args=("--isolation=chroot",),
             )
         ]

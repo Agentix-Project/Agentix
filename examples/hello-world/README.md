@@ -13,10 +13,10 @@ gets `rg` from `default.nix`, which `agentix build` merges into
 uv sync
 uv run agentix build . --output dist/hello-world.bundle.tar
 BUNDLE=$(uv run agentix deploy docker dist/hello-world.bundle.tar | awk -F' -> ' '/^bundle -> /{print $2}')
-uv run python main.py --bundle "$BUNDLE" # defaults to --deployment docker
+uv run python main.py --bundle "$BUNDLE" # defaults to --provider docker
 ```
 
-`main.py` accepts `--deployment`, `--image`, and `--bundle`. By default
+`main.py` accepts `--provider`, `--image`, and `--bundle`. By default
 it loads the Docker backend and runs the cache path that `agentix deploy`
 produced.
 
@@ -27,7 +27,7 @@ Build a portable tar bundle and run with the apptainer backend:
 ```bash
 uv run agentix build . --output /path/to/hello-world.tar
 uv run main.py \
-    --deployment apptainer \
+    --provider apptainer \
     --bundle /path/to/hello-world.tar \
     --image docker://python:3.13-slim
 ```
@@ -43,7 +43,7 @@ caches it under `$AGENTIX_APPTAINER_CACHE` (default
 2. `uv run agentix build .` builds the portable runtime bundle tar.
    The build installs `main.py` into the bundle and applies
    `default.nix`, so `rg` is available in the sandbox runtime.
-3. `agentix deploy docker|podman` materializes the tar for a
-   Docker-compatible backend.
-4. `uv run main.py [--deployment ...]` starts a sandbox with the
+3. `agentix deploy docker|podman` deploys the tar to a
+   Docker-compatible backend (local-extract form).
+4. `uv run main.py [--provider ...]` starts a sandbox with the
    selected backend, then prints the host result and sandbox result.

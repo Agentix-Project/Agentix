@@ -10,8 +10,8 @@ import pkgutil
 __path__ = pkgutil.extend_path(__path__, __name__)
 
 from agentix.provider.base import (
-    BundleMaterializer,
-    MaterializedBundle,
+    BundleDeployer,
+    DeployedBundle,
     Sandbox,
     SandboxConfig,
     SandboxId,
@@ -31,8 +31,8 @@ __version__ = "0.2.7"
 
 __all__ = [
     "AsyncClientNamespace",
-    "BundleMaterializer",
-    "MaterializedBundle",
+    "BundleDeployer",
+    "DeployedBundle",
     "Namespace",
     "RemoteCallable",
     "RemoteCallError",

@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentix-provider-docker"
+version = "0.1.4"
+description = "Docker/Podman provider backend for Agentix"
+requires-python = ">=3.11"
+dependencies = [
+    # Protocol + dataclasses (`SandboxProvider`, `Sandbox`, `SandboxConfig`,
+    # `SandboxInfo`, `SandboxId`) all live in core agentix; `click` is used
+    # to register the `agentix deploy docker|podman` CLI subcommands.
+    "agentixx",
+    "click>=8.1",
+    # The backend talks to dockerd over a unix socket via httpx.
+    "httpx>=0.27",
+]
+
+# `agentixx` is the monorepo workspace root — used editable, never from
+# PyPI. Core edits are live here with no release step.
+[tool.uv.sources]
+agentixx = { workspace = true }
+
+# `uv sync` makes `providers().get("docker")` and `providers().get("podman")`
+# work with zero framework changes — the registry walks this entry-point
+# group.
+[project.entry-points."agentix.provider"]
+docker = "agentix.provider.docker:DockerProvider"
+podman = "agentix.provider.docker:PodmanProvider"
+
+# Each plugin owns its own `agentix deploy <name>` CLI subcommand — the
+# core deploy group discovers these at startup and adds them. Plugin-defined
+# flags (`--container-engine`, `--run-arg`) live here, not in the core.
+[project.entry-points."agentix.deploy.commands"]
+docker = "agentix.provider.docker:deploy_docker_cmd"
+podman = "agentix.provider.docker:deploy_podman_cmd"
+
+[tool.hatch.build.targets.wheel]
+# One file at `agentix/provider/docker.py`. The `agentix` and
+# `agentix/provider` dirs carry no __init__.py here — those belong to
+# core agentix; this wheel installs a sibling into the same namespace.
+packages = ["agentix"]
+
+# ruff / pyright / pytest config is centralized in the workspace-root
+# pyproject.toml — this member doesn't repeat it.

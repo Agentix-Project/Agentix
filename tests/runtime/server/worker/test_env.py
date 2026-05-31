@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from agentix.runtime.env import AGENTIX_ADDED_LD_LIBRARY_PATH, AGENTIX_ADDED_PATH
-from agentix.runtime.server.worker.client import _RUNTIME_BIN_PATH, _clean_worker_env
+from agentix.runtime.server.worker.client import _clean_worker_env
+from agentix.runtime.shared.env import AGENTIX_ADDED_LD_LIBRARY_PATH, AGENTIX_ADDED_PATH, BUNDLE_RUNTIME_BIN
 
 
 def test_clean_worker_env_inherits_parent_path(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -16,32 +16,32 @@ def test_clean_worker_env_inherits_parent_path(monkeypatch: pytest.MonkeyPatch) 
 
     assert env["PATH"].split(os.pathsep) == [
         "/runtime/venv/bin",
-        _RUNTIME_BIN_PATH,
+        BUNDLE_RUNTIME_BIN,
         "/custom/bin",
         "/usr/bin",
     ]
     assert env[AGENTIX_ADDED_PATH].split(os.pathsep) == [
         "/runtime/venv/bin",
-        _RUNTIME_BIN_PATH,
+        BUNDLE_RUNTIME_BIN,
     ]
 
 
 def test_clean_worker_env_dedupes_prepended_path_entries(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(
         "PATH",
-        os.pathsep.join([_RUNTIME_BIN_PATH, "/usr/bin", "/runtime/venv/bin"]),
+        os.pathsep.join([BUNDLE_RUNTIME_BIN, "/usr/bin", "/runtime/venv/bin"]),
     )
 
     env = _clean_worker_env(Path("/runtime/venv/bin"))
 
     assert env["PATH"].split(os.pathsep) == [
         "/runtime/venv/bin",
-        _RUNTIME_BIN_PATH,
+        BUNDLE_RUNTIME_BIN,
         "/usr/bin",
     ]
     assert env[AGENTIX_ADDED_PATH].split(os.pathsep) == [
         "/runtime/venv/bin",
-        _RUNTIME_BIN_PATH,
+        BUNDLE_RUNTIME_BIN,
     ]
 
 
@@ -54,7 +54,7 @@ def test_clean_worker_env_preserves_inherited_agentix_added_path(monkeypatch: py
     assert env[AGENTIX_ADDED_PATH].split(os.pathsep) == [
         "/already/added",
         "/runtime/venv/bin",
-        _RUNTIME_BIN_PATH,
+        BUNDLE_RUNTIME_BIN,
     ]
 
 

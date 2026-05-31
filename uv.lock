@@ -23,10 +23,10 @@ members = [
     "agentix-agent-qwen-code",
     "agentix-bridge",
     "agentix-dataset-swe",
-    "agentix-deployment-apptainer",
-    "agentix-deployment-daytona",
-    "agentix-deployment-docker",
-    "agentix-deployment-e2b",
+    "agentix-provider-apptainer",
+    "agentix-provider-daytona",
+    "agentix-provider-docker",
+    "agentix-provider-e2b",
     "agentix-runner",
     "agentix-runtime-basic",
     "agentix-trace-otel",
@@ -105,9 +105,9 @@ requires-dist = [
 ]
 
 [[package]]
-name = "agentix-deployment-apptainer"
+name = "agentix-provider-apptainer"
 version = "0.1.0"
-source = { editable = "plugins/deployments/apptainer" }
+source = { editable = "plugins/providers/apptainer" }
 dependencies = [
     { name = "agentixx" },
 ]
@@ -116,9 +116,9 @@ dependencies = [
 requires-dist = [{ name = "agentixx", editable = "." }]
 
 [[package]]
-name = "agentix-deployment-daytona"
+name = "agentix-provider-daytona"
 version = "0.1.2"
-source = { editable = "plugins/deployments/daytona" }
+source = { editable = "plugins/providers/daytona" }
 dependencies = [
     { name = "agentixx" },
 ]
@@ -127,24 +127,26 @@ dependencies = [
 requires-dist = [{ name = "agentixx", editable = "." }]
 
 [[package]]
-name = "agentix-deployment-docker"
+name = "agentix-provider-docker"
 version = "0.1.4"
-source = { editable = "plugins/deployments/docker" }
+source = { editable = "plugins/providers/docker" }
 dependencies = [
     { name = "agentixx" },
+    { name = "click" },
     { name = "httpx" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "agentixx", editable = "." },
+    { name = "click", specifier = ">=8.1" },
     { name = "httpx", specifier = ">=0.27" },
 ]
 
 [[package]]
-name = "agentix-deployment-e2b"
+name = "agentix-provider-e2b"
 version = "0.1.2"
-source = { editable = "plugins/deployments/e2b" }
+source = { editable = "plugins/providers/e2b" }
 dependencies = [
     { name = "agentixx" },
 ]

@@ -4,7 +4,7 @@ import os
 
 from agentix.bash import _clean_env
 
-from agentix.runtime.env import (
+from agentix.runtime.shared.env import (
     AGENTIX_ADDED_LD_LIBRARY_PATH,
     AGENTIX_ADDED_PATH,
     get_env_without_agentix,

@@ -2,7 +2,7 @@
 #
 # agentix bundle builder. The transient build image contains `/nix`
 # with everything a sandbox needs. The host build command copies that
-# tree into the portable bundle tar; deployment backends later make the
+# tree into the portable bundle tar; provider backends later make the
 # same tree visible in the task container at `/nix`.
 #
 #   /nix/store/...              the closures (interpreter, uv, system deps)

@@ -1,9 +1,11 @@
 """`agentix` command-line interface.
 
 The core CLI intentionally stays narrow: `agentix build` packages a
-project into a bundle artifact, `agentix deploy` materializes that
-artifact for a deployment backend, and `agentix plugin` inspects the
-installed deployment backends.
+project into a bundle artifact, `agentix deploy` deploys that artifact
+to a provider backend (local extract for docker/podman/apptainer;
+remote upload for managed services), and `agentix plugin` inspects
+the installed plugins (both host-side `agentix.provider` backends and
+sandbox-side `agentix.nix` closures).
 
 Argument parsing is delegated to click — each subcommand is a
 `click.Command` registered on the `agentix` group. Click owns `--help`,

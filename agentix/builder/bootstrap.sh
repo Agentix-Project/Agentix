@@ -5,7 +5,7 @@
 # `/nix/runtime/bootstrap.sh` inside every bundle by the in-container
 # build (`agentix/builder/bundle-build.sh`).
 #
-# Deployment backends (docker, apptainer, future k8s/...) use this as
+# Provider backends (docker, apptainer, future k8s/...) use this as
 # the container entry point — they bake in zero knowledge of Python
 # venvs, LD paths, or where the runtime server lives. New backend =
 # "exec `/nix/runtime/bootstrap.sh` as PID 1, done".

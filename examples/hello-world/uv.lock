@@ -3,17 +3,30 @@ revision = 3
 requires-python = ">=3.11"
 
 [[package]]
-name = "agentix-deployment-docker"
-version = "0.1.4"
-source = { editable = "../../plugins/deployments/docker" }
+name = "agentix-provider-apptainer"
+version = "0.1.0"
+source = { editable = "../../plugins/providers/apptainer" }
 dependencies = [
     { name = "agentixx" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "agentixx", editable = "../../" }]
+
+[[package]]
+name = "agentix-provider-docker"
+version = "0.1.4"
+source = { editable = "../../plugins/providers/docker" }
+dependencies = [
+    { name = "agentixx" },
+    { name = "click" },
     { name = "httpx" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "agentixx", editable = "../../" },
+    { name = "click", specifier = ">=8.1" },
     { name = "httpx", specifier = ">=0.27" },
 ]
 
@@ -33,6 +46,7 @@ name = "agentixx"
 version = "0.2.7"
 source = { editable = "../../" }
 dependencies = [
+    { name = "click" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "msgpack" },
@@ -44,6 +58,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "click", specifier = ">=8.1" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "msgpack", specifier = ">=1.0" },
@@ -397,14 +412,16 @@ name = "hello-world"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "agentix-deployment-docker" },
+    { name = "agentix-provider-apptainer" },
+    { name = "agentix-provider-docker" },
     { name = "agentix-runtime-basic" },
     { name = "agentixx" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "agentix-deployment-docker", editable = "../../plugins/deployments/docker" },
+    { name = "agentix-provider-apptainer", editable = "../../plugins/providers/apptainer" },
+    { name = "agentix-provider-docker", editable = "../../plugins/providers/docker" },
     { name = "agentix-runtime-basic", editable = "../../plugins/runtime-basic" },
     { name = "agentixx", editable = "../../" },
 ]

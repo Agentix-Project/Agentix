@@ -1,9 +1,11 @@
-"""Wire pieces shared by both runtime client and server.
+"""Primitives shared across the runtime — and beyond.
 
 The runtime is split three ways:
 
-  * `agentix.runtime.shared`  — wire types, framing, codec. Imported by
-    both sides. No imports back into `client/` or `server/`.
+  * `agentix.runtime.shared`  — wire types, framing, codec, and the
+    bundle's runtime contract. Imported by both sides; also
+    imported from `agentix.cli`, `agentix.utils`, and
+    `agentix.provider`. No imports back into `client/` or `server/`.
   * `agentix.runtime.client`  — orchestrator-side `RuntimeClient`.
   * `agentix.runtime.server`  — sandbox-side FastAPI app, Socket.IO
     server, and worker subprocess.
@@ -15,6 +17,8 @@ Submodules in this package:
   - `codec`     — msgpack pack/unpack + ext types (numpy, pydantic)
   - `framing`   — length-prefixed msgpack framing for worker stdio
   - `models`    — pydantic wire types (`RemoteRequest`, `RemoteResponse`, …)
+  - `env`       — bundle runtime contract: runtime paths, env vars,
+                  `AGENTIX_ADDED_*` tracking + `get_env_without_agentix`
 """
 
 from __future__ import annotations

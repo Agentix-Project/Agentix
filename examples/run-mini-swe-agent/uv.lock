@@ -26,9 +26,9 @@ requires-dist = [
 ]
 
 [[package]]
-name = "agentix-deployment-docker"
+name = "agentix-provider-docker"
 version = "0.1.4"
-source = { editable = "../../plugins/deployments/docker" }
+source = { editable = "../../plugins/providers/docker" }
 dependencies = [
     { name = "agentixx" },
     { name = "httpx" },
@@ -56,6 +56,7 @@ name = "agentixx"
 version = "0.2.7"
 source = { editable = "../../" }
 dependencies = [
+    { name = "click" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "msgpack" },
@@ -67,6 +68,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "click", specifier = ">=8.1" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "msgpack", specifier = ">=1.0" },
@@ -74,6 +76,7 @@ requires-dist = [
     { name = "pyright", marker = "extra == 'dev'", specifier = ">=1.1.380" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=7.1" },
     { name = "python-multipart", specifier = ">=0.0.9" },
     { name = "python-socketio", extras = ["asyncio-client"], specifier = ">=5.11" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
@@ -2099,7 +2102,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "agentix-agent-mini-swe-agent" },
-    { name = "agentix-deployment-docker" },
+    { name = "agentix-provider-docker" },
     { name = "agentix-runtime-basic" },
     { name = "agentixx" },
 ]
@@ -2107,7 +2110,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "agentix-agent-mini-swe-agent", editable = "../../plugins/agents/mini-swe-agent" },
-    { name = "agentix-deployment-docker", editable = "../../plugins/deployments/docker" },
+    { name = "agentix-provider-docker", editable = "../../plugins/providers/docker" },
     { name = "agentix-runtime-basic", editable = "../../plugins/runtime-basic" },
     { name = "agentixx", editable = "../../" },
 ]

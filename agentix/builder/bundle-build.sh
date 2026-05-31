@@ -53,7 +53,7 @@ cp -a runtime-result/. /nix/runtime/
 rm -f toolchain-result runtime-result
 
 # Drop the bundle's startup contract at /nix/runtime/bootstrap.sh.
-# Deployment backends (docker, apptainer, future k8s/...) just exec
+# Provider backends (docker, apptainer, future k8s/...) just exec
 # this — they stay agnostic about Python venvs, LD_LIBRARY_PATH, or
 # where the runtime server lives. The script is shipped verbatim as
 # wheel data from `agentix/builder/bootstrap.sh` and staged into the

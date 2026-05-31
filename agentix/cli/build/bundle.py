@@ -14,7 +14,7 @@ from that image, extracts only `nix/`, validates the runtime tree's symlinks,
 hashes the result for content identity, and writes a portable tar.
 
 Symlink validation is deliberately narrow — only `/nix/runtime` is
-audited, since that's the surface deployments execute. `/nix/store`
+audited, since that's the surface providers execute. `/nix/store`
 can contain incidental store-internal symlinks that aren't part of
 Agentix's runtime contract.
 """
@@ -36,19 +36,12 @@ from uuid import uuid4
 from agentix.cli.build.docker import ContainerBuildConfig, _build_container_run_args, _docker_build_image, _run
 from agentix.cli.build.naming import _tar_cache_image_ref
 from agentix.cli.build.platform import nix_system_for_platform, normalize_platform
-
-_RUNTIME_ENTRYPOINT = "/nix/runtime/bootstrap.sh"
-
-_RUNTIME_ENV = {
-    "PATH": "/nix/runtime/venv/bin:/nix/runtime/bin",
-    "LD_LIBRARY_PATH": "/nix/runtime/lib",
-    "LIBRARY_PATH": "/nix/runtime/lib",
-    "CPATH": "/nix/runtime/include",
-    "C_INCLUDE_PATH": "/nix/runtime/include",
-    "CPLUS_INCLUDE_PATH": "/nix/runtime/include",
-    "PKG_CONFIG_PATH": "/nix/runtime/lib/pkgconfig:/nix/runtime/share/pkgconfig",
-    "CMAKE_PREFIX_PATH": "/nix/runtime",
-}
+from agentix.runtime.shared.env import (
+    BUNDLE_NIX_ROOT,
+    BUNDLE_RUNTIME_ENTRYPOINT,
+    BUNDLE_RUNTIME_ENV,
+    BUNDLE_RUNTIME_ROOT,
+)
 
 
 def _tree_digest(root: Path) -> str:
@@ -107,16 +100,16 @@ def _validate_bundle_tree(nix_root: Path) -> None:
 
     Nix store paths can contain incidental or profile-oriented symlinks
     that are not part of Agentix's runtime contract. Keep validation
-    focused on `/nix/runtime`, which is what deployments execute and
+    focused on `/nix/runtime`, which is what providers execute and
     prepend to the sandbox environment.
     """
-    entrypoint = nix_root / _RUNTIME_ENTRYPOINT.removeprefix("/nix/")
+    entrypoint = nix_root / BUNDLE_RUNTIME_ENTRYPOINT.removeprefix(f"{BUNDLE_NIX_ROOT}/")
     if not os.path.lexists(entrypoint):
-        raise SystemExit(f"bundle missing runtime entrypoint: {_RUNTIME_ENTRYPOINT}")
+        raise SystemExit(f"bundle missing runtime entrypoint: {BUNDLE_RUNTIME_ENTRYPOINT}")
 
-    runtime_root = nix_root / "runtime"
+    runtime_root = nix_root / BUNDLE_RUNTIME_ROOT.removeprefix(f"{BUNDLE_NIX_ROOT}/")
     if not runtime_root.is_dir():
-        raise SystemExit("bundle missing runtime tree: /nix/runtime")
+        raise SystemExit(f"bundle missing runtime tree: {BUNDLE_RUNTIME_ROOT}")
 
     for path in sorted(runtime_root.rglob("*"), key=lambda p: p.relative_to(nix_root).as_posix()):
         if not path.is_symlink():
@@ -128,7 +121,7 @@ def _validate_bundle_tree(nix_root: Path) -> None:
 
 
 def _bundle_manifest(*, name: str, tag: str, platform: str, digest: str) -> dict[str, object]:
-    runtime_env = dict(_RUNTIME_ENV)
+    runtime_env = dict(BUNDLE_RUNTIME_ENV)
     added_env = {f"AGENTIX_ADDED_{key}": value for key, value in runtime_env.items()}
     return {
         "schema_version": 1,
@@ -138,7 +131,7 @@ def _bundle_manifest(*, name: str, tag: str, platform: str, digest: str) -> dict
         "platform": normalize_platform(platform),
         "nix_system": nix_system_for_platform(platform),
         "digest": f"sha256:{digest}",
-        "entrypoint": _RUNTIME_ENTRYPOINT,
+        "entrypoint": BUNDLE_RUNTIME_ENTRYPOINT,
         "runtime_env": runtime_env,
         "agentix_added_env": added_env,
     }
@@ -240,8 +233,8 @@ def _export_nix_from_container(
     *,
     config: ContainerBuildConfig,
 ) -> None:
-    bin_name = config.container_bin
-    cmd = [bin_name, "export", container]
+    engine = config.container_engine
+    cmd = [engine, "export", container]
     print(f"$ {' '.join(cmd)}", file=sys.stderr)
     with TemporaryFile() as stderr:
         proc = subprocess.Popen(
@@ -250,7 +243,7 @@ def _export_nix_from_container(
             stderr=stderr,
         )
         if proc.stdout is None:
-            raise SystemExit(f"{bin_name} export did not provide a stdout pipe")
+            raise SystemExit(f"{engine} export did not provide a stdout pipe")
         deferred_dirs: list[tuple[Path, int]] = []
         try:
             try:
@@ -261,7 +254,7 @@ def _export_nix_from_container(
                 proc.wait()
                 stderr.seek(0)
                 message = stderr.read().decode(errors="replace")
-                raise SystemExit(message or f"{bin_name} export produced an invalid tar stream: {exc}") from exc
+                raise SystemExit(message or f"{engine} export produced an invalid tar stream: {exc}") from exc
         finally:
             proc.stdout.close()
         rc = proc.wait()
@@ -282,10 +275,10 @@ def _copy_nix_from_image(
     config: ContainerBuildConfig | None = None,
 ) -> None:
     config = config or ContainerBuildConfig()
-    bin_name = config.container_bin
+    engine = config.container_engine
     container = f"agentix-bundle-copy-{uuid4().hex[:12]}"
     create_cmd = [
-        bin_name,
+        engine,
         "create",
         "--platform",
         normalize_platform(platform),
@@ -300,7 +293,7 @@ def _copy_nix_from_image(
         _run(create_cmd)
         _export_nix_from_container(container, bundle_root, config=config)
     finally:
-        _run([bin_name, "rm", "-f", container], check=False)
+        _run([engine, "rm", "-f", container], check=False)
 
 
 def _build_tar_bundle(

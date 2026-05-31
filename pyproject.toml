@@ -49,9 +49,9 @@ agentix = "agentix.cli:main"
 # SandboxProvider backends, agents, datasets, and runtime integrations ship
 # in their own wheels. Runtime integrations are normal Python dependencies
 # installed into the bundle.
-#   pip install agentix-deployment-docker   # registers `docker` and `podman`
-#   pip install agentix-deployment-daytona  # registers `daytona`
-#   pip install agentix-deployment-e2b      # registers `e2b`
+#   pip install agentix-provider-docker     # registers `docker` and `podman`
+#   pip install agentix-provider-daytona    # registers `daytona`
+#   pip install agentix-provider-e2b        # registers `e2b`
 #   pip install agentix-agent-claude-code   # provides `agentix.agents.claude_code`
 #   pip install agentix-agent-mini-swe-agent  # provides `agentix.agents.mini_swe_agent`
 #   pip install agentix-dataset-swe         # provides `agentix.plugins.datasets.swe`
@@ -87,7 +87,7 @@ members = [
     "plugins/trace-otel",
     "plugins/agents/*",
     "plugins/datasets/*",
-    "plugins/deployments/*",
+    "plugins/providers/*",
 ]
 # `examples/*` are standalone projects, not members — each has its own
 # lock and path-depends on the workspace. Excluding them lets `uv lock`
@@ -117,16 +117,16 @@ include = [
     "plugins/agents/mini-swe-agent/src",
     "plugins/agents/qwen-code/src",
     "plugins/datasets/swebench/src",
-    "plugins/deployments/docker/agentix",
-    "plugins/deployments/daytona/agentix",
-    "plugins/deployments/e2b/agentix",
+    "plugins/providers/docker/agentix",
+    "plugins/providers/daytona/agentix",
+    "plugins/providers/e2b/agentix",
     "plugins/runtime-basic/agentix",
     "plugins/trace-otel/agentix",
 ]
 exclude = ["**/__pycache__", "**/.venv", ".venv", "**/build"]
 # `agentix` is a pkgutil namespace package — the core lives here, the
 # plugins contribute siblings: `agentix/bridge/` from `plugins/abridge/`,
-# `agentix/deployment/<backend>.py` from each `plugins/deployments/*`,
+# `agentix/provider/<backend>.py` from each `plugins/providers/*`,
 # `agentix/agents/*`, `agentix/plugins/datasets/*`, and `agentix/{bash,files}/`
 # from `plugins/runtime-basic/`. `extraPaths` lets pyright resolve those
 # statically (it doesn't run `pkgutil.extend_path`).
@@ -137,9 +137,9 @@ extraPaths = [
     "plugins/agents/mini-swe-agent/src",
     "plugins/agents/qwen-code/src",
     "plugins/datasets/swebench/src",
-    "plugins/deployments/docker",
-    "plugins/deployments/daytona",
-    "plugins/deployments/e2b",
+    "plugins/providers/docker",
+    "plugins/providers/daytona",
+    "plugins/providers/e2b",
     "plugins/runtime-basic",
     "plugins/trace-otel",
 ]

@@ -1,131 +1,308 @@
-"""`agentix deploy` — materialize a portable bundle for a deployment backend."""
+"""`agentix deploy` — discover plugin-defined deploy subcommands.
+
+The core CLI deliberately owns *no* backend-specific knowledge. Every
+provider plugin registers its own `click.Command` via the
+`agentix.deploy.commands` entry-point group; this module walks that
+group at import time and assembles them into the `agentix deploy`
+click `Group`. `uv add agentix-provider-X` is therefore sufficient
+for `agentix deploy X --help` to start working — no core edit
+required.
+
+The one built-in subcommand is `agentix deploy list`, which surfaces
+the discovered backends as structured output (text or JSON) so users
+don't have to scroll through `--help` to learn what deploy targets
+are installed.
+
+Shared scaffolding for plugin subcommands lives here too:
+
+* `common_options` — Click decorator that adds the `bundle` positional
+  plus `--name` / `--platform` / `--format`; plugins layer their own
+  engine-specific flags on top.
+* `print_deploy_result` — render a `DeployedBundle` to stdout in text
+  or JSON (including the shell-comment `hints` block).
+
+Plugin subcommands import those two helpers so every backend's
+`--help` and output stay uniform. They're defined above the discovery
+machinery so plugin modules loaded via entry points can import them
+without hitting a circular-import race.
+
+Discovery failures are tolerated: a single broken plugin (import
+error, malformed entry point) is logged and skipped so the rest of
+the CLI still works. The user sees the missing subcommand as
+"No such command 'X'" from click.
+"""
 
 from __future__ import annotations
 
-import asyncio
+import importlib.metadata
 import json
+import logging
 import sys
-from collections.abc import Sequence
-from importlib import import_module
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TypeVar
 
 import click
 
-from agentix.provider.base import BundleMaterializer, SandboxProvider, providers
+from agentix.provider.base import DeployedBundle, providers
+
+logger = logging.getLogger("agentix.cli.deploy")
+
+F = TypeVar("F", bound=Callable[..., Any])
+
+
+# ── Public scaffolding for plugin deploy subcommands ─────────────────
+#
+# Defined ahead of the discovery machinery so plugin modules loaded by
+# `_make_deploy_group()` (during the `deploy = _make_deploy_group()`
+# binding below) can import these without tripping over a circular
+# import — when the docker plugin runs
+# `from agentix.cli.deploy import common_options, print_deploy_result`
+# those names must already exist on the partially-initialised module.
+
+
+def common_options(f: F) -> F:
+    """Attach the `bundle` argument + `--name` / `--platform` / `--format`
+    options every `agentix deploy <backend>` subcommand shares.
+
+    Click decorators apply bottom-up: outermost decorator (here `bundle`)
+    becomes the first positional in the rendered help, then `--name`,
+    `--platform`, `--format`. Subcommand functions receive everything as
+    kwargs (`bundle`, `name`, `platform`, `output_format`), so plugins
+    can place their own engine-specific decorators above or below this
+    one without worrying about parameter ordering.
+    """
+    f = click.option(
+        "--format",
+        "output_format",
+        type=click.Choice(["text", "json"]),
+        default="text",
+        help="Output format: `text` (default, `key -> value` lines) or `json`.",
+    )(f)
+    f = click.option(
+        "--platform",
+        default=None,
+        metavar="PLATFORM",
+        help="Optional bundle runtime platform; defaults to the bundle manifest's value.",
+    )(f)
+    f = click.option(
+        "-n",
+        "--name",
+        default=None,
+        metavar="NAME[:TAG]",
+        help="Optional backend bundle label.",
+    )(f)
+    f = click.argument("bundle", type=click.Path(path_type=Path))(f)
+    return f
+
+
+def print_deploy_result(result: DeployedBundle, *, output_format: str) -> None:
+    """Render a `DeployedBundle` to stdout.
+
+    Text form: `bundle -> <ref>`, then `platform -> <plat>` (when set),
+    then sorted `metadata` entries, then `hints` rendered shell-comment
+    style (`# label\\n<command>`) so the user can copy-paste the whole
+    block into a terminal and only the command lines execute. The hints
+    section is omitted entirely when the provider supplied none, so the
+    output stays tight for the common case.
+
+    JSON form: a single object with `bundle` / `platform` / `metadata` /
+    `hints` keys — machine-readable for `agentix deploy ... --format json`
+    | `jq -r .bundle` style pipelines.
+    """
+    if output_format == "json":
+        print(
+            json.dumps(
+                {
+                    "bundle": result.bundle,
+                    "platform": result.platform,
+                    "metadata": result.metadata,
+                    "hints": result.hints,
+                }
+            )
+        )
+        return
+
+    print(f"bundle -> {result.bundle}")
+    if result.platform:
+        print(f"platform -> {result.platform}")
+    for key, value in sorted(result.metadata.items()):
+        print(f"{key} -> {value}")
+    if result.hints:
+        print()
+        for label, command in result.hints.items():
+            print(f"# {label}")
+            print(command)
+
+
+# ── Discovery machinery + built-in `list` subcommand ─────────────────
+
+# `list` is owned by core — discovery refuses to overwrite it so a plugin
+# can't accidentally (or maliciously) shadow the introspection command.
+_RESERVED_SUBCOMMANDS = frozenset({"list"})
 
 _DEPLOY_HELP = """\
-Materialize an Agentix bundle tar for a deployment backend.
+Deploy an Agentix bundle tar to a provider backend.
 
 `agentix build` always writes a portable bundle tar (`manifest.json + nix/`).
-`agentix deploy BACKEND bundle.tar` turns that tar into the backend-native
-bundle reference that `SandboxConfig.bundle` should use. The runtime still
-appears at `/nix` inside every sandbox.
+Each provider plugin contributes its own `agentix deploy <name>` subcommand
+that turns that tar into the backend-native reference `SandboxConfig.bundle`
+should use:
+
+\b
+  - Local backends (`docker`, `podman`) extract the tar into a
+    content-addressed host cache; the ref is the cache path.
+  - Managed services (when wired: e2b, modal, daytona, fly) upload the
+    tar and register it as a template / volume / image; the ref is the
+    service-side ID.
+
+\b
+Use `agentix deploy <backend> --help` for backend-specific flags. Run
+`agentix deploy` with no args to see which backends are installed.
 
 \b
 Examples:
     agentix deploy docker dist/hello.bundle.tar
-    agentix deploy podman dist/hello.bundle.tar
-    agentix deploy podman dist/hello.bundle.tar --run-arg --runtime=crun --run-arg --cgroups=disabled
-    agentix deploy docker dist/hello.bundle.tar --format json   # machine-readable bundle ref
-
-Capture the materialized bundle reference programmatically with `--format json`:
-
-\b
-    BUNDLE=$(agentix deploy docker dist/hello.bundle.tar --format json | jq -r .bundle)
+    agentix deploy podman dist/hello.bundle.tar --run-arg --runtime=crun
+    agentix deploy docker dist/hello.bundle.tar --format json
 """
 
 
+def _deploy_command_entry_points() -> list[importlib.metadata.EntryPoint]:
+    """Walk the `agentix.deploy.commands` entry-point group."""
+    eps = importlib.metadata.entry_points()
+    if hasattr(eps, "select"):
+        return list(eps.select(group="agentix.deploy.commands"))
+    return list(eps.get("agentix.deploy.commands", []))  # type: ignore[attr-defined]  # pragma: no cover
+
+
+def _make_deploy_group() -> click.Group:
+    """Build the `agentix deploy` group by discovering plugin subcommands.
+
+    Walks the `agentix.deploy.commands` entry-point group via
+    `importlib.metadata`. Each entry must resolve to a `click.Command`
+    (typically a `@click.command(...)` function); the entry-point name
+    becomes the subcommand name. A loader that raises is logged and
+    skipped so a single broken plugin can't take the whole CLI down.
+    Names in `_RESERVED_SUBCOMMANDS` (currently just `list`) are owned
+    by core and refused — a plugin can't shadow `agentix deploy list`.
+    """
+    group = click.Group(
+        name="deploy",
+        help=_DEPLOY_HELP,
+        short_help="Deploy a bundle tar to a provider backend.",
+        context_settings={"help_option_names": ["-h", "--help"]},
+        invoke_without_command=False,
+    )
+
+    group.add_command(deploy_list_cmd, name="list")
+
+    for ep in _deploy_command_entry_points():
+        if ep.name in _RESERVED_SUBCOMMANDS:
+            logger.warning(
+                "deploy plugin %r tried to register reserved subcommand name; skipping",
+                ep.name,
+            )
+            continue
+        try:
+            cmd = ep.load()
+        except Exception as exc:
+            logger.warning("deploy plugin %r failed to load: %s", ep.name, exc)
+            continue
+        if not isinstance(cmd, click.Command):
+            logger.warning(
+                "deploy plugin %r resolved to %r (expected click.Command); skipping",
+                ep.name,
+                type(cmd).__name__,
+            )
+            continue
+        group.add_command(cmd, name=ep.name)
+
+    return group
+
+
 @click.command(
-    name="deploy",
-    help=_DEPLOY_HELP,
-    short_help="Materialize a bundle tar for a deployment backend.",
+    "list",
+    short_help="List installed deploy backends.",
     context_settings={"help_option_names": ["-h", "--help"]},
-)
-@click.argument("backend")
-@click.argument("bundle", type=click.Path(path_type=Path))
-@click.option("-n", "--name", default=None, metavar="NAME[:TAG]", help="Optional backend bundle label.")
-@click.option("--platform", default=None, metavar="PLATFORM", help="Optional bundle runtime platform.")
-@click.option("--container-bin", default=None, metavar="BIN", help="Docker-compatible CLI override.")
-@click.option(
-    "--run-arg",
-    "run_args",
-    multiple=True,
-    metavar="ARG",
-    help="Extra argument for Docker-compatible runtime containers; repeat for multiple args.",
 )
 @click.option(
     "--format",
     "output_format",
     type=click.Choice(["text", "json"]),
     default="text",
-    help="Output format: `text` (default, `key -> value` lines) or `json`.",
+    help="Output format: `text` (default, one backend per line) or `json` (list of objects).",
 )
-def deploy(
-    backend: str,
-    bundle: Path,
-    name: str | None,
-    platform: str | None,
-    container_bin: str | None,
-    run_args: tuple[str, ...],
-    output_format: str,
-) -> int:
-    deployment = _instantiate_deployment(
-        backend,
-        container_bin=container_bin,
-        run_args=run_args,
-    )
-    if not isinstance(deployment, BundleMaterializer):
-        raise SystemExit(f"deployment backend {backend!r} cannot materialize bundle tars")
-
-    result = asyncio.run(deployment.materialize_bundle(bundle, name=name, platform=platform))
-    if output_format == "json":
-        print(json.dumps({"bundle": result.bundle, "platform": result.platform, "metadata": result.metadata}))
-        return 0
-    print(f"bundle -> {result.bundle}")
-    if result.platform:
-        print(f"platform -> {result.platform}")
-    for key, value in sorted(result.metadata.items()):
-        print(f"{key} -> {value}")
-    return 0
-
-
-def _instantiate_deployment(
-    backend: str,
-    *,
-    container_bin: str | None,
-    run_args: tuple[str, ...],
-) -> SandboxProvider:
-    registry = providers()
-    try:
-        cls = cast(Any, registry.get(backend))
-    except KeyError:
-        available = ", ".join(sorted(registry.all())) or "(none installed)"
-        raise SystemExit(f"unknown deploy backend {backend!r}; available: {available}") from None
-    except Exception as exc:
-        # The name is registered but its plugin failed to import/load; the
-        # registry re-raises the original error. Surface it cleanly instead of
-        # a raw traceback.
-        raise SystemExit(f"deploy backend {backend!r} failed to load: {exc}") from exc
-    has_container_options = container_bin is not None or bool(run_args)
-    if backend in {"docker", "podman"} or has_container_options:
+def deploy_list_cmd(output_format: str) -> None:
+    """Show every provider plugin that registered an `agentix deploy <name>`
+    subcommand, plus its source dist + short help. Also names providers that
+    are installed (in the `agentix.provider` registry) but did *not* contribute
+    a deploy CLI command — so users can tell "is e2b just not yet wired for
+    deploy?" from "is e2b not installed?".
+    """
+    entries: list[dict[str, str | None]] = []
+    for ep in sorted(_deploy_command_entry_points(), key=lambda e: e.name):
+        if ep.name in _RESERVED_SUBCOMMANDS:
+            continue
+        dist = getattr(ep, "dist", None)
+        dist_name = getattr(dist, "name", None) if dist else None
+        dist_version = getattr(dist, "version", None) if dist else None
+        summary: str | None = None
         try:
-            docker_module = import_module("agentix.provider.docker")
-        except ImportError as exc:
-            raise SystemExit("Docker-compatible deploy options require agentix-deployment-docker") from exc
-        if backend not in {"docker", "podman"}:
-            raise SystemExit("container deploy options are only supported by docker and podman backends")
-        config_cls = cast(Any, getattr(docker_module, "DockerProviderConfig"))
-        bin_name = container_bin or backend
-        config = config_cls(
-            container_bin=bin_name,
-            run_args=list(run_args),
+            cmd = ep.load()
+            if isinstance(cmd, click.Command):
+                summary = cmd.short_help or cmd.help or None
+        except Exception as exc:
+            summary = f"ERROR: {type(exc).__name__}: {exc}"
+        entries.append(
+            {
+                "name": ep.name,
+                "source": dist_name,
+                "version": dist_version,
+                "summary": summary,
+            }
         )
-        return cast(SandboxProvider, cls(config))
-    return cast(SandboxProvider, cls())
+
+    deploy_names = {entry["name"] for entry in entries}
+    installed_providers = sorted(set(providers().all()) | set(providers().errors()))
+    no_deploy = [name for name in installed_providers if name not in deploy_names]
+
+    if output_format == "json":
+        print(json.dumps({"deploy": entries, "providers_without_deploy": no_deploy}))
+        return
+
+    if not entries:
+        print("no deploy backends installed.")
+        print("install one: pip install agentix-provider-docker  (or another agentix.deploy.commands plugin)")
+    else:
+        name_w = max((len(entry["name"] or "") for entry in entries), default=0)
+        source_w = max((len(_format_source(entry)) for entry in entries), default=0)
+        for entry in entries:
+            name = entry["name"] or ""
+            source = _format_source(entry)
+            summary = entry["summary"] or ""
+            print(f"{name:<{name_w}}  {source:<{source_w}}  {summary}")
+
+    if no_deploy:
+        print()
+        print(
+            f"{len(no_deploy)} provider(s) installed without a deploy subcommand "
+            f"(see `agentix plugin list`):"
+        )
+        print(f"  {', '.join(no_deploy)}")
+
+
+def _format_source(entry: dict[str, str | None]) -> str:
+    source = entry.get("source") or "(local)"
+    version = entry.get("version")
+    return f"{source}@{version}" if version else source
+
+
+deploy = _make_deploy_group()
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """`agentix deploy` standalone entry point — returns the exit code."""
     try:
         deploy.main(args=argv, prog_name="agentix deploy", standalone_mode=False)
     except click.exceptions.UsageError as exc:
@@ -134,4 +311,4 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-__all__ = ["deploy", "main"]
+__all__ = ["common_options", "deploy", "main", "print_deploy_result"]
