@@ -143,6 +143,27 @@ class Bridge(AsyncClientNamespace):
         self.session_id = session_id or uuid.uuid4().hex
         self._proxy: ProxyHandle | None = None
         self._family = "anthropic"
+        self._root_cm: Any = None
+
+    # ── rollout root span ──────────────────────────────────────────────
+    #
+    # abridge sees a flat stream of LLM calls — it can't reconstruct the
+    # agent's real hierarchy. So `async with bridge:` opens ONE "abridge"
+    # span that every captured call nests under, giving a single grouped
+    # trace by default (instead of one trace per call). `start_proxy`
+    # captures whatever span is active — this one, or an outer span the
+    # caller opened — and parents the in-sandbox LLM spans to it.
+
+    async def __aenter__(self) -> Bridge:
+        attrs: dict[str, Any] = {"agentix.session_id": self.session_id, "gen_ai.operation.name": "agent"}
+        self._root_cm = trace.span("abridge", **attrs)
+        self._root_cm.__enter__()
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        if self._root_cm is not None:
+            self._root_cm.__exit__(exc_type, exc, tb)
+            self._root_cm = None
 
     # ── in-sandbox proxy lifecycle ─────────────────────────────────────
 
