@@ -24,6 +24,7 @@ from agentix.bridge import Bridge, OpenAIClient
 from agentix.provider.docker import DockerProvider, DockerProviderConfig
 
 from agentix.provider.base import SandboxConfig
+from agentix.utils import trace
 from agentix.utils.log import configure_logging
 
 DEFAULT_INSTRUCTION = (
@@ -48,12 +49,29 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--network", default=None, help="container network mode, e.g. `host`")
     p.add_argument("--run-arg", action="append", default=[], dest="run_args", help="extra run arg (repeatable)")
     p.add_argument("--instruction", default=DEFAULT_INSTRUCTION)
+    # Optional OTLP export of the captured /trace spans (LangSmith / Langfuse / any
+    # OTLP backend — only the endpoint + auth headers differ).
+    p.add_argument("--otlp-endpoint", default=os.getenv("OTLP_TRACES_ENDPOINT"),
+                   help="OTLP/HTTP traces URL, e.g. https://api.smith.langchain.com/otel/v1/traces")
+    p.add_argument("--otlp-header", action="append", default=[], dest="otlp_headers", metavar="K=V",
+                   help="OTLP header (repeatable), e.g. x-api-key=lsv2_... or Langsmith-Project=demo")
     return p.parse_args()
+
+
+def _install_otlp(endpoint: str, header_pairs: list[str]) -> None:
+    from agentix.utils.trace.otel import OTelTraceProcessor
+
+    from agentix.utils import trace
+
+    headers = dict(h.split("=", 1) for h in header_pairs)
+    trace.add_processor(OTelTraceProcessor(endpoint=endpoint, headers=headers))
 
 
 async def main() -> None:
     args = parse_args()
     configure_logging(default_context="host")
+    if args.otlp_endpoint:
+        _install_otlp(args.otlp_endpoint, args.otlp_headers)  # captured /trace spans -> OTLP backend
 
     # Bridge ferries + captures; the Client makes the actual provider call.
     bridge = Bridge(OpenAIClient(
@@ -64,7 +82,9 @@ async def main() -> None:
     ))
     cfg = SandboxConfig(image=args.image, bundle=args.bundle, platform=args.platform)
 
-    async with provider.session(cfg, call_deadline=1800) as sandbox:
+    # `async with bridge` opens the rollout root span; start_proxy parents every
+    # in-sandbox LLM span to it, so the backend shows one grouped, nested trace.
+    async with provider.session(cfg, call_deadline=1800) as sandbox, bridge:
         await bridge.start_proxy(sandbox, family="anthropic")  # registers + starts the proxy
         result = await sandbox.remote(claude_code_run, ClaudeCodeArgs(
             instruction=args.instruction,
@@ -74,6 +94,9 @@ async def main() -> None:
             base_url=bridge.get_base_url(),
             api_key="sk-abridge",
         ))
+
+    if args.otlp_endpoint:
+        trace.force_flush()  # push batched spans to the OTLP backend before exit
 
     print(f"\nclaude returncode={result.returncode}")
     traj = bridge.store.trajectory(bridge.session_id)

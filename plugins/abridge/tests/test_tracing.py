@@ -113,3 +113,68 @@ async def test_request_through_proxy_emits_span(wired, capture_spans) -> None:
 
 def test_detect_still_classifies_paths() -> None:
     assert detect("/v1/messages") is ApiFamily.ANTHROPIC_MESSAGES
+
+
+def test_span_carries_prompt_and_completion_content():
+    """Issue: LangSmith showed only tokens. Spans must also carry the prompt +
+    completion text as gen_ai.prompt.*/completion.* (what backends render)."""
+    attrs = proxy_mod._llm_request_attrs(
+        ApiFamily.ANTHROPIC_MESSAGES,
+        {"model": "m", "system": "sys", "messages": [{"role": "user", "content": "hello"}]},
+        session_id="s", record_id="r",
+    )
+    assert attrs["gen_ai.prompt.0.role"] == "system"
+    assert attrs["gen_ai.prompt.0.content"] == "sys"
+    assert attrs["gen_ai.prompt.1.role"] == "user"
+    assert attrs["gen_ai.prompt.1.content"] == "hello"
+
+    rec = make_record(
+        request_id="r", session_id="s", family=ApiFamily.ANTHROPIC_MESSAGES,
+        started_at=0.0, request_path="/v1/messages", request_body={}, upstream_body={},
+        response_body={"content": [{"type": "text", "text": "world"}],
+                       "usage": {"input_tokens": 1, "output_tokens": 1}},
+    )
+    with trace.span("x") as sp:
+        proxy_mod._apply_response_span(sp, rec)
+    assert sp.attrs["gen_ai.completion.0.role"] == "assistant"
+    assert sp.attrs["gen_ai.completion.0.content"] == "world"
+
+
+def test_handle_request_span_nests_under_parent():
+    """Issue: 11 separate traces. With parent ids, the LLM span shares the
+    rollout's trace_id and parent_id -> one nested trace."""
+    p = proxy_mod.trace.Span(span_id="rootspan", trace_id="roottrace", parent_id=None, name="rollout")
+    with proxy_mod.trace.span("chat m", parent=p) as sp:
+        pass
+    assert sp.trace_id == "roottrace"
+    assert sp.parent_id == "rootspan"
+
+
+@pytest.mark.asyncio
+async def test_bridge_cm_owns_root_span_and_propagates_to_proxy():
+    """`async with bridge:` opens ONE rollout span; start_proxy captures it and
+    forwards its ids to the sandbox proxy, so all LLM spans nest under it."""
+    from agentix.bridge import Bridge, OpenAIClient
+
+    class _FakeSandbox:
+        def __init__(self) -> None:
+            self.captured: dict[str, object] = {}
+
+        def register_namespace(self, ns: object) -> None:
+            pass
+
+        async def remote(self, fn, **kwargs):  # noqa: ANN001
+            self.captured = kwargs
+            return proxy_mod.ProxyHandle(
+                proxy_id="p", url="http://127.0.0.1:1", port=1, anthropic_base_url="x", openai_base_url="y"
+            )
+
+    bridge = Bridge(OpenAIClient(base_url="http://x", api_key="k", model="m"))
+    sandbox = _FakeSandbox()
+    async with bridge:
+        root = trace.get_current_span()
+        assert root is not None and root.name == "abridge"
+        await bridge.start_proxy(sandbox, family="anthropic")
+
+    assert sandbox.captured["parent_trace_id"] == root.trace_id
+    assert sandbox.captured["parent_span_id"] == root.span_id
