@@ -8,7 +8,7 @@ agent -> http://127.0.0.1:<port>/v1/messages
               | capture record
               | SIO request -> /abridge "llm_call"
               v
-            host (`OpenAICompatibleClient`)
+            host (`Bridge`)
               | call real OpenAI-compatible upstream
               | return JSON
               v
@@ -34,13 +34,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import inspect
 import logging
-import os
 import socket
 import time
 import uuid
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -138,8 +135,8 @@ async def start_proxy(
 
     `session_id`, when set, is stamped onto every captured call so the
     host/gateway can group a rollout's LLM calls into one trajectory.
-    `bridged(...)` wires this for you; the caller (host) supplies the id
-    so it can later query the gateway by the same key.
+    `Bridge.start_proxy(...)` wires this for you; the caller (host) supplies
+    the id so it can later query the gateway by the same key.
     """
     ns = _get_namespace()
     app = _build_app(ns=ns, request_timeout=request_timeout, session_id=session_id)
@@ -170,57 +167,6 @@ async def stop_proxy(handle: ProxyHandle) -> None:
     rec.server.should_exit = True
     with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
         await asyncio.wait_for(rec.task, timeout=5)
-
-
-# ── bridged: run an agent callable with the proxy live around it ───────────
-
-
-@dataclass(slots=True)
-class BridgeConfig:
-    """Proxy knobs for `bridged(...)`.
-
-    `session_id` is supplied by the caller (host) so it can later query
-    the gateway for this rollout's trajectory by the same key; left None
-    a per-run id is generated (capture still works, but the host then has
-    to read it back off the records).
-    """
-
-    port: int = 0
-    request_timeout: float = 600.0
-    session_id: str | None = None
-
-
-async def bridged(
-    fn: Callable[..., Any],
-    /,
-    *args: Any,
-    _bridge: BridgeConfig | None = None,
-    **kwargs: Any,
-) -> Any:
-    """Run `fn(*args, **kwargs)` inside the sandbox with the LLM proxy live.
-
-    This is the sandbox-side entry point: the host does a single
-    `await sandbox.remote(bridged, agent_fn, ...)`. `bridged` starts the
-    proxy, points the standard SDK base-URL env vars at it, runs the agent
-    (sync agents go to a thread so the proxy's event loop stays free to
-    serve their HTTP calls), and tears the proxy down on the way out.
-
-    The agent callable stays pristine — no env threading, no proxy
-    lifecycle, no tracing hooks. `fn` is positional-only so it never
-    collides with the agent's own keyword arguments.
-    """
-    cfg = _bridge or BridgeConfig()
-    session_id = cfg.session_id or uuid.uuid4().hex
-    handle = await start_proxy(
-        port=cfg.port, request_timeout=cfg.request_timeout, session_id=session_id
-    )
-    os.environ.update(export_environ(handle))
-    try:
-        if inspect.iscoroutinefunction(fn):
-            return await fn(*args, **kwargs)
-        return await asyncio.to_thread(fn, *args, **kwargs)
-    finally:
-        await stop_proxy(handle)
 
 
 async def _wait_uvicorn_started(server: uvicorn.Server) -> None:
@@ -506,12 +452,10 @@ def export_environ(handle: ProxyHandle) -> dict[str, str]:
 
 __all__ = [
     "NAMESPACE",
-    "BridgeConfig",
     "InMemoryStore",
     "ProxyHandle",
     "RECORD_EVENT",
     "REQUEST_EVENT",
-    "bridged",
     "export_environ",
     "start_proxy",
     "stop_proxy",

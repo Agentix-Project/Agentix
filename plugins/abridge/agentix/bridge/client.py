@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -25,7 +26,8 @@ import httpx
 from agentix import AsyncClientNamespace
 
 from .detection import ApiFamily
-from .proxy import NAMESPACE, REQUEST_EVENT
+from .proxy import NAMESPACE, REQUEST_EVENT, ProxyHandle
+from .proxy import start_proxy as _sandbox_start_proxy
 from .storage import CompletionRecord, InMemoryStore, TokenUsage
 
 logger = logging.getLogger("agentix.bridge.client")
@@ -37,21 +39,19 @@ UpstreamHook = Callable[[dict[str, Any]], Awaitable[dict[str, Any]] | dict[str, 
 """Optional async callable that can rewrite the body before it leaves the host."""
 
 
-class OpenAICompatibleClient(AsyncClientNamespace):
-    """Host SIO consumer that fires OpenAI Chat Completions requests.
+class Bridge(AsyncClientNamespace):
+    """Host-side abridge: the `/abridge` consumer, the upstream config, and
+    the in-sandbox proxy lifecycle, in one object.
 
-    Parameters mirror the openai SDK: `base_url` is what the SDK calls
-    its `base_url` argument (e.g. `https://api.openai.com/v1`,
-    `http://vllm:8000/v1`); `api_key` is the bearer token; `model`
-    optionally rewrites whatever model the sandbox sent us so different
-    agents can share one upstream without code changes.
+    Construct it with the upstream endpoint, `sandbox.register_namespace(bridge)`,
+    `await bridge.start_proxy(sandbox)` to bring up the in-sandbox service, then
+    point your agent's `base_url` at `bridge.get_base_url()`. Every captured
+    call lands in `store`, grouped by `session_id`.
 
-    `request_hook` is the one-shot extension point: a coroutine that
-    sees the OpenAI body just before we hit the wire (think: inject
-    `reasoning_effort`, swap `response_format`, etc.).
-
-    Captured `CompletionRecord`s land in `store` for whatever the
-    caller wants to do with them.
+    Parameters mirror the openai SDK: `base_url` (e.g. `https://api.openai.com/v1`,
+    `http://vllm:8000/v1`); `api_key` is the bearer token; `model` optionally
+    rewrites whatever model the sandbox sent so agents share one upstream.
+    `request_hook` is the one-shot hook to rewrite the OpenAI body before the wire.
     """
 
     def __init__(
@@ -64,6 +64,7 @@ class OpenAICompatibleClient(AsyncClientNamespace):
         timeout: float = 120.0,
         request_hook: UpstreamHook | None = None,
         store: InMemoryStore | None = None,
+        session_id: str | None = None,
     ) -> None:
         super().__init__(NAMESPACE)
         self._base_url = (base_url or os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
@@ -73,6 +74,30 @@ class OpenAICompatibleClient(AsyncClientNamespace):
         self._timeout = timeout
         self._request_hook = request_hook
         self.store: InMemoryStore = store if store is not None else InMemoryStore()
+        self.session_id = session_id or uuid.uuid4().hex
+        self._proxy: ProxyHandle | None = None
+        self._family = "anthropic"
+
+    # ── in-sandbox proxy lifecycle ─────────────────────────────────────
+
+    async def start_proxy(self, sandbox: Any, family: str = "anthropic") -> str:
+        """Start the in-sandbox abridge proxy and return the base URL the
+        agent should point at (sandbox loopback). The proxy lives on the
+        worker's event loop for the sandbox's lifetime; calls captured
+        through it are grouped under this Bridge's `session_id`.
+        """
+        self._proxy = await sandbox.remote(_sandbox_start_proxy, session_id=self.session_id)
+        self._family = family
+        return self.get_base_url()
+
+    def get_base_url(self) -> str:
+        """The sandbox-loopback URL the agent's SDK should use as its
+        Anthropic/OpenAI base URL. Requires `start_proxy(...)` first."""
+        if self._proxy is None:
+            raise RuntimeError("call await bridge.start_proxy(sandbox) first")
+        if self._family == "anthropic":
+            return self._proxy.anthropic_base_url
+        return self._proxy.openai_base_url
 
     # ── SIO dispatch ───────────────────────────────────────────────────
 
@@ -229,4 +254,4 @@ def _record_from_payload(payload: dict[str, Any]) -> CompletionRecord:
     )
 
 
-__all__ = ["OpenAICompatibleClient", "UpstreamHook"]
+__all__ = ["Bridge", "UpstreamHook"]

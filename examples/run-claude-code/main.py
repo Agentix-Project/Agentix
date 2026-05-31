@@ -1,171 +1,85 @@
-"""Run Claude Code through sandbox-local abridge-mitm.
+"""Run Claude Code in an Agentix sandbox, LLM traffic bridged via abridge.
 
-Flow:
+Claude Code runs *inside* the sandbox; abridge tunnels its Anthropic calls to
+the host, which forwards to any OpenAI-compatible endpoint (the transform maps
+Anthropic <-> OpenAI). The agent is unmodified — you just point its `base_url`
+at the bridge's in-sandbox service URL. Every call is captured into
+`bridge.store` and emitted as a `/trace` span.
 
-    Claude Code in sandbox
-      -> sandbox-local mitmproxy
-      -> sandbox-local Agentix forwarder
-      -> host OpenAIForwarder
-      -> OpenAI-compatible upstream
-
-The real upstream API key stays on the host. The sandbox only receives
-an Anthropic-shaped 127.0.0.1 URL.
+    agentix build .
+    OPENAI_API_KEY=... uv run python main.py --bundle <ref> \
+        --container-engine podman --network host \
+        --run-arg --runtime=crun --run-arg --cgroups=disabled
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import os
-from typing import Any
 
-import agentix.agents.claude_code as cc
-import agentix.bridge.mitm as abridge_mitm
-from agentix.bash import run
-from agentix.provider.docker import DockerProvider
+from agentix.agents.claude_code import ClaudeCodeArgs
+from agentix.agents.claude_code import run as claude_code_run
+from agentix.bridge import Bridge
+from agentix.provider.docker import DockerProvider, DockerProviderConfig
 
-from agentix.provider.base import Sandbox, SandboxConfig
+from agentix.provider.base import SandboxConfig
 from agentix.utils.log import configure_logging
 
-DEFAULT_IMAGE = "python:3.13-slim"
-DEFAULT_PLATFORM = "linux/amd64"
-DEFAULT_ANTHROPIC_MODEL = "claude-3-5-sonnet-latest"
-DEFAULT_WORKDIR = "/workspace/run-claude-code"
+DEFAULT_INSTRUCTION = (
+    "Create calc.py with functions add, sub, mul, div and a main that prints "
+    "add(2,3), sub(5,1), mul(4,6), div(10,2); run it with python3 to verify. Then add "
+    "factorial(n) and verify factorial(5)==120 by running python3. Iterate with the shell."
+)
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser()
+    p.add_argument("--bundle", required=True, help="bundle ref from `agentix build`/`agentix deploy`")
+    p.add_argument("--image", default="python:3.13-slim")
+    p.add_argument("--platform", default="linux/amd64")
+    p.add_argument("--base-url", default=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"))
+    p.add_argument("--model", default=os.getenv("OPENAI_MODEL", "gpt-4o"), help="upstream model the host pins calls to")
+    # The claude CLI sends this model id; the host overrides it upstream.
+    p.add_argument("--anthropic-model", default="claude-sonnet-4-5-20250929")
+    p.add_argument("--max-turns", type=int, default=20)
+    p.add_argument("--workdir", default="/tmp/cc")
+    p.add_argument("--container-engine", default="docker")
+    p.add_argument("--network", default=None, help="container network mode, e.g. `host`")
+    p.add_argument("--run-arg", action="append", default=[], dest="run_args", help="extra run arg (repeatable)")
+    p.add_argument("--instruction", default=DEFAULT_INSTRUCTION)
+    return p.parse_args()
 
 
 async def main() -> None:
     args = parse_args()
     configure_logging(default_context="host")
-    forwarder = abridge_mitm.OpenAIForwarder(
-        base_url=require_env("OPENAI_BASE_URL"),
-        api_key=require_env("OPENAI_API_KEY"),
-        model=require_env("OPENAI_MODEL"),
-        extra_body=json_object_env("ABRIDGE_OPENAI_EXTRA_BODY"),
-        timeout=args.upstream_timeout,
-    )
-    await run_claude_code(args, forwarder=forwarder)
 
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--bundle", required=True)
-    parser.add_argument("--image", default=DEFAULT_IMAGE)
-    parser.add_argument("--platform", default=DEFAULT_PLATFORM)
-    parser.add_argument("--proxy-port", type=int, default=0)
-    parser.add_argument("--proxy-mode", default="reverse:https://api.anthropic.com")
-    parser.add_argument("--workdir", default=DEFAULT_WORKDIR)
-    parser.add_argument("--anthropic-model", default=DEFAULT_ANTHROPIC_MODEL)
-    parser.add_argument("--max-turns", type=int, default=8)
-    parser.add_argument("--timeout", type=float, default=300)
-    parser.add_argument("--upstream-timeout", type=float, default=120)
-    parser.add_argument(
-        "--instruction",
-        default=(
-            "Edit math_utils.py. Add a function add(a, b) that returns a + b. "
-            "Keep subtract unchanged. Run python to verify add(2, 3) == 5. "
-            "Do not create unrelated files."
-        ),
-    )
-    return parser.parse_args()
-
-
-async def run_claude_code(args: argparse.Namespace, *, forwarder: abridge_mitm.OpenAIForwarder) -> None:
+    # The bridge is the /abridge consumer + upstream config + proxy lifecycle.
+    bridge = Bridge(base_url=args.base_url, api_key=os.environ["OPENAI_API_KEY"], model=args.model, timeout=180)
+    provider = DockerProvider(DockerProviderConfig(
+        container_engine=args.container_engine, run_args=args.run_args, network=args.network,
+    ))
     cfg = SandboxConfig(image=args.image, bundle=args.bundle, platform=args.platform)
-    async with DockerProvider().session(cfg) as sandbox:
-        print(f"runtime_url={sandbox.runtime_url}", flush=True)
-        sandbox.register_namespace(forwarder)
-        proxy = await sandbox.remote(
-            abridge_mitm.start_proxy,
-            port=args.proxy_port,
-            mode=args.proxy_mode,
-        )
-        print(f"abridge_proxy_url={proxy.url}", flush=True)
-        try:
-            await prepare_repo(sandbox, args.workdir)
-            result = await sandbox.remote(
-                cc.run,
-                instruction=args.instruction,
-                workdir=args.workdir,
-                timeout=args.timeout,
-                max_turns=args.max_turns,
-                anthropic_base_url=proxy.url,
-                anthropic_model=args.anthropic_model,
-                log_name="run-claude-code.jsonl",
-            )
-            print(f"claude_exit={result.exit_code}", flush=True)
-            if result.stderr_tail:
-                print("claude_stderr_tail:", flush=True)
-                print(result.stderr_tail.rstrip(), flush=True)
-            if result.stdout_tail:
-                print("claude_stdout_tail:", flush=True)
-                print(result.stdout_tail.rstrip(), flush=True)
-            await print_verification(sandbox, args.workdir)
-        finally:
-            await sandbox.remote(abridge_mitm.stop_proxy, handle=proxy)
 
+    async with provider.session(cfg, call_deadline=1800) as sandbox:
+        sandbox.register_namespace(bridge)
+        await bridge.start_proxy(sandbox, family="anthropic")
+        result = await sandbox.remote(claude_code_run, ClaudeCodeArgs(
+            instruction=args.instruction,
+            model=args.anthropic_model,
+            workdir=args.workdir,
+            max_turns=args.max_turns,
+            base_url=bridge.get_base_url(),
+            api_key="sk-abridge",
+        ))
 
-async def prepare_repo(sandbox: Sandbox, workdir: str) -> None:
-    command = f"""
-set -eu
-rm -rf {shell_quote(workdir)}
-mkdir -p {shell_quote(workdir)}
-cd {shell_quote(workdir)}
-git init -q
-git config user.email smoke@example.com
-git config user.name Smoke
-cat > math_utils.py <<'PY'
-def subtract(a, b):
-    return a - b
-PY
-git add math_utils.py
-git commit -q -m init
-"""
-    result = await sandbox.remote(run, command=command, timeout=30)
-    if result.exit_code != 0:
-        raise RuntimeError(f"repo preparation failed:\n{result.stderr}\n{result.stdout}")
-
-
-async def print_verification(sandbox: Sandbox, workdir: str) -> None:
-    command = """
-set -eu
-git diff -- math_utils.py
-python - <<'PY'
-from math_utils import add, subtract
-print("verify", add(2, 3), subtract(5, 2))
-PY
-"""
-    result = await sandbox.remote(run, command=command, cwd=workdir, timeout=30)
-    print("verification_exit", result.exit_code, flush=True)
-    print("verification_stdout:", flush=True)
-    print(result.stdout.rstrip(), flush=True)
-    if result.stderr:
-        print("verification_stderr:", flush=True)
-        print(result.stderr.rstrip(), flush=True)
-
-
-def json_object_env(name: str) -> dict[str, Any]:
-    raw = os.getenv(name)
-    if not raw:
-        return {}
-    try:
-        value = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise SystemExit(f"{name} must be a JSON object: {exc}") from exc
-    if not isinstance(value, dict):
-        raise SystemExit(f"{name} must be a JSON object")
-    return value
-
-
-def require_env(name: str) -> str:
-    value = os.getenv(name)
-    if not value:
-        raise SystemExit(f"{name} is required")
-    return value
-
-
-def shell_quote(value: str) -> str:
-    return "'" + value.replace("'", "'\"'\"'") + "'"
+    print(f"\nclaude returncode={result.returncode}")
+    traj = bridge.store.trajectory(bridge.session_id)
+    print(f"{len(traj)} LLM call(s) captured for session {bridge.session_id}:")
+    for i, rec in enumerate(traj):
+        u = rec.usage
+        print(f"  call[{i}] {rec.family.value} {rec.status} in={u.prompt_tokens} out={u.completion_tokens}")
 
 
 if __name__ == "__main__":

@@ -124,3 +124,22 @@ def test_in_memory_store_thread_safety_smoke() -> None:
     for t in threads:
         t.join()
     assert len(store) == 200
+
+
+def test_store_trajectory_groups_by_session():
+    from agentix.bridge import CompletionRecord, InMemoryStore
+    from agentix.bridge.detection import ApiFamily
+
+    store = InMemoryStore()
+
+    def rec(rid: str, sid: str | None) -> CompletionRecord:
+        return CompletionRecord(
+            request_id=rid, family=ApiFamily.OPENAI_CHAT_COMPLETIONS,
+            started_at=0.0, ended_at=1.0, request_path="/v1/chat/completions",
+            request_body={}, upstream_body={}, response_body={}, session_id=sid,
+        )
+
+    for rid, sid in (("a", "s1"), ("b", "s2"), ("c", "s1"), ("d", None)):
+        store.add(rec(rid, sid))
+    assert [r.request_id for r in store.trajectory("s1")] == ["a", "c"]
+    assert store.sessions() == ["s1", "s2"]

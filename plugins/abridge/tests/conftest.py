@@ -1,6 +1,6 @@
 """Shared in-process test harness for abridge.
 
-Wires a sandbox-side proxy to a host-side `OpenAICompatibleClient`
+Wires a sandbox-side proxy to a host-side `Bridge`
 without a real Socket.IO server: a fake OpenAI-compatible upstream, and
 a `_DirectSIO` shim that fans the proxy's `emit()`/`request()` straight
 into the host coroutine and back. The `wired` fixture is the entry point
@@ -19,7 +19,7 @@ from typing import Any
 import agentix.bridge.proxy as proxy_mod
 import pytest
 import pytest_asyncio
-from agentix.bridge import InMemoryStore, OpenAICompatibleClient, start_proxy, stop_proxy
+from agentix.bridge import Bridge, InMemoryStore, start_proxy, stop_proxy
 
 # ── fake upstream OpenAI-compatible server ────────────────────────────────
 
@@ -79,7 +79,7 @@ def fake_upstream() -> Iterator[str]:
 class _DirectSIO:
     """Single-process pipe between the proxy's emit() and the host's on_*."""
 
-    def __init__(self, namespace: Any, host: OpenAICompatibleClient) -> None:
+    def __init__(self, namespace: Any, host: Bridge) -> None:
         self._ns = namespace
         self._host = host
 
@@ -112,7 +112,7 @@ async def wired(fake_upstream: str, monkeypatch):
     handle = await start_proxy(session_id="sess-test")
 
     store = InMemoryStore()
-    host = OpenAICompatibleClient(
+    host = Bridge(
         base_url=fake_upstream,
         api_key="test-key",
         model="upstream-model",

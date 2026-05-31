@@ -38,21 +38,6 @@ requires-dist = [
 ]
 
 [[package]]
-name = "agentix-provider-docker"
-version = "0.1.4"
-source = { editable = "../../plugins/providers/docker" }
-dependencies = [
-    { name = "agentixx" },
-    { name = "httpx" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "agentixx", editable = "../../" },
-    { name = "httpx", specifier = ">=0.27" },
-]
-
-[[package]]
 name = "agentix-runtime-basic"
 version = "0.1.4"
 source = { editable = "../../plugins/runtime-basic" }
@@ -1059,7 +1044,6 @@ source = { editable = "." }
 dependencies = [
     { name = "agentix-agent-claude-code" },
     { name = "agentix-bridge" },
-    { name = "agentix-provider-docker" },
     { name = "agentix-runtime-basic" },
     { name = "agentixx" },
 ]
@@ -1067,8 +1051,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "agentix-agent-claude-code", editable = "../../plugins/agents/claude-code" },
-    { name = "agentix-bridge", extras = ["mitm"], editable = "../../plugins/abridge" },
-    { name = "agentix-provider-docker", editable = "../../plugins/providers/docker" },
+    { name = "agentix-bridge", editable = "../../plugins/abridge" },
     { name = "agentix-runtime-basic", editable = "../../plugins/runtime-basic" },
     { name = "agentixx", editable = "../../" },
 ]

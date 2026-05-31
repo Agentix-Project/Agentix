@@ -4,53 +4,40 @@ The agent runs *inside* the sandbox, so its LLM calls originate there.
 abridge ferries them over the runtime's Socket.IO connection to the host,
 which holds the real key and forwards to any OpenAI-compatible endpoint
 (OpenAI, OpenRouter, or your own gateway). Every call is captured and
-turned into a `/trace` span. The agent code is never touched.
-
-Host side — register the consumer before the first remote call:
+turned into a `/trace` span. The agent code is never touched — you just
+point its `base_url` at the bridge's in-sandbox service URL.
 
 ```python
-from agentix.bridge import OpenAICompatibleClient, InMemoryStore
+from agentix.bridge import Bridge
 
-store = InMemoryStore()
-host = OpenAICompatibleClient(
+bridge = Bridge(
     base_url="https://api.openai.com/v1",   # or your gateway / vLLM / OpenRouter
     api_key=os.environ["OPENAI_API_KEY"],
     model="gpt-4o-mini",                    # pin the upstream model (optional)
-    store=store,
 )
-sandbox.register_namespace(host)
+async with provider.session(cfg) as sandbox:
+    sandbox.register_namespace(bridge)
+    await bridge.start_proxy(sandbox, family="anthropic")
+    # the agent runs with a plain remote; point its base_url at the service:
+    result = await sandbox.remote(agent_run, AgentArgs(base_url=bridge.get_base_url(), ...))
+
+for rec in bridge.store.trajectory(bridge.session_id):
+    print(rec.request_id, rec.family.value, rec.usage.total_tokens)
 ```
 
-Sandbox side — one remote call runs the agent with the proxy live around
-it (`bridged` starts/stops the proxy and points the SDK env at it):
-
-```python
-from agentix.bridge import BridgeConfig, bridged
-from my_agent import solve                  # an importable agent callable
-
-answer = await sandbox.remote(
-    bridged, solve, task, _bridge=BridgeConfig(session_id=sid)
-)
-```
-
-Afterwards, `store.trajectory(sid)` is the agent-eye text trajectory for
-that rollout (token-level data — ids/logprobs — lives in your gateway,
-keyed by the same `session_id`).
-
-See `ROADMAP.md` next to this file for planned extensions.
+The token-level trajectory (ids/logprobs) lives in your gateway, keyed by
+the same `session_id`. See `ROADMAP.md` for planned extensions.
 """
 
 from __future__ import annotations
 
-from .client import OpenAICompatibleClient, UpstreamHook
+from .client import Bridge, UpstreamHook
 from .detection import ApiFamily, detect
 from .proxy import (
     NAMESPACE,
     RECORD_EVENT,
     REQUEST_EVENT,
-    BridgeConfig,
     ProxyHandle,
-    bridged,
     export_environ,
     start_proxy,
     stop_proxy,
@@ -68,17 +55,15 @@ __version__ = "0.3.0"
 __all__ = [
     "NAMESPACE",
     "ApiFamily",
-    "BridgeConfig",
+    "Bridge",
     "CompletionRecord",
     "InMemoryStore",
-    "OpenAICompatibleClient",
     "ProxyHandle",
     "RECORD_EVENT",
     "REQUEST_EVENT",
     "TokenUsage",
     "UpstreamHook",
     "__version__",
-    "bridged",
     "detect",
     "export_environ",
     "extract_usage",

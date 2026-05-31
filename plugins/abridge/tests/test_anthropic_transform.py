@@ -192,3 +192,37 @@ def test_count_anthropic_tokens_smoke() -> None:
     result = count_anthropic_tokens(body)
     # 8 + 16 + 4 + 12 = 40 chars; 40 // 4 = 10 estimated tokens.
     assert result.input_tokens == 10
+
+
+def test_tool_loop_turn_ordering_matches_openai_protocol():
+    """Assistant text+tool_use -> ONE message; the tool_result becomes a
+    `tool` message immediately after it (OpenAI requires that adjacency).
+    Regression: Claude Code's multi-turn tool loop broke without this.
+    """
+    body = {
+        "model": "claude-x",
+        "max_tokens": 100,
+        "messages": [
+            {"role": "user", "content": "do it"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "I'll run it"},
+                    {"type": "tool_use", "id": "tu_1", "name": "bash", "input": {"cmd": "ls"}},
+                ],
+            },
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tu_1", "content": "file.txt"}]},
+        ],
+    }
+    out = anthropic_messages_to_openai(body)["messages"]
+    roles = [m["role"] for m in out]
+
+    asst = [m for m in out if m["role"] == "assistant"]
+    assert len(asst) == 1, f"expected one assistant message, got {roles}"
+    assert asst[0]["content"] == "I'll run it"
+    assert asst[0]["tool_calls"][0]["id"] == "tu_1"
+
+    ai = roles.index("assistant")
+    assert roles[ai + 1] == "tool", f"tool result must follow tool_calls: {roles}"
+    assert out[ai + 1]["tool_call_id"] == "tu_1"
+    assert "file.txt" in out[ai + 1]["content"]

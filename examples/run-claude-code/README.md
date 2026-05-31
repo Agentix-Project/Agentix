@@ -1,64 +1,30 @@
 # run-claude-code
 
-Minimal end-to-end example:
+Run **Claude Code** inside an Agentix sandbox with its LLM traffic **bridged**
+(via `agentix.bridge`) to the host, which forwards to any OpenAI-compatible
+endpoint. abridge translates Anthropic ⇄ OpenAI, so Claude Code talks to a
+GPT-class model unchanged; every call is captured + traced.
 
-```text
-Claude Code inside Docker sandbox
-  -> ANTHROPIC_BASE_URL=http://127.0.0.1:<port>
-  -> sandbox-local abridge-mitm
-  -> Agentix runtime channel
-  -> host OpenAIForwarder
-  -> OpenAI-compatible upstream
+```
+agent (claude CLI, in sandbox) → in-sandbox abridge proxy → /abridge SIO → host
+  → OpenAICompatibleClient → OpenAI-compatible endpoint
 ```
 
-The upstream API key stays on the host. The sandbox only receives a
-local Anthropic-shaped URL and a dummy Anthropic key. The transport
-does not require Docker-specific host networking.
+- `agent.py` — runs **inside** the sandbox (`agent::run_cc`): calls the plugin's
+  `claude_code.run` with `ANTHROPIC_BASE_URL` (set by `bridged`).
+- `main.py` — host orchestration: builds the gateway client, runs the agent via
+  `bridged`, prints the captured per-call trajectory.
 
-## Build
-
-Claude Code is currently packaged as an x86_64 Linux binary in the
-Agentix plugin, so build and run this example as `linux/amd64`.
+## Build & run
 
 ```bash
-cd examples/run-claude-code
-uv sync
-uv run agentix build . --name run-claude-code:0.1.0 --platform linux/amd64 --output dist/run-claude-code.bundle.tar
-BUNDLE=$(uv run agentix deploy docker dist/run-claude-code.bundle.tar --platform linux/amd64 | awk -F' -> ' '/^bundle -> /{print $2}')
+agentix build .
+export OPENAI_API_KEY=sk-...
+# pick the upstream model the host pins all calls to:
+uv run python main.py --bundle <bundle-ref> --model gpt-4o \
+    --instruction "Refactor utils.py and add tests"
 ```
 
-## Run
-
-Use any OpenAI-compatible endpoint:
-
-```bash
-OPENAI_BASE_URL=https://example.com/v1 \
-OPENAI_API_KEY=sk-... \
-OPENAI_MODEL=your-model \
-uv run python main.py --bundle "$BUNDLE"
-```
-
-DashScope compatible-mode example:
-
-```bash
-ABRIDGE_OPENAI_EXTRA_BODY='{"enable_thinking":true}' \
-OPENAI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1 \
-OPENAI_API_KEY=sk-... \
-OPENAI_MODEL=qwen3.7-max \
-uv run python main.py --bundle "$BUNDLE"
-```
-
-Optional provider-specific fields can be passed without changing the
-code:
-
-```bash
-ABRIDGE_OPENAI_EXTRA_BODY='{"enable_thinking":true}' \
-OPENAI_BASE_URL=https://example.com/v1 \
-OPENAI_API_KEY=sk-... \
-OPENAI_MODEL=your-model \
-uv run python main.py --bundle "$BUNDLE"
-```
-
-The example creates a tiny Git repo in the sandbox with
-`math_utils.py`, asks Claude Code to add `add(a, b)`, and prints the
-resulting diff plus a Python verification.
+On a restricted rootless-podman host, add `--container-engine podman --network host
+--run-arg --runtime=crun --run-arg --cgroups=disabled` (see the `agentix-ray-build`
+skill).

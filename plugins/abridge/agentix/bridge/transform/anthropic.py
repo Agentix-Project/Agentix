@@ -277,7 +277,15 @@ def _messages_anthropic_to_openai(messages: list[Any]) -> list[dict[str, Any]]:
             out.append({"role": role, "content": str(content)})
             continue
 
+        # Collect a turn's blocks, then emit in the order OpenAI's tool
+        # protocol requires: an assistant turn becomes ONE message (text +
+        # all tool_calls, never a stray text message wedged between the
+        # tool_calls and their results); a user turn emits its tool_results
+        # as `tool` messages first (they answer the prior tool_calls), then
+        # any user text.
         text_parts: list[str] = []
+        tool_calls: list[dict[str, Any]] = []
+        tool_results: list[dict[str, Any]] = []
         for block in content:
             if isinstance(block, str):
                 text_parts.append(block)
@@ -288,32 +296,36 @@ def _messages_anthropic_to_openai(messages: list[Any]) -> list[dict[str, Any]]:
             if block_type == "text":
                 text_parts.append(str(block.get("text", "")))
             elif block_type == "tool_use":
-                out.append(
+                tool_calls.append(
                     {
-                        "role": "assistant",
-                        "content": None,
-                        "tool_calls": [
-                            {
-                                "id": block.get("id") or f"call_{uuid.uuid4().hex[:24]}",
-                                "type": "function",
-                                "function": {
-                                    "name": block.get("name", ""),
-                                    "arguments": json.dumps(block.get("input") or {}),
-                                },
-                            }
-                        ],
+                        "id": block.get("id") or f"call_{uuid.uuid4().hex[:24]}",
+                        "type": "function",
+                        "function": {
+                            "name": block.get("name", ""),
+                            "arguments": json.dumps(block.get("input") or {}),
+                        },
                     }
                 )
             elif block_type == "tool_result":
-                out.append(
+                tool_results.append(
                     {
                         "role": "tool",
                         "tool_call_id": block.get("tool_use_id", ""),
                         "content": _tool_result_text(block.get("content")),
                     }
                 )
-        if text_parts:
-            out.append({"role": role, "content": "\n".join(text_parts)})
+
+        text = "\n".join(part for part in text_parts if part)
+        if role == "assistant":
+            message: dict[str, Any] = {"role": "assistant", "content": text or None}
+            if tool_calls:
+                message["tool_calls"] = tool_calls
+            if message["content"] is not None or tool_calls:
+                out.append(message)
+        else:
+            out.extend(tool_results)
+            if text:
+                out.append({"role": role, "content": text})
     return out
 
 
