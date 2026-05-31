@@ -43,10 +43,10 @@ class Bridge(AsyncClientNamespace):
     """Host-side abridge: the `/abridge` consumer, the upstream config, and
     the in-sandbox proxy lifecycle, in one object.
 
-    Construct it with the upstream endpoint, `sandbox.register_namespace(bridge)`,
-    `await bridge.start_proxy(sandbox)` to bring up the in-sandbox service, then
-    point your agent's `base_url` at `bridge.get_base_url()`. Every captured
-    call lands in `store`, grouped by `session_id`.
+    Construct it with the upstream endpoint, `await bridge.start_proxy(sandbox)`
+    to register + bring up the in-sandbox service, then point your agent's
+    `base_url` at `bridge.get_base_url()`. Every captured call lands in `store`,
+    grouped by `session_id`.
 
     Parameters mirror the openai SDK: `base_url` (e.g. `https://api.openai.com/v1`,
     `http://vllm:8000/v1`); `api_key` is the bearer token; `model` optionally
@@ -81,11 +81,16 @@ class Bridge(AsyncClientNamespace):
     # ── in-sandbox proxy lifecycle ─────────────────────────────────────
 
     async def start_proxy(self, sandbox: Any, family: str = "anthropic") -> str:
-        """Start the in-sandbox abridge proxy and return the base URL the
-        agent should point at (sandbox loopback). The proxy lives on the
-        worker's event loop for the sandbox's lifetime; calls captured
-        through it are grouped under this Bridge's `session_id`.
+        """Register this bridge on the sandbox and start the in-sandbox abridge
+        proxy; returns the base URL the agent should point at (sandbox loopback).
+
+        Registration happens here (before the proxy's `remote` call — the first
+        on this sandbox — so the connection plan still sees it), so the caller
+        does not `register_namespace` separately. The proxy lives on the worker's
+        event loop for the sandbox's lifetime; calls captured through it are
+        grouped under this Bridge's `session_id`.
         """
+        sandbox.register_namespace(self)
         self._proxy = await sandbox.remote(_sandbox_start_proxy, session_id=self.session_id)
         self._family = family
         return self.get_base_url()

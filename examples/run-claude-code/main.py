@@ -63,8 +63,7 @@ async def main() -> None:
     cfg = SandboxConfig(image=args.image, bundle=args.bundle, platform=args.platform)
 
     async with provider.session(cfg, call_deadline=1800) as sandbox:
-        sandbox.register_namespace(bridge)
-        await bridge.start_proxy(sandbox, family="anthropic")
+        await bridge.start_proxy(sandbox, family="anthropic")  # registers + starts the proxy
         result = await sandbox.remote(claude_code_run, ClaudeCodeArgs(
             instruction=args.instruction,
             model=args.anthropic_model,

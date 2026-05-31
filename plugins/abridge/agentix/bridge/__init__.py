@@ -16,8 +16,7 @@ bridge = Bridge(
     model="gpt-4o-mini",                    # pin the upstream model (optional)
 )
 async with provider.session(cfg) as sandbox:
-    sandbox.register_namespace(bridge)
-    await bridge.start_proxy(sandbox, family="anthropic")
+    await bridge.start_proxy(sandbox, family="anthropic")   # registers + starts the proxy
     # the agent runs with a plain remote; point its base_url at the service:
     result = await sandbox.remote(agent_run, AgentArgs(base_url=bridge.get_base_url(), ...))
 
