@@ -31,7 +31,7 @@ skill).
 
 ## Observability (LangSmith / Langfuse / any OTLP backend)
 
-abridge emits each LLM call as a `/trace` span (OpenTelemetry GenAI conventions).
+Install `agentix-trace-otel` **on the host** (it's host-side — not in the sandbox bundle). abridge emits each LLM call as a `/trace` span (OpenTelemetry GenAI conventions).
 Export them by pointing `--otlp-endpoint` (+ auth headers) at any OTLP backend —
 only the URL + headers differ:
 

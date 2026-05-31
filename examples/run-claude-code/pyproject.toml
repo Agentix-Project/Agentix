@@ -13,7 +13,6 @@ dependencies = [
     "agentix-runtime-basic",
     "agentix-bridge",
     "agentix-agent-claude-code",
-    "agentix-trace-otel",
 ]
 
 [tool.uv.sources]
@@ -21,7 +20,6 @@ agentixx = { path = "../..", editable = true }
 agentix-runtime-basic = { path = "../../plugins/runtime-basic", editable = true }
 agentix-bridge = { path = "../../plugins/abridge", editable = true }
 agentix-agent-claude-code = { path = "../../plugins/agents/claude-code", editable = true }
-agentix-trace-otel = { path = "../../plugins/trace-otel", editable = true }
 
 [tool.agentix]
 nix = "default.nix"
