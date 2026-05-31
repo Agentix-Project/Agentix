@@ -24,6 +24,7 @@ from agentix.bridge import Bridge, OpenAIClient
 from agentix.provider.docker import DockerProvider, DockerProviderConfig
 
 from agentix.provider.base import SandboxConfig
+from agentix.utils import trace
 from agentix.utils.log import configure_logging
 
 DEFAULT_INSTRUCTION = (
@@ -82,18 +83,20 @@ async def main() -> None:
     cfg = SandboxConfig(image=args.image, bundle=args.bundle, platform=args.platform)
 
     async with provider.session(cfg, call_deadline=1800) as sandbox:
-        await bridge.start_proxy(sandbox, family="anthropic")  # registers + starts the proxy
-        result = await sandbox.remote(claude_code_run, ClaudeCodeArgs(
-            instruction=args.instruction,
-            model=args.anthropic_model,
-            workdir=args.workdir,
-            max_turns=args.max_turns,
-            base_url=bridge.get_base_url(),
-            api_key="sk-abridge",
-        ))
+        # The root span groups the rollout: start_proxy captures it and parents
+        # every in-sandbox LLM span to it, so the backend shows one nested trace.
+        with trace.span("claude-code", **{"agentix.session_id": bridge.session_id}):
+            await bridge.start_proxy(sandbox, family="anthropic")  # registers + starts the proxy
+            result = await sandbox.remote(claude_code_run, ClaudeCodeArgs(
+                instruction=args.instruction,
+                model=args.anthropic_model,
+                workdir=args.workdir,
+                max_turns=args.max_turns,
+                base_url=bridge.get_base_url(),
+                api_key="sk-abridge",
+            ))
 
     if args.otlp_endpoint:
-        from agentix.utils import trace
         trace.force_flush()  # push batched spans to the OTLP backend before exit
 
     print(f"\nclaude returncode={result.returncode}")

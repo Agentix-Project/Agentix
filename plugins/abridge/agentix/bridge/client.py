@@ -23,6 +23,7 @@ from typing import Any, Protocol, runtime_checkable
 import httpx
 
 from agentix import AsyncClientNamespace
+from agentix.utils import trace
 
 from .detection import ApiFamily
 from .proxy import NAMESPACE, REQUEST_EVENT, ProxyHandle
@@ -156,7 +157,15 @@ class Bridge(AsyncClientNamespace):
         grouped under this Bridge's `session_id`.
         """
         sandbox.register_namespace(self)
-        self._proxy = await sandbox.remote(_sandbox_start_proxy, session_id=self.session_id)
+        # Capture the active span so the in-sandbox proxy can parent every LLM
+        # span to it — the whole rollout then shows as one nested trace.
+        parent = trace.get_current_span()
+        self._proxy = await sandbox.remote(
+            _sandbox_start_proxy,
+            session_id=self.session_id,
+            parent_trace_id=parent.trace_id if parent is not None else None,
+            parent_span_id=parent.span_id if parent is not None else None,
+        )
         self._family = family
         return self.get_base_url()
 

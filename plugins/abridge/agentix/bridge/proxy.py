@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import socket
 import time
@@ -126,6 +127,8 @@ async def start_proxy(
     port: int = 0,
     request_timeout: float = 600.0,
     session_id: str | None = None,
+    parent_trace_id: str | None = None,
+    parent_span_id: str | None = None,
 ) -> ProxyHandle:
     """Start the sandbox-side HTTP proxy.
 
@@ -139,7 +142,13 @@ async def start_proxy(
     the id so it can later query the gateway by the same key.
     """
     ns = _get_namespace()
-    app = _build_app(ns=ns, request_timeout=request_timeout, session_id=session_id)
+    app = _build_app(
+        ns=ns,
+        request_timeout=request_timeout,
+        session_id=session_id,
+        parent_trace_id=parent_trace_id,
+        parent_span_id=parent_span_id,
+    )
     bound_port = port or _free_port(host)
     config = uvicorn.Config(app, host=host, port=bound_port, log_level="warning")
     server = uvicorn.Server(config)
@@ -178,7 +187,12 @@ async def _wait_uvicorn_started(server: uvicorn.Server) -> None:
 
 
 def _build_app(
-    *, ns: _SandboxNamespace, request_timeout: float, session_id: str | None = None
+    *,
+    ns: _SandboxNamespace,
+    request_timeout: float,
+    session_id: str | None = None,
+    parent_trace_id: str | None = None,
+    parent_span_id: str | None = None,
 ) -> FastAPI:
     app = FastAPI()
 
@@ -194,6 +208,8 @@ def _build_app(
             api_path="/v1/messages",
             request_timeout=request_timeout,
             session_id=session_id,
+            parent_trace_id=parent_trace_id,
+            parent_span_id=parent_span_id,
         )
 
     @app.post("/v1/messages/count_tokens")
@@ -210,6 +226,8 @@ def _build_app(
             api_path="/v1/chat/completions",
             request_timeout=request_timeout,
             session_id=session_id,
+            parent_trace_id=parent_trace_id,
+            parent_span_id=parent_span_id,
         )
 
     return app
@@ -241,11 +259,20 @@ async def _handle_request(
     api_path: str,
     request_timeout: float,
     session_id: str | None = None,
+    parent_trace_id: str | None = None,
+    parent_span_id: str | None = None,
 ) -> Response:
     body = await _read_json(request)
     family = detect(api_path, body)
     record_id = uuid.uuid4().hex
     started_at = time.time()
+    # Synthetic carrier for the host's rollout span, so this LLM span nests
+    # under it (shared trace_id + parent_id) — one trace per rollout.
+    parent_span = (
+        trace.Span(span_id=parent_span_id, trace_id=parent_trace_id, parent_id=None, name="rollout")
+        if parent_span_id and parent_trace_id
+        else None
+    )
 
     if family.is_anthropic:
         upstream_body = anthropic_messages_to_openai(body)
@@ -270,6 +297,7 @@ async def _handle_request(
     # propagating traceparent, and the agent never intervenes).
     with trace.span(
         f"chat {body.get('model') or 'unknown'}",
+        parent=parent_span,
         **_llm_request_attrs(family, body, session_id=session_id, record_id=record_id),
     ) as sp:
         try:
@@ -370,7 +398,54 @@ def _llm_request_attrs(
     ):
         if body.get(key) is not None:
             attrs[attr] = body[key]
+
+    # Prompt content (system + messages) so backends show the input, not just
+    # tokens. GenAI `gen_ai.prompt.{i}.role/content` is what LangSmith/Langfuse read.
+    idx = 0
+    system = body.get("system")
+    if system:
+        attrs["gen_ai.prompt.0.role"] = "system"
+        attrs["gen_ai.prompt.0.content"] = _content_to_text(system)
+        idx = 1
+    for msg in body.get("messages") or []:
+        if not isinstance(msg, dict):
+            continue
+        attrs[f"gen_ai.prompt.{idx}.role"] = str(msg.get("role", "user"))
+        attrs[f"gen_ai.prompt.{idx}.content"] = _content_to_text(msg.get("content", ""))
+        idx += 1
     return attrs
+
+
+def _content_to_text(content: Any) -> str:
+    """Flatten Anthropic/OpenAI message content (str or block list) to text."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                bt = block.get("type")
+                if bt == "text":
+                    parts.append(str(block.get("text", "")))
+                elif bt == "tool_use":
+                    parts.append(f"[tool_use {block.get('name', '')} {json.dumps(block.get('input') or {})}]")
+                elif bt == "tool_result":
+                    parts.append(f"[tool_result] {_content_to_text(block.get('content'))}")
+                else:
+                    parts.append(json.dumps(block, ensure_ascii=False))
+        return "\n".join(parts)
+    return str(content)
+
+
+def _response_content(rb: dict[str, Any], *, family: ApiFamily) -> Any:
+    if family.is_anthropic:
+        return rb.get("content")
+    choice = (rb.get("choices") or [{}])[0]
+    return (choice.get("message") or {}).get("content") if isinstance(choice, dict) else None
 
 
 def _apply_response_span(sp: trace.Span, record: CompletionRecord) -> None:
@@ -387,6 +462,9 @@ def _apply_response_span(sp: trace.Span, record: CompletionRecord) -> None:
     model = rb.get("model")
     if isinstance(model, str) and model:
         sp.set_attribute("gen_ai.response.model", model)
+    # Completion content so the backend shows the output, not just tokens.
+    sp.set_attribute("gen_ai.completion.0.role", "assistant")
+    sp.set_attribute("gen_ai.completion.0.content", _content_to_text(_response_content(rb, family=record.family)))
     names = _tool_call_names(rb, family=record.family)
     if names:
         # The model's tool requests, derived from the response — no agent
