@@ -11,14 +11,14 @@ license = { text = "MIT" }
 dependencies = [
     "agentixx",
     "agentix-runtime-basic",
-    "agentix-deployment-docker",
+    "agentix-provider-docker",
     "agentix-agent-mini-swe-agent",
 ]
 
 [tool.uv.sources]
 agentixx = { path = "../..", editable = true }
 agentix-runtime-basic = { path = "../../plugins/runtime-basic", editable = true }
-agentix-deployment-docker = { path = "../../plugins/deployments/docker", editable = true }
+agentix-provider-docker = { path = "../../plugins/providers/docker", editable = true }
 agentix-agent-mini-swe-agent = { path = "../../plugins/agents/mini-swe-agent", editable = true }
 
 [tool.agentix]

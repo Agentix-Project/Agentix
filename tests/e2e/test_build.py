@@ -6,13 +6,13 @@ pyproject) and from the unit CI job. Run it explicitly with `-m e2e`.
 Needs Docker only — Nix runs *inside* the build container, so the host
 (or CI runner) needs no Nix. The build takes minutes, so one
 module-scoped fixture builds the bundle once and the assertions
-inspect the resulting materialized cache through a task container.
+inspect the resulting deployed cache through a task container.
 
 What it proves end to end:
   * `agentix build` stages the repo + drives `docker buildx build`
   * the in-container pipeline runs (toolchain → uv venv/sync →
     closure discovery → runtime)
-  * `agentix deploy docker` materializes the portable tar as a local
+  * `agentix deploy docker` deploys the portable tar as a local
     cache directory that can be bind-mounted into a task container
   * the interpreter is Nix-provided (`/nix/store`), not a stray host
     Python — the property that makes the bundle libc-hermetic
@@ -120,7 +120,7 @@ def _bundle_path_from_deploy_output(output: str) -> Path:
     raise AssertionError(f"`agentix deploy` did not print a bundle ref:\n{output}")
 
 
-def test_bundle_materialized(bundle: Path) -> None:
+def test_bundle_deployed(bundle: Path) -> None:
     assert (bundle / "nix" / "runtime" / "bootstrap.sh").is_file()
 
 
@@ -157,7 +157,7 @@ def test_system_closures_merged(bundle: Path) -> None:
 
 def test_entrypoint_wired(bundle: Path) -> None:
     # Bundle entry point: /nix/runtime/bootstrap.sh, exec'd by every
-    # deployment backend. Verify the script exists + is executable, and
+    # provider backend. Verify the script exists + is executable, and
     # that the ASGI app it ultimately launches can be imported from the
     # bundle venv (catches dep-resolution bugs without actually starting
     # uvicorn, which would block forever).

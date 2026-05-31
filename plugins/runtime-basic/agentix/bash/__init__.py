@@ -33,7 +33,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-_BUNDLE_BASH = "/nix/runtime/bin/bash"
+from agentix.runtime.shared.env import BUNDLE_RUNTIME_BASH
 
 
 def _clean_env(extra: dict[str, str] | None) -> dict[str, str]:
@@ -47,8 +47,8 @@ def _clean_env(extra: dict[str, str] | None) -> dict[str, str]:
 def _shell_executable(executable: str | None, env: dict[str, str]) -> str:
     if executable:
         return shutil.which(executable, path=env.get("PATH")) or executable
-    if os.access(_BUNDLE_BASH, os.X_OK):
-        return _BUNDLE_BASH
+    if os.access(BUNDLE_RUNTIME_BASH, os.X_OK):
+        return BUNDLE_RUNTIME_BASH
     return shutil.which("bash", path=env.get("PATH")) or "/bin/bash"
 
 

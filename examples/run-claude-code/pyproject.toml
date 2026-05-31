@@ -11,7 +11,7 @@ license = { text = "MIT" }
 dependencies = [
     "agentixx",
     "agentix-runtime-basic",
-    "agentix-deployment-docker",
+    "agentix-provider-docker",
     "agentix-agent-claude-code",
     "agentix-bridge[mitm]",
 ]
@@ -19,7 +19,7 @@ dependencies = [
 [tool.uv.sources]
 agentixx = { path = "../..", editable = true }
 agentix-runtime-basic = { path = "../../plugins/runtime-basic", editable = true }
-agentix-deployment-docker = { path = "../../plugins/deployments/docker", editable = true }
+agentix-provider-docker = { path = "../../plugins/providers/docker", editable = true }
 agentix-agent-claude-code = { path = "../../plugins/agents/claude-code", editable = true }
 agentix-bridge = { path = "../../plugins/abridge", editable = true }
 

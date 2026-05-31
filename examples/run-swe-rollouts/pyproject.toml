@@ -15,7 +15,7 @@ dependencies = [
     "agentixx",
     "agentix-runner>=0.1.0",             # batch rollout orchestration
     "agentix-runtime-basic>=0.1.0",      # bash inside the sandbox (patch extraction)
-    "agentix-deployment-docker>=0.1.0",  # docker/podman backend
+    "agentix-provider-docker>=0.1.0",    # docker/podman backend
     "agentix-agent-claude-code>=0.1.0",  # sandbox-side Claude Code runner
     "agentix-dataset-swe>=0.1.0",        # sandbox-side SWE-bench evaluator
     "agentix-bridge",                    # Anthropic↔OpenAI proxy across the sandbox boundary
@@ -29,7 +29,7 @@ dependencies = [
 agentixx = { path = "../..", editable = true }
 agentix-runner = { path = "../../plugins/runner", editable = true }
 agentix-bridge = { path = "../../plugins/abridge", editable = true }
-agentix-deployment-docker = { path = "../../plugins/deployments/docker", editable = true }
+agentix-provider-docker = { path = "../../plugins/providers/docker", editable = true }
 agentix-agent-claude-code = { path = "../../plugins/agents/claude-code", editable = true }
 agentix-dataset-swe = { path = "../../plugins/datasets/swebench", editable = true }
 agentix-runtime-basic = { path = "../../plugins/runtime-basic", editable = true }

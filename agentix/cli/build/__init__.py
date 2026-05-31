@@ -113,7 +113,7 @@ Examples:
     agentix build . --name hello-agentix  # bundle tar (auto-appends version)
     agentix build . --name hello:dev      # bundle tar tagged as dev
     agentix build . --platform linux/amd64
-    agentix build . --container-bin podman
+    agentix build . --container-engine podman
     agentix build . --dry-run             # stage the build context only
     agentix deploy docker dist/hello-0.1.0-linux-amd64.bundle.tar
 
@@ -176,10 +176,10 @@ every `docker build`, agentix included.
 )
 @click.option("--dry-run", is_flag=True, help="Stage the build context to ./build/<name>/ and stop.")
 @click.option(
-    "--container-bin",
+    "--container-engine",
     default=None,
-    metavar="BIN",
-    help="Docker-compatible build CLI to use. Default: docker.",
+    metavar="ENGINE",
+    help="Container engine (Docker-compatible CLI: `docker`, `podman`, …). Default: docker.",
 )
 @click.option(
     "--container-arg",
@@ -216,7 +216,7 @@ def build(
     output: str | None,
     platform: str | None,
     dry_run: bool,
-    container_bin: str | None,
+    container_engine: str | None,
     container_args: tuple[str, ...],
     container_run_args: tuple[str, ...],
     nix_args: tuple[str, ...],
@@ -243,7 +243,7 @@ def build(
     context_root, project_subpath = resolve_context(src)
     tar_output = _tar_output_path(output, name=name, tag=tag, platform=platform)
     build_config = ContainerBuildConfig(
-        container_bin=container_bin or "docker",
+        container_engine=container_engine or "docker",
         container_args=container_args,
         container_run_args=container_run_args,
         nix_args=nix_args,

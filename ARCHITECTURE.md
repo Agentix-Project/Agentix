@@ -93,7 +93,7 @@ At runtime, all installed modules live in the same Python environment:
 
 ```text
 /nix/runtime/
-├── bootstrap.sh           # container entry point (deployment backends exec this)
+├── bootstrap.sh           # container entry point (provider backends exec this)
 ├── bin/
 │   ├── python
 │   └── pip

@@ -126,5 +126,5 @@ Client mapping:
 
 - Per-call timeouts; callers use `asyncio.wait_for(...)`.
 - Retries; calls are at-most-once.
-- Auth/TLS; deployments own that layer.
+- Auth/TLS; providers own that layer.
 - Annotation-driven validation on the wire (args/return are pickle today).

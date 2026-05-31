@@ -9,7 +9,7 @@ Agentix keeps two user-facing concepts:
   declared dependencies into a deploy-ready runtime image.
 
 Everything below should preserve that surface. Internal worker topology,
-transport choice, and deployment backend details should remain opaque to
+transport choice, and provider backend details should remain opaque to
 downstream users of the library.
 
 ## v0.1.0 — RPC + Bundle
@@ -105,10 +105,10 @@ is still moving quickly.
 - [`Agentix-Runtime-Basic`](https://github.com/Agentiix/Agentix-Runtime-Basic)
   — `bash` and `files` modules. Published as `agentix-runtime-basic`.
 - [`Agentix-SandboxProvider-Docker`](https://github.com/Agentiix/Agentix-SandboxProvider-Docker)
-  — local Docker backend. Published as `agentix-deployment-docker`.
+  — local Docker backend. Published as `agentix-provider-docker`.
 - [`Agentix-SandboxProvider-Daytona`](https://github.com/Agentiix/Agentix-SandboxProvider-Daytona)
   and [`Agentix-SandboxProvider-E2B`](https://github.com/Agentiix/Agentix-SandboxProvider-E2B)
-  — hosted deployment backends.
+  — hosted provider backends.
 - [`abridge`](https://github.com/Agentiix/abridge) — host-side
   rollout-to-RL-buffer bridge.
 
@@ -129,7 +129,7 @@ dead-ends without expanding the current API prematurely.
     provider, so a new `Processor` is the right plug-in point.
   - Ship as a separate plugin package `agentix-trace-otel` to keep
     `opentelemetry-*` out of core dependencies (matches the current
-    plugin-axis style of deployments / runtime-basic / agents).
+    plugin-axis style of providers / runtime-basic / agents).
   - Map `agentix.Span` → OTel `ReadableSpan`: `trace_id` / `span_id` /
     `parent_id` / `attrs` / `started_at` / `ended_at` / `status` /
     `events` are 1:1; only the id-length normalization and timestamp
@@ -153,5 +153,5 @@ dead-ends without expanding the current API prematurely.
   enabling token-level trajectory capture, cost tracking, and replay.
 - **Checkpoint / partial rollout** — snapshot a sandbox filesystem and
   loaded runtime state, then fork to explore alternative continuations.
-- **K8s deployment backend** — `SandboxProvider` implementation using the
-  same bundle-image contract, likely shipping as `agentix-deployment-k8s`.
+- **K8s provider backend** — `SandboxProvider` implementation using the
+  same bundle-image contract, likely shipping as `agentix-provider-k8s`.

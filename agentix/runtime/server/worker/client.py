@@ -19,8 +19,8 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any, Protocol
 
-from agentix.runtime.env import AGENTIX_ADDED_PATH
 from agentix.runtime.server.worker.invoker import CallableInvoker
+from agentix.runtime.shared.env import AGENTIX_ADDED_PATH, BUNDLE_RUNTIME_BIN, BUNDLE_RUNTIME_PATH_ENTRIES
 from agentix.runtime.shared.framing import read_frame, write_frame
 from agentix.runtime.shared.models import RemoteError, RemoteRequest, RemoteResponse
 
@@ -67,13 +67,6 @@ from agentix.runtime.server.worker.process import main
 main()
 """
 _WORKER_IMPORT_ROOT = Path(__file__).resolve().parents[4]
-# Plugin `default.nix` derivations are symlink-joined into this path
-# inside the bundle runtime tree (see `agentix/builder/flake.nix`). Worker code
-# (`subprocess.run("claude", ...)`, `c.remote(cc.run, ...)`, ...) must
-# be able to find those binaries by bare name.
-_RUNTIME_BIN_PATH = "/nix/runtime/bin"
-_RUNTIME_LIB_PATH = "/nix/runtime/lib"
-_RUNTIME_INCLUDE_PATH = "/nix/runtime/include"
 _STRIPPED_ENV = {
     "LD_PRELOAD",
     "PYTHONPATH",
@@ -82,18 +75,12 @@ _STRIPPED_ENV = {
     "SSL_CERT_FILE",
 }
 _STRIPPED_ENV_PREFIXES = ("NIX_", "FONTCONFIG_")
-_RUNTIME_PATH_ADDITIONS = {
-    "LD_LIBRARY_PATH": (_RUNTIME_LIB_PATH,),
-    "LIBRARY_PATH": (_RUNTIME_LIB_PATH,),
-    "CPATH": (_RUNTIME_INCLUDE_PATH,),
-    "C_INCLUDE_PATH": (_RUNTIME_INCLUDE_PATH,),
-    "CPLUS_INCLUDE_PATH": (_RUNTIME_INCLUDE_PATH,),
-    "PKG_CONFIG_PATH": (
-        "/nix/runtime/lib/pkgconfig",
-        "/nix/runtime/share/pkgconfig",
-    ),
-    "CMAKE_PREFIX_PATH": ("/nix/runtime",),
-}
+# Path-style env vars (other than `PATH`) the bundle's runtime tree
+# contributes entries to. `PATH` is built separately in
+# `_clean_worker_env` because the venv `bin/` is computed from the
+# running interpreter (`sys.executable`) rather than the baked
+# `BUNDLE_RUNTIME_VENV_BIN` constant.
+_RUNTIME_PATH_ADDITIONS = {name: entries for name, entries in BUNDLE_RUNTIME_PATH_ENTRIES.items() if name != "PATH"}
 
 
 def _join_path_entries(entries: Iterable[str]) -> str:
@@ -125,13 +112,13 @@ def _clean_worker_env(runtime_bin_dir: Path | None) -> dict[str, str]:
         if key not in _STRIPPED_ENV and not any(key.startswith(prefix) for prefix in _STRIPPED_ENV_PREFIXES)
     }
     # Build PATH from: the venv's bin (`runtime_bin_dir`), the bundle's
-    # symlink-join (`/nix/runtime/bin`), then the parent environment's
+    # symlink-join (`BUNDLE_RUNTIME_BIN`), then the parent environment's
     # PATH. Inside the bundle runtime tree the first two are siblings and both
     # must be searchable; outside the bundle, only the first one exists.
     parts: list[str] = []
     if runtime_bin_dir is not None:
         parts.append(str(runtime_bin_dir))
-    parts.append(_RUNTIME_BIN_PATH)
+    parts.append(BUNDLE_RUNTIME_BIN)
     parts.extend(env.get("PATH", "").split(os.pathsep))
     env["PATH"] = _join_path_entries(parts)
 
@@ -139,7 +126,7 @@ def _clean_worker_env(runtime_bin_dir: Path | None) -> dict[str, str]:
     added_path.extend(env.get(AGENTIX_ADDED_PATH, "").split(os.pathsep))
     if runtime_bin_dir is not None:
         added_path.append(str(runtime_bin_dir))
-    added_path.append(_RUNTIME_BIN_PATH)
+    added_path.append(BUNDLE_RUNTIME_BIN)
     env[AGENTIX_ADDED_PATH] = _join_path_entries(added_path)
 
     for name, entries in _RUNTIME_PATH_ADDITIONS.items():

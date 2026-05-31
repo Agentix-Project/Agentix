@@ -67,7 +67,7 @@ async def _probe_backend(name: str) -> tuple[bool, str, str]:
         spec = importlib.util.find_spec(name)
         key = os.environ.get(f"{name.upper()}_API_KEY")
         if spec is None:
-            return (False, "SDK not installed", f"pip install agentix-deployment-{name}")
+            return (False, "SDK not installed", f"pip install agentix-provider-{name}")
         return (bool(key), "ready" if key else "SDK installed", "API key set" if key else f"set {name.upper()}_API_KEY")
     return (False, "unknown", "")
 

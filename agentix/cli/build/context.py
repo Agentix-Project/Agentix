@@ -134,7 +134,7 @@ _BUILDER_FILES = (
     "Dockerfile",
     "bundle-build.sh",
     # Shipped verbatim into the bundle as `/nix/runtime/bootstrap.sh`
-    # by `bundle-build.sh`. The container entry point deployment
+    # by `bundle-build.sh`. The container entry point provider
     # backends exec.
     "bootstrap.sh",
 )
@@ -198,7 +198,7 @@ def stage_context(
         stage/bundle-build.sh  in-container orchestration (verbatim)
         stage/bootstrap.sh     bundle runtime entry point — copied to
                                /nix/runtime/bootstrap.sh by the in-container
-                               build, then exec'd by deployment backends
+                               build, then exec'd by provider backends
         stage/python-version   interpreter minor, read by flake.nix
         stage/nix-system       target Nix system, read by flake.nix
         stage/closures/        empty — filled in-container by `closures.py`

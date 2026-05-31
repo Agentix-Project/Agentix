@@ -1,10 +1,10 @@
-"""Invoke a container build CLI against a staged build context.
+"""Invoke a container engine against a staged build context.
 
 This module is intentionally narrow: a single subprocess helper that
 echoes commands and surfaces failures as `SystemExit`, plus the image
 build helper used by the tar pipeline. Docker remains the default and
 uses `docker buildx build --load`; Podman can be selected by passing
-`ContainerBuildConfig(container_bin="podman", ...)`.
+`ContainerBuildConfig(container_engine="podman", ...)`.
 
 Heavy lifting — `uv sync`, `nix build` — happens inside the container
 once buildx kicks off; the host never sees Python or Nix directly.
@@ -23,17 +23,18 @@ from agentix.cli.build.platform import normalize_platform
 
 @dataclass(frozen=True)
 class ContainerBuildConfig:
-    """Docker-compatible build executor settings + raw engine passthrough args.
+    """Container engine selection + raw passthrough args.
 
+    `container_engine` picks the Docker-compatible CLI (`docker`, `podman`, …).
     `nix_args` / `uv_args` are forwarded verbatim into the in-container
     `nix build` / `uv sync`; `container_args` / `container_run_args` go to the
-    container build / export `run`. Raw passthrough keeps the CLI free of a
-    bespoke flag (or magic env var) per engine knob — point nix at a mirror
-    with `--nix-arg "--option extra-substituters https://..."`, override the
+    engine's build / export `run`. Raw passthrough keeps the CLI free of a
+    bespoke flag (or magic env var) per knob — point nix at a mirror with
+    `--nix-arg "--option extra-substituters https://..."`, override the
     builder base with `--container-arg "--build-arg AGENTIX_BUILDER_BASE=..."`.
     """
 
-    container_bin: str = "docker"
+    container_engine: str = "docker"
     container_args: tuple[str, ...] = ()
     container_run_args: tuple[str, ...] = ()
     nix_args: tuple[str, ...] = ()
@@ -53,9 +54,9 @@ def _run(
         proc = subprocess.run(cmd, cwd=cwd, capture_output=capture, text=True)
     except FileNotFoundError as exc:
         raise SystemExit(
-            f"container build CLI {cmd[0]!r} not found on PATH. Install Docker "
+            f"container engine {cmd[0]!r} not found on PATH. Install Docker "
             f"(https://docs.docker.com/get-docker/) or Podman "
-            f"(https://podman.io/docs/installation), or pass --container-bin."
+            f"(https://podman.io/docs/installation), or pass --container-engine."
         ) from exc
     if check and proc.returncode != 0:
         if capture and proc.stderr:
@@ -67,8 +68,8 @@ def _run(
     return proc
 
 
-def _build_container_bin(config: ContainerBuildConfig | None = None) -> str:
-    return (config or ContainerBuildConfig()).container_bin
+def _build_container_engine(config: ContainerBuildConfig | None = None) -> str:
+    return (config or ContainerBuildConfig()).container_engine
 
 
 def _split_passthrough(values: tuple[str, ...]) -> list[str]:
@@ -109,11 +110,11 @@ def _docker_build_image(
     if not tags:
         raise SystemExit("internal error: container image build requires at least one tag")
     config = config or ContainerBuildConfig()
-    bin_name = config.container_bin
+    engine = config.container_engine
     tags_args = [arg for tag in tags for arg in ("-t", tag)]
-    if bin_name == "docker":
+    if engine == "docker":
         cmd = [
-            bin_name,
+            engine,
             "buildx",
             "build",
             "--platform",
@@ -129,7 +130,7 @@ def _docker_build_image(
         ]
     else:
         cmd = [
-            bin_name,
+            engine,
             "build",
             "--platform",
             normalize_platform(platform),
@@ -144,7 +145,7 @@ def _docker_build_image(
 
 
 __all__ = [
-    "_build_container_bin",
+    "_build_container_engine",
     "_build_container_run_args",
     "ContainerBuildConfig",
     "_docker_build_image",

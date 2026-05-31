@@ -54,7 +54,7 @@ await sandbox.remote(fn, *args, **kwargs)
 
 ## End-to-end loop
 
-Requires: `pip install agentixx agentix-runtime-basic agentix-deployment-docker` (plus Docker or Podman).
+Requires: `pip install agentixx agentix-runtime-basic agentix-provider-docker` (plus Docker or Podman).
 
 ```python
 from agentix import SandboxConfig
