@@ -62,6 +62,9 @@ class CompletionRecord:
     status: str = "ok"
     error: str | None = None
     usage: TokenUsage = field(default_factory=TokenUsage)
+    # Rollout grouping key, stamped by the bridge so a session's LLM
+    # calls form one trajectory. None when the proxy ran un-bridged.
+    session_id: str | None = None
 
     @property
     def duration_ms(self) -> float:
@@ -100,6 +103,25 @@ class InMemoryStore:
     def snapshot(self) -> list[CompletionRecord]:
         with self._lock:
             return list(self._records)
+
+    def trajectory(self, session_id: str) -> list[CompletionRecord]:
+        """The agent-eye LLM-call trajectory for one rollout, in order.
+
+        This is the *text-level* view (request/response bodies) used for
+        observability; the token-level trajectory (ids + logprobs) lives
+        in the gateway, joined by the same `session_id`.
+        """
+        with self._lock:
+            return [r for r in self._records if r.session_id == session_id]
+
+    def sessions(self) -> list[str]:
+        """Distinct session ids seen, in first-appearance order."""
+        with self._lock:
+            seen: dict[str, None] = {}
+            for r in self._records:
+                if r.session_id is not None:
+                    seen.setdefault(r.session_id, None)
+            return list(seen)
 
     def __iter__(self) -> Iterator[CompletionRecord]:
         return iter(self.snapshot())
@@ -176,6 +198,7 @@ def make_record(
     status: str = "ok",
     error: str | None = None,
     ended_at: float | None = None,
+    session_id: str | None = None,
 ) -> CompletionRecord:
     """Factory that fills usage from the response body."""
     record = CompletionRecord(
@@ -189,6 +212,7 @@ def make_record(
         response_body=response_body,
         status=status,
         error=error,
+        session_id=session_id,
     )
     record.usage = extract_usage(response_body, family=family)
     return record

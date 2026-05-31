@@ -108,12 +108,22 @@ def _now_iso() -> str:
 
 
 # ── scope (contextvars) ────────────────────────────────────────────
+#
+# Built through `context.var(...)` rather than `contextvars.ContextVar`
+# directly: that is the only thing that makes the active trace scope
+# part of the ambient context carried across `c.remote(...)`. The
+# carrier snapshots these two vars' values (the live Trace / Span) and
+# re-applies them in the worker before `fn` runs, so spans opened there
+# share the host's trace and parent under its current span. No
+# trace-specific propagation code — they ride like any other context
+# var. `context` imports nothing from trace, so there is no cycle.
+from agentix.utils import context as _context  # noqa: E402
 
-_current_trace: contextvars.ContextVar[Trace | None] = contextvars.ContextVar(
+_current_trace: contextvars.ContextVar[Trace | None] = _context.var(
     "agentix_trace_current_trace",
     default=None,
 )
-_current_span: contextvars.ContextVar[Span | None] = contextvars.ContextVar(
+_current_span: contextvars.ContextVar[Span | None] = _context.var(
     "agentix_trace_current_span",
     default=None,
 )

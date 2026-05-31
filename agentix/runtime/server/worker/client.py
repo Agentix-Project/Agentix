@@ -358,6 +358,7 @@ class _SubprocessWorker:
             "call_id": cid,
             "callable": str(request.callable),
             "arguments": request.arguments,
+            "context": request.context,
         }
 
     def _schedule_cancel(self, cid: str) -> None:

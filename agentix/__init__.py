@@ -31,7 +31,7 @@ from agentix.runtime.client import (
 from agentix.runtime.client._sio_facade import AsyncClientNamespace, request_handler
 from agentix.runtime.shared.callables import RemoteCallable
 from agentix.sio import Namespace, RemoteSioError, register_namespace
-from agentix.utils import log, trace
+from agentix.utils import context, log, trace
 from agentix.utils.log import configure_logging
 
 __version__ = "0.2.7"
@@ -56,6 +56,7 @@ __all__ = [
     "WorkerExited",
     "__version__",
     "configure_logging",
+    "context",
     "log",
     "providers",
     "register_namespace",

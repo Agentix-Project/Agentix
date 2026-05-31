@@ -36,6 +36,7 @@ from agentix.runtime.shared import MAX_MESSAGE_BYTES
 from agentix.runtime.shared.callables import RemoteCallable, display_name_for
 from agentix.runtime.shared.codec import pack, unpack
 from agentix.runtime.shared.models import HealthResponse, RemoteError
+from agentix.utils import context
 
 logger = logging.getLogger("agentix.runtime.client")
 
@@ -296,6 +297,12 @@ class RuntimeClient:
             "callable": str(callable_ref),
             "arguments": arguments,
         }
+        # Auto-capture the host's ambient context (baggage + propagator
+        # slices, e.g. the active trace scope) and ship it alongside the
+        # call. Empty context encodes to None and adds nothing.
+        carrier = context.encode()
+        if carrier is not None:
+            payload["context"] = carrier
         terminated = False
         try:
             # `call_deadline` is the cheap catch-all: regardless of cause

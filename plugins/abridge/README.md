@@ -26,54 +26,57 @@ no mitmproxy subprocess.
 pip install agentix-bridge
 ```
 
-## Sandbox usage
+## Usage
+
+The agent runs **inside** the sandbox; `bridged` brings the proxy up
+around it (and tears it down after), points the SDK base-URL env vars at
+the proxy, and runs sync agents off the event loop so the proxy stays
+responsive. The host registers the consumer that forwards to the real
+endpoint and captures every call.
 
 ```python
-import os
-import agentix.bridge.proxy as proxy
-from agentix import RuntimeClient
-
-async with RuntimeClient(runtime_url) as c:
-    handle = await c.remote(proxy.start_proxy)
-    env = await c.remote(proxy.export_environ, handle=handle)
-    # ... pass `env` to whatever agent harness you run inside the
-    # sandbox: it picks up ANTHROPIC_BASE_URL / OPENAI_BASE_URL and
-    # talks to 127.0.0.1 instead of the real provider.
-    ...
-    await c.remote(proxy.stop_proxy, handle=handle)
-```
-
-## Host usage
-
-Register an `OpenAICompatibleClient` with the runtime client before
-opening it, so the host is listening for `llm_call` events from the
-sandbox proxy:
-
-```python
-from agentix import RuntimeClient
-from agentix.bridge import OpenAICompatibleClient, InMemoryStore
+import uuid
+from agentix.bridge import BridgeConfig, OpenAICompatibleClient, InMemoryStore, bridged
+from my_agent import solve   # an importable agent callable (NOT a __main__ function)
 
 store = InMemoryStore()
 host = OpenAICompatibleClient(
-    base_url="https://example.com/v1",
+    base_url="https://api.openai.com/v1",   # OpenAI / OpenRouter / vLLM / your gateway
     api_key="sk-...",
-    model="your-openai-compatible-model",
+    model="gpt-4o-mini",                    # pin the upstream model (optional)
     store=store,
 )
 
-client = RuntimeClient(runtime_url)
-client.register_namespace(host)
-async with client as c:
-    # ... drive the agent ...
-    pass
+session_id = uuid.uuid4().hex
+async with provider.session(SandboxConfig(...)) as sandbox:
+    sandbox.register_namespace(host)        # host half of /abridge — before first remote
+    answer = await sandbox.remote(
+        bridged, solve, task, _bridge=BridgeConfig(session_id=session_id)
+    )
 
-for record in store.snapshot():
-    print(record.request_id, record.family, record.usage.total_tokens)
+# Agent-eye text trajectory for this rollout (token-level data lives in
+# your gateway, keyed by the same session_id):
+for rec in store.trajectory(session_id):
+    print(rec.request_id, rec.family.value, rec.usage.total_tokens)
 ```
 
-`OpenAICompatibleClient` works for any OpenAI-compatible endpoint —
-OpenAI itself, Azure OpenAI, vLLM, Together, Anyscale, a local
-`llama.cpp` server.
+The agent (`solve`) is pristine — it just constructs the Anthropic /
+OpenAI SDK and calls it; `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` already
+point at the in-sandbox proxy. It must be an **importable** function
+(`module::qualname`), not defined in the `__main__` script, so it
+resolves inside the sandbox.
+
+`base_url` is just an OpenAI-compatible endpoint — OpenAI, Azure, vLLM,
+OpenRouter, or a separate gateway (e.g. an SGLang RL wrapper). abridge
+forwards `x-session-id` / `x-request-id` headers so such a gateway can
+group its own token-level trajectory by session.
+
+### Tracing
+
+Each call becomes a `/trace` span tagged per OpenTelemetry GenAI
+conventions (`gen_ai.request.model`, `gen_ai.usage.*`, tool calls as a
+span event). abridge only *produces* spans; register a `trace.Processor`
+to export them to any OTel backend.
 
 ## Modules
 

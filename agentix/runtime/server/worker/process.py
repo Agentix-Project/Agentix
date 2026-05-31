@@ -28,7 +28,7 @@ from agentix.runtime.shared.models import RemoteError, RemoteRequest
 from agentix.utils import log as _log
 from agentix.utils.log._bridge import emit_worker_record
 from agentix.utils.log._config import LOG_CONTEXT_ATTR, get_log_context
-from agentix.utils.trace._bridge import DISPATCH_CALL_ID, install_worker_bridge
+from agentix.utils.trace._bridge import install_worker_bridge
 
 logger = logging.getLogger("agentix.runtime.server.worker.process")
 
@@ -244,6 +244,7 @@ class Worker:
                 callable=RemoteCallable(frame["callable"]),
                 arguments=frame["arguments"],
                 call_id=CallId(call_id) if call_id else None,
+                context=frame.get("context"),
             )
         except Exception as exc:
             await self._send({"type": "error", "call_id": call_id, "error": _err(exc)})
@@ -258,14 +259,13 @@ class Worker:
         except Exception as exc:
             await self._send({"type": "error", "call_id": call_id, "error": _err(exc)})
             return
-        tok = DISPATCH_CALL_ID.set(call_id or None)
         try:
+            # The invoker establishes the per-call dispatch scope
+            # (DISPATCH_CALL_ID + propagated context.attach) around fn.
             resp = await self._invoker.call(fn, request)
         except Exception as exc:
             await self._send({"type": "error", "call_id": call_id, "error": _err(exc)})
             return
-        finally:
-            DISPATCH_CALL_ID.reset(tok)
         if resp.ok:
             await self._send({"type": "result", "call_id": call_id, "value": resp.value})
         else:

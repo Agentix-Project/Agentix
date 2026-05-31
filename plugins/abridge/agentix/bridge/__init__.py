@@ -1,32 +1,43 @@
-"""agentix.bridge — sandbox LLM proxy + host OpenAI-compatible client.
+"""agentix.bridge — tunnel an in-sandbox agent's LLM traffic to the host.
 
-Sandbox side:
+The agent runs *inside* the sandbox, so its LLM calls originate there.
+abridge ferries them over the runtime's Socket.IO connection to the host,
+which holds the real key and forwards to any OpenAI-compatible endpoint
+(OpenAI, OpenRouter, or your own gateway). Every call is captured and
+turned into a `/trace` span. The agent code is never touched.
 
-```python
-from agentix.bridge import start_proxy, stop_proxy, export_environ
-
-handle = await start_proxy()
-os.environ.update(export_environ(handle))
-# ... run an agent harness; it now hits 127.0.0.1 instead of the real API.
-await stop_proxy(handle)
-```
-
-Host side:
+Host side — register the consumer before the first remote call:
 
 ```python
-from agentix.bridge import OpenAICompatibleClient
+from agentix.bridge import OpenAICompatibleClient, InMemoryStore
 
-client = OpenAICompatibleClient(
-    base_url="https://api.openai.com/v1",
+store = InMemoryStore()
+host = OpenAICompatibleClient(
+    base_url="https://api.openai.com/v1",   # or your gateway / vLLM / OpenRouter
     api_key=os.environ["OPENAI_API_KEY"],
-    model="gpt-4o-mini",
+    model="gpt-4o-mini",                    # pin the upstream model (optional)
+    store=store,
 )
-runtime_client.register_namespace(client)
-# Records: client.store.snapshot() after the run.
+sandbox.register_namespace(host)
 ```
 
-See `ROADMAP.md` next to this file for planned extensions (streaming
-proxy, host Anthropic client, training-bridge pause/resume, etc.).
+Sandbox side — one remote call runs the agent with the proxy live around
+it (`bridged` starts/stops the proxy and points the SDK env at it):
+
+```python
+from agentix.bridge import BridgeConfig, bridged
+from my_agent import solve                  # an importable agent callable
+
+answer = await sandbox.remote(
+    bridged, solve, task, _bridge=BridgeConfig(session_id=sid)
+)
+```
+
+Afterwards, `store.trajectory(sid)` is the agent-eye text trajectory for
+that rollout (token-level data — ids/logprobs — lives in your gateway,
+keyed by the same `session_id`).
+
+See `ROADMAP.md` next to this file for planned extensions.
 """
 
 from __future__ import annotations
@@ -37,7 +48,9 @@ from .proxy import (
     NAMESPACE,
     RECORD_EVENT,
     REQUEST_EVENT,
+    BridgeConfig,
     ProxyHandle,
+    bridged,
     export_environ,
     start_proxy,
     stop_proxy,
@@ -53,10 +66,11 @@ from .storage import (
 __version__ = "0.3.0"
 
 __all__ = [
+    "NAMESPACE",
     "ApiFamily",
+    "BridgeConfig",
     "CompletionRecord",
     "InMemoryStore",
-    "NAMESPACE",
     "OpenAICompatibleClient",
     "ProxyHandle",
     "RECORD_EVENT",
@@ -64,6 +78,7 @@ __all__ = [
     "TokenUsage",
     "UpstreamHook",
     "__version__",
+    "bridged",
     "detect",
     "export_environ",
     "extract_usage",

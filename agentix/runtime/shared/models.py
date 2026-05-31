@@ -29,6 +29,9 @@ class RemoteRequest(BaseModel):
         `module::qualname`). `.resolve()` imports the fn on the worker;
         `RemoteCallable._resolve(fn)` builds one on the host.
       - `arguments`: pickle.dumps((args, kwargs)).
+      - `context`: pickle.dumps(carrier) of the host's ambient
+        `agentix.utils.context` (baggage + propagator slices, e.g. the
+        active trace scope), or `None` when no context was active.
 
     No display name on the wire — both ends compute it locally from
     their fn reference for log lines and error messages.
@@ -39,6 +42,7 @@ class RemoteRequest(BaseModel):
     callable: RemoteCallable
     arguments: bytes
     call_id: CallId | None = None
+    context: bytes | None = None
 
 
 class RemoteError(BaseModel):

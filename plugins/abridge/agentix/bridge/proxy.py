@@ -34,11 +34,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import logging
 import os
 import socket
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -47,8 +49,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
 import agentix
+from agentix.utils import trace
 
-from .detection import detect
+from .detection import ApiFamily, detect
 from .storage import CompletionRecord, InMemoryStore, make_record
 from .transform import (
     anthropic_messages_to_openai,
@@ -125,15 +128,21 @@ async def start_proxy(
     host: str = "127.0.0.1",
     port: int = 0,
     request_timeout: float = 600.0,
+    session_id: str | None = None,
 ) -> ProxyHandle:
     """Start the sandbox-side HTTP proxy.
 
     Returns once the server is bound. Idempotent only per-call: each
     invocation starts a fresh proxy with a new id, so call `stop_proxy`
     when done. (For repeated agents in one sandbox, share the handle.)
+
+    `session_id`, when set, is stamped onto every captured call so the
+    host/gateway can group a rollout's LLM calls into one trajectory.
+    `bridged(...)` wires this for you; the caller (host) supplies the id
+    so it can later query the gateway by the same key.
     """
     ns = _get_namespace()
-    app = _build_app(ns=ns, request_timeout=request_timeout)
+    app = _build_app(ns=ns, request_timeout=request_timeout, session_id=session_id)
     bound_port = port or _free_port(host)
     config = uvicorn.Config(app, host=host, port=bound_port, log_level="warning")
     server = uvicorn.Server(config)
@@ -163,6 +172,57 @@ async def stop_proxy(handle: ProxyHandle) -> None:
         await asyncio.wait_for(rec.task, timeout=5)
 
 
+# ── bridged: run an agent callable with the proxy live around it ───────────
+
+
+@dataclass(slots=True)
+class BridgeConfig:
+    """Proxy knobs for `bridged(...)`.
+
+    `session_id` is supplied by the caller (host) so it can later query
+    the gateway for this rollout's trajectory by the same key; left None
+    a per-run id is generated (capture still works, but the host then has
+    to read it back off the records).
+    """
+
+    port: int = 0
+    request_timeout: float = 600.0
+    session_id: str | None = None
+
+
+async def bridged(
+    fn: Callable[..., Any],
+    /,
+    *args: Any,
+    _bridge: BridgeConfig | None = None,
+    **kwargs: Any,
+) -> Any:
+    """Run `fn(*args, **kwargs)` inside the sandbox with the LLM proxy live.
+
+    This is the sandbox-side entry point: the host does a single
+    `await sandbox.remote(bridged, agent_fn, ...)`. `bridged` starts the
+    proxy, points the standard SDK base-URL env vars at it, runs the agent
+    (sync agents go to a thread so the proxy's event loop stays free to
+    serve their HTTP calls), and tears the proxy down on the way out.
+
+    The agent callable stays pristine — no env threading, no proxy
+    lifecycle, no tracing hooks. `fn` is positional-only so it never
+    collides with the agent's own keyword arguments.
+    """
+    cfg = _bridge or BridgeConfig()
+    session_id = cfg.session_id or uuid.uuid4().hex
+    handle = await start_proxy(
+        port=cfg.port, request_timeout=cfg.request_timeout, session_id=session_id
+    )
+    os.environ.update(export_environ(handle))
+    try:
+        if inspect.iscoroutinefunction(fn):
+            return await fn(*args, **kwargs)
+        return await asyncio.to_thread(fn, *args, **kwargs)
+    finally:
+        await stop_proxy(handle)
+
+
 async def _wait_uvicorn_started(server: uvicorn.Server) -> None:
     for _ in range(200):
         if getattr(server, "started", False):
@@ -171,7 +231,9 @@ async def _wait_uvicorn_started(server: uvicorn.Server) -> None:
     raise TimeoutError("uvicorn did not bind in time")
 
 
-def _build_app(*, ns: _SandboxNamespace, request_timeout: float) -> FastAPI:
+def _build_app(
+    *, ns: _SandboxNamespace, request_timeout: float, session_id: str | None = None
+) -> FastAPI:
     app = FastAPI()
 
     @app.get("/v1/_health")
@@ -185,6 +247,7 @@ def _build_app(*, ns: _SandboxNamespace, request_timeout: float) -> FastAPI:
             request=request,
             api_path="/v1/messages",
             request_timeout=request_timeout,
+            session_id=session_id,
         )
 
     @app.post("/v1/messages/count_tokens")
@@ -200,6 +263,7 @@ def _build_app(*, ns: _SandboxNamespace, request_timeout: float) -> FastAPI:
             request=request,
             api_path="/v1/chat/completions",
             request_timeout=request_timeout,
+            session_id=session_id,
         )
 
     return app
@@ -230,6 +294,7 @@ async def _handle_request(
     request: Request,
     api_path: str,
     request_timeout: float,
+    session_id: str | None = None,
 ) -> Response:
     body = await _read_json(request)
     family = detect(api_path, body)
@@ -244,6 +309,7 @@ async def _handle_request(
 
     payload = {
         "record_id": record_id,
+        "session_id": session_id,
         "family": family.value,
         "request_path": api_path,
         "upstream_body": upstream_body,
@@ -251,74 +317,156 @@ async def _handle_request(
         "anthropic_model": str(body.get("model") or "") if family.is_anthropic else None,
     }
 
-    try:
-        result = await asyncio.wait_for(ns.request(REQUEST_EVENT, payload), timeout=request_timeout)
-    except TimeoutError:
-        record = make_record(
-            request_id=record_id,
-            family=family,
-            started_at=started_at,
-            request_path=api_path,
-            request_body=body,
-            upstream_body=upstream_body,
-            response_body=None,
-            status="timeout",
-            error="proxy timed out waiting for host",
-        )
-        await _emit_record(ns, record)
-        return JSONResponse(
-            {"error": {"type": "timeout", "message": record.error}}, status_code=504
-        )
+    # One span per LLM call, opened around the in-flight request so its
+    # timing reflects what the agent observed (incl. the SIO round-trip).
+    # Ships over `/trace`; rollout calls correlate by `agentix.session_id`
+    # (cross-HTTP span parenting isn't available without the agent
+    # propagating traceparent, and the agent never intervenes).
+    with trace.span(
+        f"chat {body.get('model') or 'unknown'}",
+        **_llm_request_attrs(family, body, session_id=session_id, record_id=record_id),
+    ) as sp:
+        try:
+            result = await asyncio.wait_for(ns.request(REQUEST_EVENT, payload), timeout=request_timeout)
+        except TimeoutError:
+            sp.set_error("proxy timed out waiting for host")
+            record = make_record(
+                request_id=record_id,
+                session_id=session_id,
+                family=family,
+                started_at=started_at,
+                request_path=api_path,
+                request_body=body,
+                upstream_body=upstream_body,
+                response_body=None,
+                status="timeout",
+                error="proxy timed out waiting for host",
+            )
+            await _emit_record(ns, record)
+            return JSONResponse(
+                {"error": {"type": "timeout", "message": record.error}}, status_code=504
+            )
 
-    if not isinstance(result, dict):
-        raise RuntimeError(f"abridge host returned non-dict result: {result!r}")
-    if "error" in result:
-        err = result["error"]
-        message = str(err.get("message") if isinstance(err, dict) else err)
-        record = make_record(
-            request_id=record_id,
-            family=family,
-            started_at=started_at,
-            request_path=api_path,
-            request_body=body,
-            upstream_body=upstream_body,
-            response_body=None,
-            status="error",
-            error=message,
-        )
-        await _emit_record(ns, record)
-        status = int(err.get("status_code", 502)) if isinstance(err, dict) else 502
-        return JSONResponse({"error": {"type": "upstream_error", "message": message}}, status_code=status)
+        if not isinstance(result, dict):
+            raise RuntimeError(f"abridge host returned non-dict result: {result!r}")
+        if "error" in result:
+            err = result["error"]
+            message = str(err.get("message") if isinstance(err, dict) else err)
+            sp.set_error(message)
+            record = make_record(
+                request_id=record_id,
+                session_id=session_id,
+                family=family,
+                started_at=started_at,
+                request_path=api_path,
+                request_body=body,
+                upstream_body=upstream_body,
+                response_body=None,
+                status="error",
+                error=message,
+            )
+            await _emit_record(ns, record)
+            status = int(err.get("status_code", 502)) if isinstance(err, dict) else 502
+            return JSONResponse({"error": {"type": "upstream_error", "message": message}}, status_code=status)
 
-    openai_response = result.get("response") or {}
-    if not isinstance(openai_response, dict):
-        raise RuntimeError("abridge host returned non-dict response")
+        openai_response = result.get("response") or {}
+        if not isinstance(openai_response, dict):
+            raise RuntimeError("abridge host returned non-dict response")
 
-    if family.is_anthropic:
-        anthropic_body = openai_to_anthropic_messages(
-            openai_response, response_model=str(body.get("model") or "")
-        )
-        response_body: dict[str, Any] = anthropic_body
-        if body.get("stream"):
-            envelope = anthropic_sse(anthropic_body)
-            response: Response = Response(content=envelope, media_type="text/event-stream")
+        if family.is_anthropic:
+            anthropic_body = openai_to_anthropic_messages(
+                openai_response, response_model=str(body.get("model") or "")
+            )
+            response_body: dict[str, Any] = anthropic_body
+            if body.get("stream"):
+                envelope = anthropic_sse(anthropic_body)
+                response: Response = Response(content=envelope, media_type="text/event-stream")
+            else:
+                response = JSONResponse(anthropic_body)
         else:
-            response = JSONResponse(anthropic_body)
-    else:
-        response_body = openai_response
-        response = JSONResponse(openai_response)
+            response_body = openai_response
+            response = JSONResponse(openai_response)
 
-    record = make_record(
-        request_id=record_id,
-        family=family,
-        started_at=started_at,
-        request_path=api_path,
-        request_body=body,
-        upstream_body=upstream_body,
-        response_body=response_body,
+        record = make_record(
+            request_id=record_id,
+            session_id=session_id,
+            family=family,
+            started_at=started_at,
+            request_path=api_path,
+            request_body=body,
+            upstream_body=upstream_body,
+            response_body=response_body,
+        )
+        _apply_response_span(sp, record)
+        await _emit_record(ns, record)
+        return response
+
+
+# ── OTel GenAI span attributes (abridge is a span producer; /trace owns export) ──
+
+
+def _llm_request_attrs(
+    family: ApiFamily, body: dict[str, Any], *, session_id: str | None, record_id: str
+) -> dict[str, Any]:
+    """Initial span attributes from the request, per OTel GenAI conventions."""
+    attrs: dict[str, Any] = {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.system": "anthropic" if family.is_anthropic else "openai",
+        "gen_ai.request.model": str(body.get("model") or ""),
+        "agentix.request_id": record_id,
+    }
+    if session_id:
+        attrs["agentix.session_id"] = session_id
+    for key, attr in (
+        ("max_tokens", "gen_ai.request.max_tokens"),
+        ("temperature", "gen_ai.request.temperature"),
+        ("top_p", "gen_ai.request.top_p"),
+    ):
+        if body.get(key) is not None:
+            attrs[attr] = body[key]
+    return attrs
+
+
+def _apply_response_span(sp: trace.Span, record: CompletionRecord) -> None:
+    """Backfill usage / response model / tool calls once the reply lands."""
+    sp.set_attributes(
+        **{
+            "gen_ai.usage.input_tokens": record.usage.prompt_tokens,
+            "gen_ai.usage.output_tokens": record.usage.completion_tokens,
+        }
     )
-    await _emit_record(ns, record)
-    return response
+    rb = record.response_body
+    if not isinstance(rb, dict):
+        return
+    model = rb.get("model")
+    if isinstance(model, str) and model:
+        sp.set_attribute("gen_ai.response.model", model)
+    names = _tool_call_names(rb, family=record.family)
+    if names:
+        # The model's tool requests, derived from the response — no agent
+        # instrumentation. Full tool/observation span stitching (across
+        # calls) is a follow-up; it intersects the compaction / sub-agent
+        # open problems.
+        sp.add_event("gen_ai.tool_calls", names=names, count=len(names))
+
+
+def _tool_call_names(response_body: dict[str, Any], *, family: ApiFamily) -> list[str]:
+    names: list[str] = []
+    if family.is_anthropic:
+        for block in response_body.get("content") or []:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                name = block.get("name")
+                if isinstance(name, str):
+                    names.append(name)
+        return names
+    for choice in response_body.get("choices") or []:
+        msg = choice.get("message") if isinstance(choice, dict) else None
+        for tc in (msg or {}).get("tool_calls") or []:
+            fn = tc.get("function") if isinstance(tc, dict) else None
+            name = (fn or {}).get("name")
+            if isinstance(name, str):
+                names.append(name)
+    return names
 
 
 async def _emit_record(ns: _SandboxNamespace, record: CompletionRecord) -> None:
@@ -332,32 +480,38 @@ async def _emit_record(ns: _SandboxNamespace, record: CompletionRecord) -> None:
 # ── env helpers ───────────────────────────────────────────────────────────
 
 
+_PLACEHOLDER_KEY = "sk-abridge"
+
+
 def export_environ(handle: ProxyHandle) -> dict[str, str]:
     """Env vars an agent harness should inherit to route through the proxy.
 
-    Pre-fills the standard base-URL overrides for the Anthropic SDK,
-    OpenAI SDK, and `LiteLLM`. The proxy itself does not validate API
-    keys; the host's `OpenAICompatibleClient` supplies the real
-    upstream credentials.
+    Pure function of the handle — safe to call host-side. Pre-fills the
+    standard base-URL overrides for the Anthropic SDK, OpenAI SDK, and
+    `LiteLLM`. The API-key values are a constant placeholder: SDKs refuse
+    to start without *some* key, but the real upstream credentials live
+    only on the host (the gateway substitutes them), so the placeholder
+    must never be a real key — reading one from the environment here would
+    leak it into the sandbox.
     """
     return {
         "ANTHROPIC_BASE_URL": handle.anthropic_base_url,
         "OPENAI_BASE_URL": handle.openai_base_url,
         "OPENAI_API_BASE": handle.openai_base_url,
         "ABRIDGE_PROXY_URL": handle.url,
-        # Many SDKs refuse to ride a missing key entirely; let the agent
-        # supply a placeholder. The host substitutes the real key.
-        "ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY", "sk-abridge"),
-        "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY", "sk-abridge"),
+        "ANTHROPIC_API_KEY": _PLACEHOLDER_KEY,
+        "OPENAI_API_KEY": _PLACEHOLDER_KEY,
     }
 
 
 __all__ = [
-    "InMemoryStore",
     "NAMESPACE",
+    "BridgeConfig",
+    "InMemoryStore",
     "ProxyHandle",
     "RECORD_EVENT",
     "REQUEST_EVENT",
+    "bridged",
     "export_environ",
     "start_proxy",
     "stop_proxy",

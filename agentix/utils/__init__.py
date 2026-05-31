@@ -1,13 +1,17 @@
-"""agentix.utils — side-channel observability primitives.
+"""agentix.utils — ambient context + side-channel observability.
 
-Two sub-packages live here:
+Three modules live here:
 
-  - `agentix.utils.log`   — stdlib `logging` bridge (sandbox -> host).
-  - `agentix.utils.trace` — OTel-style Trace + Span + SpanEvent.
+  - `agentix.utils.context` — unified ambient context (baggage +
+    propagators) carried across `c.remote(fn, ...)`.
+  - `agentix.utils.log`     — stdlib `logging` bridge (sandbox -> host).
+  - `agentix.utils.trace`   — OTel-style Trace + Span + SpanEvent.
 
-Both are *side channels* relative to `c.remote(fn, ...)`: they ride
-dedicated Socket.IO namespaces (`/log`, `/trace`) and are not part of
-the RPC result path.
+`log` and `trace` are *side channels* relative to `c.remote(fn, ...)`:
+they ride dedicated Socket.IO namespaces (`/log`, `/trace`) and are not
+part of the RPC result path. `context` is carried *with* the call —
+captured host-side and restored in the worker before `fn` runs — and
+trace is one of its propagators.
 """
 
 from __future__ import annotations
@@ -22,6 +26,6 @@ import pkgutil
 # invisible to the import system.
 __path__ = pkgutil.extend_path(__path__, __name__)
 
-from agentix.utils import log, trace  # noqa: E402
+from agentix.utils import context, log, trace  # noqa: E402
 
-__all__ = ["log", "trace"]
+__all__ = ["context", "log", "trace"]

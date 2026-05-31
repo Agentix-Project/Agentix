@@ -152,6 +152,7 @@ def make_sio(
                 callable=RemoteCallable(payload["callable"]),
                 arguments=payload["arguments"],
                 call_id=CallId(call_id),
+                context=payload.get("context"),
             )
         except (KeyError, ValidationError) as exc:
             return (

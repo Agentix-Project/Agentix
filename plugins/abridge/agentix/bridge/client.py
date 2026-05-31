@@ -105,9 +105,10 @@ class OpenAICompatibleClient(AsyncClientNamespace):
             return
 
         upstream_body = await self._apply_overrides(upstream_body)
+        forward_headers = _trace_headers(payload)
 
         try:
-            response = await self._post_openai(upstream_body)
+            response = await self._post_openai(upstream_body, headers=forward_headers)
             await self._reply_value(sio_request_id, {"response": response})
         except httpx.HTTPStatusError as exc:
             text = exc.response.text[:1000]
@@ -148,15 +149,18 @@ class OpenAICompatibleClient(AsyncClientNamespace):
                 out = result
         return out
 
-    async def _post_openai(self, body: dict[str, Any]) -> dict[str, Any]:
+    async def _post_openai(
+        self, body: dict[str, Any], *, headers: dict[str, str] | None = None
+    ) -> dict[str, Any]:
         url = f"{self._base_url}{_OPENAI_CHAT_PATH}"
-        headers = {
+        request_headers = {
             "authorization": f"Bearer {self._api_key}",
             "content-type": "application/json",
             "accept": "application/json",
+            **(headers or {}),
         }
         async with httpx.AsyncClient(timeout=self._timeout) as client:
-            resp = await client.post(url, headers=headers, json=body)
+            resp = await client.post(url, headers=request_headers, json=body)
         resp.raise_for_status()
         value = resp.json()
         if not isinstance(value, dict):
@@ -172,6 +176,24 @@ class OpenAICompatibleClient(AsyncClientNamespace):
 
 def _err_value(message: str, status: int) -> dict[str, Any]:
     return {"error": {"message": message, "status_code": status}}
+
+
+def _trace_headers(payload: dict[str, Any]) -> dict[str, str]:
+    """Headers that propagate the rollout identity to the upstream.
+
+    The upstream may be OpenAI/OpenRouter (which ignore unknown headers)
+    or a separate gateway (e.g. an SGLang wrapper) that groups its own
+    token-level trajectory by `session_id`. abridge does not know which;
+    it just forwards the ids it stamped.
+    """
+    headers: dict[str, str] = {}
+    session_id = payload.get("session_id")
+    if isinstance(session_id, str) and session_id:
+        headers["x-session-id"] = session_id
+    record_id = payload.get("record_id")
+    if isinstance(record_id, str) and record_id:
+        headers["x-request-id"] = record_id
+    return headers
 
 
 def _record_from_payload(payload: dict[str, Any]) -> CompletionRecord:
@@ -190,6 +212,7 @@ def _record_from_payload(payload: dict[str, Any]) -> CompletionRecord:
     request_id = payload.get("request_id") or payload.get("record_id")
     if not request_id:
         raise KeyError("completion_record missing request_id")
+    session_id = payload.get("session_id")
     return CompletionRecord(
         request_id=str(request_id),
         family=family,
@@ -202,6 +225,7 @@ def _record_from_payload(payload: dict[str, Any]) -> CompletionRecord:
         status=str(payload.get("status", "ok")),
         error=payload.get("error"),
         usage=usage,
+        session_id=str(session_id) if session_id is not None else None,
     )
 
 
