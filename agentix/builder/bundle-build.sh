@@ -5,11 +5,13 @@
 #
 #   1. nix build the toolchain  — interpreter + uv
 #   2. uv venv + uv sync        — /nix/runtime/venv (all Python deps)
-#   3. discover system closures — plugin (agentix.nix entry points)
-#                                 + project ([tool.agentix] nix)
-#   4. nix build the runtime    — toolchain + closures, merged
-#   5. place the merged tree    — /nix/runtime/{bin,lib,...}
-#   6. write bootstrap.sh       — bundle's startup contract
+#   3. discover system closures — plugins → closures/plugins/<label>.nix
+#                                 project → closures/project.nix
+#   4. nix build the runtime    — toolchain + project, merged
+#   5. nix build the plugins    — each plugin tree, kept independent
+#   6. place both trees         — /nix/runtime/{bin,lib,...}
+#                                 /nix/runtime/plugins/<label>/
+#   7. write bootstrap.sh       — bundle's startup contract
 set -eu
 
 SUBPATH="${AGENTIX_PROJECT_SUBPATH:-.}"
@@ -40,17 +42,26 @@ if [ -f "${PROJECT}/uv.lock" ]; then UV_FROZEN="--frozen"; else UV_FROZEN=""; ec
   && VIRTUAL_ENV=/nix/runtime/venv "${TOOLCHAIN}/bin/uv" sync \
         --active ${UV_FROZEN} --no-dev --no-editable ${AGENTIX_UV_ARGS:-} )
 
-echo ">>> [3/5] discovering system-dep closures"
+echo ">>> [3/7] discovering system-dep closures"
 /nix/runtime/venv/bin/python -m agentix.cli.build.closures \
     --project "${PROJECT}" --closures /build/closures
 git add -A
 
-echo ">>> [4/5] building Nix runtime closure"
+echo ">>> [4/7] building Nix runtime closure (toolchain + project)"
 nix build .#runtime ${AGENTIX_NIX_ARGS:-} -o runtime-result --print-build-logs
 
-echo ">>> [5/6] placing /nix/runtime"
+echo ">>> [5/7] building Nix plugin closures (independent trees)"
+nix build .#plugins ${AGENTIX_NIX_ARGS:-} -o plugins-result --print-build-logs
+
+echo ">>> [6/7] placing /nix/runtime + /nix/runtime/plugins"
 cp -a runtime-result/. /nix/runtime/
-rm -f toolchain-result runtime-result
+mkdir -p /nix/runtime/plugins
+# `cp -a` preserves the linkFarm's `<label> -> /nix/store/<plugin>`
+# symlinks; the targets are already part of the image (every store
+# path the linkFarm references is a build-time dep). Bootstrap globs
+# `/nix/runtime/plugins/*/` and trusts the OS to resolve them.
+cp -a plugins-result/. /nix/runtime/plugins/
+rm -f toolchain-result runtime-result plugins-result
 
 # Drop the bundle's startup contract at /nix/runtime/bootstrap.sh.
 # Provider backends (docker, apptainer, future k8s/...) just exec
@@ -58,7 +69,7 @@ rm -f toolchain-result runtime-result
 # where the runtime server lives. The script is shipped verbatim as
 # wheel data from `agentix/builder/bootstrap.sh` and staged into the
 # build context next to bundle-build.sh.
-echo ">>> [6/6] installing /nix/runtime/bootstrap.sh"
+echo ">>> [7/7] installing /nix/runtime/bootstrap.sh"
 install -m 0755 /build/bootstrap.sh /nix/runtime/bootstrap.sh
 
 echo ">>> bundle build complete"

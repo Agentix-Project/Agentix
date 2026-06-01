@@ -1073,9 +1073,13 @@ class TestStageClosures:
         labels = {c.label for c in collected}
         assert "project" in labels
         assert any("runtime-basic" in label for label in labels)
-        # every collected closure was staged as a .nix file
+        # project closure lands at `<dir>/project.nix` (merged into runtime)
+        assert (out / "project.nix").is_file()
+        # plugin closures land under `<dir>/plugins/<label>.nix` (kept independent)
         for c in collected:
-            assert (out / f"{c.label}.nix").is_file()
+            if c.label == "project":
+                continue
+            assert (out / "plugins" / f"{c.label}.nix").is_file()
 
     def test_assemble_pure_python_project(self, tmp_path: Path) -> None:
         """A project with no `[tool.agentix] nix` still gets plugin
@@ -1084,3 +1088,6 @@ class TestStageClosures:
         out = tmp_path / "closures"
         collected = assemble(proj, out)
         assert all(c.label != "project" for c in collected)
+        assert not (out / "project.nix").exists()
+        for c in collected:
+            assert (out / "plugins" / f"{c.label}.nix").is_file()

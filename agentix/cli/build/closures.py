@@ -14,8 +14,11 @@ that point every plugin is installed and introspectable, so this step:
   2. Reads the project's own closure from `[tool.agentix] nix` — the
      one place a bundle author writes Nix. Optional.
 
-  3. Stages every `.nix` file into `closures/`, where the flake's
-     `runtime` output imports and `symlinkJoin`s them.
+  3. Stages each plugin's `.nix` into `closures/plugins/<label>.nix`,
+     where the flake's `plugins` output imports each as its own
+     derivation (no merge across plugins). The project's `.nix`
+     (if declared) lands at `closures/project.nix` and is merged
+     into the flake's `runtime` output alongside the toolchain.
 
 Plugin discovery walks `importlib.metadata.entry_points` (reading
 `.dist-info/entry_points.txt`) and locates each closure's `default.nix`
@@ -168,13 +171,22 @@ def stage_closures(closures: Sequence[Closure], closures_dir: Path) -> list[Path
 def assemble(project_dir: Path, closures_dir: Path) -> list[Closure]:
     """Discover plugin + project closures and stage them.
 
-    Returns the closures staged, for the caller to log."""
-    closures = discover_plugin_closures()
+    Plugins go to `closures_dir/plugins/<label>.nix` — the flake reads
+    each as its own derivation (no merge across plugins). The project
+    closure goes to `closures_dir/project.nix` — merged into the
+    runtime tree. Returns every staged closure for the caller to log.
+    """
+    plugins = discover_plugin_closures()
+    stage_closures(plugins, closures_dir / "plugins")
+
     project = discover_project_closure(project_dir)
     if project is not None:
-        closures.append(project)
-    stage_closures(closures, closures_dir)
-    return closures
+        stage_closures([project], closures_dir)
+
+    out = list(plugins)
+    if project is not None:
+        out.append(project)
+    return out
 
 
 @click.command(

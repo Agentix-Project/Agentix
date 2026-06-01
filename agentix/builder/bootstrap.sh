@@ -34,14 +34,64 @@ agentix_prepend_path() {
   fi
 }
 
-agentix_prepend_path PATH "/nix/runtime/venv/bin:/nix/runtime/bin"
-agentix_prepend_path LD_LIBRARY_PATH "/nix/runtime/lib"
-agentix_prepend_path LIBRARY_PATH "/nix/runtime/lib"
-agentix_prepend_path CPATH "/nix/runtime/include"
-agentix_prepend_path C_INCLUDE_PATH "/nix/runtime/include"
-agentix_prepend_path CPLUS_INCLUDE_PATH "/nix/runtime/include"
-agentix_prepend_path PKG_CONFIG_PATH "/nix/runtime/lib/pkgconfig:/nix/runtime/share/pkgconfig"
-agentix_prepend_path CMAKE_PREFIX_PATH "/nix/runtime"
+# Each plugin lives at /nix/runtime/plugins/<label>/ as its own
+# /nix/store tree (no symlinkJoin / buildEnv merge with the toolchain
+# or with other plugins). We compose PATH / LD_LIBRARY_PATH / ... by
+# globbing this dir at startup — same mental model as `nix-shell -p
+# a b c`, where shell selection of a binary is decided by PATH order,
+# not by a build-time tree merge. Glob order is lexicographic on the
+# plugin labels (`<dist>.<ep>`); first match wins on PATH lookup.
+agentix_collect_plugin_paths() {
+  subdir="$1"
+  result=""
+  if [ -d /nix/runtime/plugins ]; then
+    for plugin in /nix/runtime/plugins/*/; do
+      candidate="${plugin}${subdir}"
+      [ -d "$candidate" ] || continue
+      candidate="${candidate%/}"
+      if [ -n "$result" ]; then
+        result="${result}:${candidate}"
+      else
+        result="${candidate}"
+      fi
+    done
+  fi
+  printf '%s' "$result"
+}
+
+# Join non-empty items with ':' — accepts a baseline followed by any
+# number of (possibly empty) extras. Empty extras are skipped, so a
+# missing plugin subdir doesn't introduce empty PATH entries (which
+# Unix interprets as CWD).
+agentix_colon_append() {
+  list="$1"
+  shift
+  for item in "$@"; do
+    [ -n "$item" ] || continue
+    if [ -n "$list" ]; then
+      list="${list}:${item}"
+    else
+      list="${item}"
+    fi
+  done
+  printf '%s' "$list"
+}
+
+plugin_bins="$(agentix_collect_plugin_paths bin)"
+plugin_libs="$(agentix_collect_plugin_paths lib)"
+plugin_includes="$(agentix_collect_plugin_paths include)"
+plugin_lib_pkgconfig="$(agentix_collect_plugin_paths lib/pkgconfig)"
+plugin_share_pkgconfig="$(agentix_collect_plugin_paths share/pkgconfig)"
+plugin_roots="$(agentix_collect_plugin_paths "")"
+
+agentix_prepend_path PATH               "$(agentix_colon_append "/nix/runtime/venv/bin:/nix/runtime/bin" "$plugin_bins")"
+agentix_prepend_path LD_LIBRARY_PATH    "$(agentix_colon_append "/nix/runtime/lib" "$plugin_libs")"
+agentix_prepend_path LIBRARY_PATH       "$(agentix_colon_append "/nix/runtime/lib" "$plugin_libs")"
+agentix_prepend_path CPATH              "$(agentix_colon_append "/nix/runtime/include" "$plugin_includes")"
+agentix_prepend_path C_INCLUDE_PATH     "$(agentix_colon_append "/nix/runtime/include" "$plugin_includes")"
+agentix_prepend_path CPLUS_INCLUDE_PATH "$(agentix_colon_append "/nix/runtime/include" "$plugin_includes")"
+agentix_prepend_path PKG_CONFIG_PATH    "$(agentix_colon_append "/nix/runtime/lib/pkgconfig:/nix/runtime/share/pkgconfig" "$plugin_lib_pkgconfig" "$plugin_share_pkgconfig")"
+agentix_prepend_path CMAKE_PREFIX_PATH  "$(agentix_colon_append "/nix/runtime" "$plugin_roots")"
 
 # Some task images (e.g. swebench) inject their own Python-related env
 # (PYTHONPATH, cwd entries on `sys.path`, ...) that would shadow the

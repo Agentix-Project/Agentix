@@ -1,14 +1,27 @@
 [project]
 name = "agentix-bridge"
-version = "0.3.0"
-description = "Sandbox LLM proxy + host OpenAI-compatible client for Agentix (import as `agentix.bridge`)"
+version = "0.5.0"
+description = "Sandbox HTTP tunnel + path-routed @on handlers for Agentix (import as `agentix.bridge`)"
 requires-python = ">=3.11"
 dependencies = [
     "agentixx",
     "fastapi>=0.115",
-    "httpx>=0.27",
-    "uvicorn[standard]>=0.30",
+    # Plain `uvicorn`, not `uvicorn[standard]`: the tunnel is HTTP POST
+    # only (no WebSocket), so we don't need `websockets` (and its
+    # deprecation noise), `httptools`, `uvloop`, etc.
+    "uvicorn>=0.30",
 ]
+
+# Bundled clients each depend on the provider's SDK; users who only
+# ship custom `@on` handlers don't need either. Pick what you actually
+# use:
+#   pip install agentix-bridge[openai]            # OpenAIClient + AnthropicFromOpenAIClient
+#   pip install agentix-bridge[anthropic]         # AnthropicClient
+#   pip install agentix-bridge[all]               # both
+[project.optional-dependencies]
+openai = ["openai>=1.50"]
+anthropic = ["anthropic>=0.40"]
+all = ["openai>=1.50", "anthropic>=0.40"]
 
 # `agentixx` is the monorepo workspace root — used editable, never
 # from PyPI. Core edits are live here with no release step.

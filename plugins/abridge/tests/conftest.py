@@ -1,10 +1,15 @@
 """Shared in-process test harness for abridge.
 
-Wires a sandbox-side proxy to a host-side `Bridge`
-without a real Socket.IO server: a fake OpenAI-compatible upstream, and
-a `_DirectSIO` shim that fans the proxy's `emit()`/`request()` straight
-into the host coroutine and back. The `wired` fixture is the entry point
-used across the test modules.
+Wires a sandbox-side tunnel to a host-side `Proxy` without a real
+Socket.IO server. The `wired` fixture: a fake OpenAI-compatible
+upstream + a `_DirectSIO` shim that fans the tunnel's `emit()` /
+`request()` straight into the `Proxy.trigger_event` and back.
+
+The default host setup is
+`Proxy(AnthropicFromOpenAIClient(...), OpenAIClient(...))` — both
+clients composed at the Proxy constructor — so the fixture exercises
+`/v1/messages` (+ `/v1/messages/count_tokens`) and `/v1/chat/completions`
+through the same handle.
 """
 
 from __future__ import annotations
@@ -19,7 +24,9 @@ from typing import Any
 import agentix.bridge.proxy as proxy_mod
 import pytest
 import pytest_asyncio
-from agentix.bridge import Bridge, InMemoryStore, OpenAIClient, start_proxy, stop_proxy
+from agentix.bridge import Proxy
+from agentix.bridge.clients import AnthropicFromOpenAIClient, OpenAIClient
+from agentix.bridge.proxy import _start_tunnel, _stop_tunnel
 
 # ── fake upstream OpenAI-compatible server ────────────────────────────────
 
@@ -35,8 +42,11 @@ class _Upstream(BaseHTTPRequestHandler):
         _Upstream.last_headers = {k.lower(): v for k, v in self.headers.items()}
         body = {
             "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "model": "upstream-model",
             "choices": [
                 {
+                    "index": 0,
                     "finish_reason": "stop",
                     "message": {"role": "assistant", "content": "hello from upstream"},
                 }
@@ -77,9 +87,10 @@ def fake_upstream() -> Iterator[str]:
 
 
 class _DirectSIO:
-    """Single-process pipe between the proxy's emit() and the host's on_*."""
+    """Single-process pipe between the tunnel's `emit()` and the host's
+    `trigger_event`. Mirrors what `socketio` does over the wire."""
 
-    def __init__(self, namespace: Any, host: Bridge) -> None:
+    def __init__(self, namespace: Any, host: Proxy) -> None:
         self._ns = namespace
         self._host = host
 
@@ -90,32 +101,33 @@ class _DirectSIO:
         if event.endswith(":error"):
             await self._ns._on_reply_error(data)
             return
-        handler = getattr(self._host, f"on_{event}", None)
-        if handler is None:
-            return
-        await handler(data)
+        await self._host.trigger_event(event, data)
 
 
 @pytest_asyncio.fixture
 async def wired(fake_upstream: str, monkeypatch):
-    """Wire a sandbox proxy (session `sess-test`) to a host client in-process.
+    """Wire a sandbox tunnel (session `sess-test`) to a host `Proxy`
+    in-process. Yields `{handle, host, upstream}`.
 
-    Yields `{handle, host, store, upstream}` — `upstream` is the
-    `_Upstream` handler class, whose `last_body`/`last_headers` record
-    what the upstream actually received.
+    The Proxy serves both Anthropic (`/v1/messages`,
+    `/v1/messages/count_tokens`) and OpenAI (`/v1/chat/completions`).
     """
     import agentix as agentix_mod
 
     monkeypatch.setattr(agentix_mod, "register_namespace", lambda ns: None)
     monkeypatch.setattr(proxy_mod, "_namespace_singleton", None)
 
-    handle = await start_proxy(session_id="sess-test")
-
-    store = InMemoryStore()
-    host = Bridge(
-        OpenAIClient(base_url=fake_upstream, api_key="test-key", model="upstream-model"),
-        store=store,
+    afo = AnthropicFromOpenAIClient(
+        base_url=fake_upstream, api_key="test-key", model="upstream-model",
+        session_id="sess-test",
     )
+    openai = OpenAIClient(
+        base_url=fake_upstream, api_key="test-key", model="upstream-model",
+        session_id="sess-test",
+    )
+    host = Proxy(afo, openai)
+
+    handle = await _start_tunnel(paths=list(host.paths))
 
     sandbox_ns = proxy_mod._get_namespace()
     sio = _DirectSIO(namespace=sandbox_ns, host=host)
@@ -130,6 +142,6 @@ async def wired(fake_upstream: str, monkeypatch):
     monkeypatch.setattr(host, "emit", host_emit)
 
     try:
-        yield {"handle": handle, "host": host, "store": store, "upstream": _Upstream}
+        yield {"handle": handle, "host": host, "upstream": _Upstream}
     finally:
-        await stop_proxy(handle)
+        await _stop_tunnel(handle=handle)

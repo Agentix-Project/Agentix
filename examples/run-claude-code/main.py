@@ -1,10 +1,10 @@
 """Run Claude Code in an Agentix sandbox, LLM traffic bridged via abridge.
 
 Claude Code runs *inside* the sandbox; abridge tunnels its Anthropic calls to
-the host, which forwards to any OpenAI-compatible endpoint (the transform maps
-Anthropic <-> OpenAI). The agent is unmodified — you just point its `base_url`
-at the bridge's in-sandbox service URL. Every call is captured into
-`bridge.store` and emitted as a `/trace` span.
+the host, where `AnthropicFromOpenAIClient` translates them into OpenAI Chat
+Completions and dispatches via the `openai` SDK. The agent is unmodified — its
+`base_url` points at the in-sandbox tunnel and its `api_key` is a non-secret
+placeholder (the real upstream key stays host-side). Each call is a `/trace` span.
 
     agentix build .
     OPENAI_API_KEY=... uv run python main.py --bundle <ref> \
@@ -18,12 +18,12 @@ import argparse
 import asyncio
 import os
 
-from agentix.agents.claude_code import ClaudeCodeArgs
+from agentix.agents.claude_code import ClaudeCodeInput
 from agentix.agents.claude_code import run as claude_code_run
-from agentix.bridge import Bridge, OpenAIClient
-from agentix.provider.docker import DockerProvider, DockerProviderConfig
-
+from agentix.bridge import Proxy
+from agentix.bridge.clients import ANTHROPIC_PLACEHOLDER_API_KEY, AnthropicFromOpenAIClient
 from agentix.provider.base import SandboxConfig
+from agentix.provider.docker import DockerProvider, DockerProviderConfig
 from agentix.utils import trace
 from agentix.utils.log import configure_logging
 
@@ -40,7 +40,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--image", default="python:3.13-slim")
     p.add_argument("--platform", default="linux/amd64")
     p.add_argument("--base-url", default=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"))
-    p.add_argument("--model", default=os.getenv("OPENAI_MODEL", "gpt-4o"), help="upstream model the host pins calls to")
+    p.add_argument("--model", default=os.getenv("OPENAI_MODEL", "gpt-4o"),
+                   help="upstream model the host pins calls to")
     # The claude CLI sends this model id; the host overrides it upstream.
     p.add_argument("--anthropic-model", default="claude-sonnet-4-5-20250929")
     p.add_argument("--max-turns", type=int, default=20)
@@ -61,8 +62,6 @@ def parse_args() -> argparse.Namespace:
 def _install_otlp(endpoint: str, header_pairs: list[str]) -> None:
     from agentix.utils.trace.otel import OTelTraceProcessor
 
-    from agentix.utils import trace
-
     headers = dict(h.split("=", 1) for h in header_pairs)
     trace.add_processor(OTelTraceProcessor(endpoint=endpoint, headers=headers))
 
@@ -73,37 +72,44 @@ async def main() -> None:
     if args.otlp_endpoint:
         _install_otlp(args.otlp_endpoint, args.otlp_headers)  # captured /trace spans -> OTLP backend
 
-    # Bridge ferries + captures; the Client makes the actual provider call.
-    bridge = Bridge(OpenAIClient(
-        base_url=args.base_url, api_key=os.environ["OPENAI_API_KEY"], model=args.model, timeout=180,
-    ))
+    # The Proxy is shape-blind: it ferries path-named HTTP calls from the
+    # in-sandbox tunnel to the matching `@on(path)` handler on this client.
+    # `AnthropicFromOpenAIClient` owns the Anthropic<->OpenAI translation.
+    client = AnthropicFromOpenAIClient(
+        base_url=args.base_url,
+        api_key=os.environ["OPENAI_API_KEY"],
+        model=args.model,  # pins every upstream OpenAI call to this model
+        timeout=180,
+    )
+    proxy = Proxy(client)
     provider = DockerProvider(DockerProviderConfig(
         container_engine=args.container_engine, run_args=args.run_args, network=args.network,
     ))
     cfg = SandboxConfig(image=args.image, bundle=args.bundle, platform=args.platform)
 
-    # `async with bridge` opens the rollout root span; start_proxy parents every
-    # in-sandbox LLM span to it, so the backend shows one grouped, nested trace.
-    async with provider.session(cfg, call_deadline=1800) as sandbox, bridge:
-        await bridge.start_proxy(sandbox, family="anthropic")  # registers + starts the proxy
-        result = await sandbox.remote(claude_code_run, ClaudeCodeArgs(
-            instruction=args.instruction,
-            model=args.anthropic_model,
-            workdir=args.workdir,
-            max_turns=args.max_turns,
-            base_url=bridge.get_base_url(),
-            api_key="sk-abridge",
-        ))
+    # One rollout span groups every per-call LLM span the client stamps, so
+    # an OTLP backend shows a single nested trace. `proxy.session` starts the
+    # in-sandbox tunnel and yields the loopback handle the agent points at.
+    with trace.span("rollout.claude_code", agent="claude-code", model=args.model):
+        async with provider.session(cfg, call_deadline=1800) as sandbox:
+            async with proxy.session(sandbox) as handle:
+                # `ClaudeCodeInput.base_url`/`api_key` win over env in the
+                # agent's `_build_env`, so route the CLI through the tunnel via
+                # the dedicated fields (the loopback URL + placeholder key —
+                # the real upstream key stays host-side on the client).
+                result = await sandbox.remote(claude_code_run, ClaudeCodeInput(
+                    instruction=args.instruction,
+                    model=args.anthropic_model,
+                    workdir=args.workdir,
+                    max_turns=args.max_turns,
+                    base_url=handle.url,
+                    api_key=ANTHROPIC_PLACEHOLDER_API_KEY,
+                ))
 
     if args.otlp_endpoint:
         trace.force_flush()  # push batched spans to the OTLP backend before exit
 
     print(f"\nclaude returncode={result.returncode}")
-    traj = bridge.store.trajectory(bridge.session_id)
-    print(f"{len(traj)} LLM call(s) captured for session {bridge.session_id}:")
-    for i, rec in enumerate(traj):
-        u = rec.usage
-        print(f"  call[{i}] {rec.family.value} {rec.status} in={u.prompt_tokens} out={u.completion_tokens}")
 
 
 if __name__ == "__main__":

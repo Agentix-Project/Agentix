@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from agentix.bridge.transform import (
+from agentix.bridge.clients._anthropic_transforms import (
     anthropic_messages_to_openai,
     anthropic_sse,
     count_anthropic_tokens,

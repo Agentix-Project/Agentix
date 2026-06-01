@@ -1,9 +1,8 @@
-"""Anthropic Messages <-> OpenAI Chat Completions translation.
+"""Pure Anthropic ↔ OpenAI shape converters.
 
-Ported and trimmed from the previous mitmproxy bridge. The functions
-here are pure: no SIO, no HTTP, no env-var reads. The proxy / host
-glue passes in the model name, optional extra fields, and gets
-JSON-serialisable dicts back.
+Used only by `clients.anthropic_from_openai`. The functions here are
+JSON-in, JSON-out — no I/O, no SDK calls, no spans. Anyone writing a
+custom Anthropic-on-OpenAI client can import these directly.
 """
 
 from __future__ import annotations
@@ -119,11 +118,12 @@ def openai_to_anthropic_messages(
 
 
 def anthropic_sse(body: dict[str, Any]) -> bytes:
-    """Render an Anthropic Messages response as a non-streaming SSE blob.
+    """Render an Anthropic Messages response as a single-shot SSE blob.
 
-    Some clients ask for streaming but a single chunked replay is OK
-    for capture/replay scenarios — the chunks aren't interleaved with
-    upstream tool calls anyway.
+    Some Anthropic SDKs always open a streaming connection; replaying a
+    completed response as a sequence of `message_start` /
+    `content_block_*` / `message_stop` events gives them a valid wire
+    stream without actually streaming from the upstream.
     """
     content = body.get("content") or []
     usage = body.get("usage") or {}
@@ -226,11 +226,8 @@ class AnthropicCountTokens:
 def count_anthropic_tokens(body: dict[str, Any]) -> AnthropicCountTokens:
     """Approximate input-token count for `/v1/messages/count_tokens`.
 
-    Anthropic's real count endpoint is tokenizer-specific; a 1-char-per-
-    4-bytes estimate is good enough for capture-and-replay purposes. The
-    function lives here next to the request transformer so the gateway
-    has a single place to look for Anthropic shape work.
-    """
+    A 1-char-per-4-bytes estimate good enough for capture/replay; keeps
+    the adapter standalone (no tokenizer dependency)."""
     chars = 0
     system = body.get("system")
     if isinstance(system, str):
@@ -277,12 +274,6 @@ def _messages_anthropic_to_openai(messages: list[Any]) -> list[dict[str, Any]]:
             out.append({"role": role, "content": str(content)})
             continue
 
-        # Collect a turn's blocks, then emit in the order OpenAI's tool
-        # protocol requires: an assistant turn becomes ONE message (text +
-        # all tool_calls, never a stray text message wedged between the
-        # tool_calls and their results); a user turn emits its tool_results
-        # as `tool` messages first (they answer the prior tool_calls), then
-        # any user text.
         text_parts: list[str] = []
         tool_calls: list[dict[str, Any]] = []
         tool_results: list[dict[str, Any]] = []

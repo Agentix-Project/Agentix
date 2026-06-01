@@ -1,76 +1,27 @@
-"""abridge as a `/trace` span producer.
+"""abridge clients as OTel `/trace` span producers.
 
-Each LLM call routed through the proxy opens one span with OTel GenAI
-attributes; tool calls in the response surface as a span event. abridge
-only *produces* spans into core `/trace` — export to an OTLP backend is
-the Processor's job, exercised here with a capture Processor.
+abridge core does NO tracing — it never opens spans, never inspects
+shapes. Each bundled client opens its OWN `trace.span(...)` inside its
+`@on` method (caller-side `trace.span` doesn't propagate across the
+HTTP/SIO boundary, so the client is the right scope owner). The
+populate helpers stamp OTel GenAI attrs on that client-opened span.
+
+Tests verify each bundled client emits a span with the expected attrs;
+the "silent client" test confirms abridge core doesn't inject anything
+when the client doesn't.
 """
 
 from __future__ import annotations
 
+import asyncio
+from typing import Any
+
 import agentix.bridge.proxy as proxy_mod
+import httpx
 import pytest
-from agentix.bridge import detect
-from agentix.bridge.detection import ApiFamily
-from agentix.bridge.storage import make_record
+from agentix.bridge import ClientResponse, Proxy, Request, on
 
 from agentix.utils import trace
-
-
-def test_llm_request_attrs_follow_genai_conventions() -> None:
-    attrs = proxy_mod._llm_request_attrs(
-        ApiFamily.ANTHROPIC_MESSAGES,
-        {"model": "claude-x", "max_tokens": 256, "temperature": 0.2},
-        session_id="s1",
-        record_id="r1",
-    )
-    assert attrs["gen_ai.operation.name"] == "chat"
-    assert attrs["gen_ai.system"] == "anthropic"
-    assert attrs["gen_ai.request.model"] == "claude-x"
-    assert attrs["gen_ai.request.max_tokens"] == 256
-    assert attrs["gen_ai.request.temperature"] == 0.2
-    assert attrs["agentix.session_id"] == "s1"
-    assert attrs["agentix.request_id"] == "r1"
-
-
-def test_tool_call_names_from_both_families() -> None:
-    openai_resp = {
-        "choices": [
-            {"message": {"tool_calls": [{"function": {"name": "search"}}, {"function": {"name": "open"}}]}}
-        ]
-    }
-    assert proxy_mod._tool_call_names(openai_resp, family=ApiFamily.OPENAI_CHAT_COMPLETIONS) == [
-        "search",
-        "open",
-    ]
-    anthropic_resp = {"content": [{"type": "tool_use", "name": "bash"}, {"type": "text", "text": "hi"}]}
-    assert proxy_mod._tool_call_names(anthropic_resp, family=ApiFamily.ANTHROPIC_MESSAGES) == ["bash"]
-
-
-def test_apply_response_span_sets_usage_and_tool_event() -> None:
-    record = make_record(
-        request_id="r1",
-        session_id="s1",
-        family=ApiFamily.OPENAI_CHAT_COMPLETIONS,
-        started_at=0.0,
-        request_path="/v1/chat/completions",
-        request_body={},
-        upstream_body={},
-        response_body={
-            "model": "gpt-4o",
-            "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
-            "choices": [{"message": {"tool_calls": [{"function": {"name": "grep"}}]}}],
-        },
-    )
-    with trace.span("chat test") as sp:
-        proxy_mod._apply_response_span(sp, record)
-
-    assert sp.attrs["gen_ai.usage.input_tokens"] == 5
-    assert sp.attrs["gen_ai.usage.output_tokens"] == 3
-    assert sp.attrs["gen_ai.response.model"] == "gpt-4o"
-    tool_events = [e for e in sp.events if e.name == "gen_ai.tool_calls"]
-    assert len(tool_events) == 1
-    assert tool_events[0].attributes["names"] == ["grep"]
 
 
 class _CaptureProcessor(trace.Processor):
@@ -92,89 +43,118 @@ def capture_spans():
 
 
 @pytest.mark.asyncio
-async def test_request_through_proxy_emits_span(wired, capture_spans) -> None:
-    import httpx
-
+async def test_anthropic_client_emits_genai_span(wired, capture_spans) -> None:
+    """`AnthropicFromOpenAIClient.messages` opens its own span named
+    `anthropic messages <model>` and `populate_anthropic_span` stamps
+    OTel GenAI attrs onto it."""
     handle = wired["handle"]
-    async with httpx.AsyncClient(base_url=handle.openai_base_url, timeout=10) as c:
+    async with httpx.AsyncClient(base_url=handle.url, timeout=10) as c:
         await c.post(
-            "/chat/completions",
-            json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}]},
+            "/v1/messages",
+            json={
+                "model": "claude-3-haiku",
+                "max_tokens": 32,
+                "system": "be brief",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
         )
 
-    llm_spans = [s for s in capture_spans.spans if s.attrs.get("gen_ai.operation.name") == "chat"]
-    assert len(llm_spans) == 1
-    sp = llm_spans[0]
-    assert sp.attrs["gen_ai.request.model"] == "gpt-4o-mini"
-    assert sp.attrs["agentix.session_id"] == "sess-test"
+    host = [s for s in capture_spans.spans if s.name.startswith("anthropic messages")]
+    assert len(host) == 1
+    sp = host[0]
+    assert sp.attrs["gen_ai.system"] == "anthropic"
+    assert sp.attrs["gen_ai.request.model"] == "claude-3-haiku"
+    assert sp.attrs["gen_ai.request.max_tokens"] == 32
+    assert sp.attrs["gen_ai.prompt.0.role"] == "system"
+    assert sp.attrs["gen_ai.prompt.0.content"] == "be brief"
+    assert sp.attrs["gen_ai.prompt.1.role"] == "user"
+    assert sp.attrs["gen_ai.prompt.1.content"] == "hi"
     assert sp.attrs["gen_ai.usage.input_tokens"] == 7
-    assert sp.status != "error"
-
-
-def test_detect_still_classifies_paths() -> None:
-    assert detect("/v1/messages") is ApiFamily.ANTHROPIC_MESSAGES
-
-
-def test_span_carries_prompt_and_completion_content():
-    """Issue: LangSmith showed only tokens. Spans must also carry the prompt +
-    completion text as gen_ai.prompt.*/completion.* (what backends render)."""
-    attrs = proxy_mod._llm_request_attrs(
-        ApiFamily.ANTHROPIC_MESSAGES,
-        {"model": "m", "system": "sys", "messages": [{"role": "user", "content": "hello"}]},
-        session_id="s", record_id="r",
-    )
-    assert attrs["gen_ai.prompt.0.role"] == "system"
-    assert attrs["gen_ai.prompt.0.content"] == "sys"
-    assert attrs["gen_ai.prompt.1.role"] == "user"
-    assert attrs["gen_ai.prompt.1.content"] == "hello"
-
-    rec = make_record(
-        request_id="r", session_id="s", family=ApiFamily.ANTHROPIC_MESSAGES,
-        started_at=0.0, request_path="/v1/messages", request_body={}, upstream_body={},
-        response_body={"content": [{"type": "text", "text": "world"}],
-                       "usage": {"input_tokens": 1, "output_tokens": 1}},
-    )
-    with trace.span("x") as sp:
-        proxy_mod._apply_response_span(sp, rec)
-    assert sp.attrs["gen_ai.completion.0.role"] == "assistant"
-    assert sp.attrs["gen_ai.completion.0.content"] == "world"
-
-
-def test_handle_request_span_nests_under_parent():
-    """Issue: 11 separate traces. With parent ids, the LLM span shares the
-    rollout's trace_id and parent_id -> one nested trace."""
-    p = proxy_mod.trace.Span(span_id="rootspan", trace_id="roottrace", parent_id=None, name="rollout")
-    with proxy_mod.trace.span("chat m", parent=p) as sp:
-        pass
-    assert sp.trace_id == "roottrace"
-    assert sp.parent_id == "rootspan"
+    assert sp.attrs["gen_ai.usage.output_tokens"] == 4
+    assert sp.attrs["gen_ai.completion.0.content"] == "hello from upstream"
 
 
 @pytest.mark.asyncio
-async def test_bridge_cm_owns_root_span_and_propagates_to_proxy():
-    """`async with bridge:` opens ONE rollout span; start_proxy captures it and
-    forwards its ids to the sandbox proxy, so all LLM spans nest under it."""
-    from agentix.bridge import Bridge, OpenAIClient
+async def test_openai_client_emits_genai_span(wired, capture_spans) -> None:
+    """`OpenAIClient.chat` opens `openai chat <model>` span; OpenAI-shape
+    attrs land on it."""
+    handle = wired["handle"]
+    async with httpx.AsyncClient(base_url=handle.url, timeout=10) as c:
+        await c.post(
+            "/v1/chat/completions",
+            json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}]},
+        )
+
+    host = [s for s in capture_spans.spans if s.name.startswith("openai chat")]
+    assert len(host) == 1
+    sp = host[0]
+    assert sp.attrs["gen_ai.system"] == "openai"
+    assert sp.attrs["gen_ai.request.model"] == "gpt-4o-mini"
+    assert sp.attrs["gen_ai.usage.input_tokens"] == 7
+    assert sp.attrs["gen_ai.usage.output_tokens"] == 4
+    assert sp.attrs["gen_ai.completion.0.content"] == "hello from upstream"
+
+
+@pytest.mark.asyncio
+async def test_silent_client_emits_no_spans(capture_spans) -> None:
+    """A custom client that opens no spans and calls no populate helper
+    produces zero spans. Shape-blindness contract: abridge core never
+    injects anything; observability is entirely the client's choice."""
+
+    class _Silent:
+        @on("/anything")
+        async def handle(self, request: Request) -> ClientResponse:
+            return ClientResponse.json({"ok": True})
+
+    proxy = Proxy(_Silent())
+    captured_emits: list[tuple[str, Any]] = []
+
+    async def fake_emit(event: str, data: Any = None, **_: Any) -> None:
+        captured_emits.append((event, data))
+
+    proxy.emit = fake_emit  # type: ignore[method-assign]
+    await proxy.trigger_event(
+        "/anything",
+        {"request_id": "rid-1", "data": {"body": {"x": 1}}},
+    )
+    await asyncio.sleep(0.05)  # let the detached handler task finish
+
+    # Zero spans emitted — neither Proxy nor the silent client opened one.
+    assert len(capture_spans.spans) == 0
+    result_events = [(e, d) for e, d in captured_emits if e.endswith(":result")]
+    assert len(result_events) == 1
+
+
+@pytest.mark.asyncio
+async def test_proxy_session_runs_start_stop_without_tracing():
+    """`proxy.session(sandbox)` doesn't open any span on its own — it's
+    just start + stop sugar. The caller wraps in `trace.span(...)` if
+    they want rollout grouping."""
+
+    class _Silent:
+        @on("/_unused")
+        async def _(self, request: Request) -> ClientResponse:
+            return ClientResponse.json({})
 
     class _FakeSandbox:
         def __init__(self) -> None:
-            self.captured: dict[str, object] = {}
+            self.remote_calls: list[tuple[Any, dict[str, Any]]] = []
 
         def register_namespace(self, ns: object) -> None:
             pass
 
         async def remote(self, fn, **kwargs):  # noqa: ANN001
-            self.captured = kwargs
-            return proxy_mod.ProxyHandle(
-                proxy_id="p", url="http://127.0.0.1:1", port=1, anthropic_base_url="x", openai_base_url="y"
-            )
+            self.remote_calls.append((fn, kwargs))
+            return proxy_mod.TunnelHandle(url="http://127.0.0.1:1", port=1)
 
-    bridge = Bridge(OpenAIClient(base_url="http://x", api_key="k", model="m"))
-    sandbox = _FakeSandbox()
-    async with bridge:
-        root = trace.get_current_span()
-        assert root is not None and root.name == "abridge"
-        await bridge.start_proxy(sandbox, family="anthropic")
+    proxy = Proxy(_Silent())
+    sandbox: Any = _FakeSandbox()
+    async with proxy.session(sandbox) as handle:
+        assert handle.url == "http://127.0.0.1:1"
 
-    assert sandbox.captured["parent_trace_id"] == root.trace_id
-    assert sandbox.captured["parent_span_id"] == root.span_id
+    # Two remote calls: tunnel start, tunnel stop.
+    assert len(sandbox.remote_calls) == 2
+    start_kwargs = sandbox.remote_calls[0][1]
+    assert "paths" in start_kwargs
+    assert "session_id" not in start_kwargs  # session_id lives on the Client now
+    assert sandbox.remote_calls[-1][1] == {"handle": handle}

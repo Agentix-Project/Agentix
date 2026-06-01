@@ -1,99 +1,193 @@
 # abridge
 
-`agentix-bridge` is the Agentix LLM gateway. It runs a small HTTP
-proxy inside the sandbox that captures Anthropic Messages and OpenAI
-Chat Completions traffic, ferries each request to the host over the
-existing Agentix Socket.IO connection, and returns the response.
-Every captured call is materialised as a `CompletionRecord` on the
-host so a caller can attach it to a rollout, feed an RL buffer, or
-score a trajectory.
+`agentix-bridge` is the Agentix HTTP tunnel. Inside the sandbox it runs
+a tiny HTTP server on `127.0.0.1` that catches your agent's outbound
+calls and ferries each one over Agentix's Socket.IO connection to the
+host. On the host, a `Proxy` routes by URL path to `@on(path)`-decorated
+handler methods you supply. The handler decides what happens (POST
+upstream, translate shapes, replay, mock) and returns a
+`ClientResponse`; the bridge ferries the bytes back to the agent.
 
 ```text
 agent in sandbox
-  -> http://127.0.0.1:<port>  (sandbox proxy: detect + translate + capture)
-  -> Agentix /abridge SIO namespace
-  -> host OpenAICompatibleClient (POST /chat/completions upstream)
-  <- response (translated back to Anthropic if the agent asked for it)
+  -> http://127.0.0.1:<port>/<declared path>    (sandbox tunnel, byte forward)
+  -> Agentix /abridge SIO namespace             (SIO event name == URL path)
+  -> host Proxy → your @on(path) method         (your code)
+  <- ClientResponse (bytes + media_type)
 ```
 
-The real upstream API key lives only on the host. Inside the sandbox,
-agents see a regular HTTP service on `127.0.0.1`; no TLS interception,
-no mitmproxy subprocess.
+abridge's core is **shape- and protocol-blind**. It doesn't know
+Anthropic from OpenAI, doesn't look at message bodies, doesn't predefine
+event names. Bundled handlers in `agentix.bridge.clients` cover OpenAI
+and Anthropic; the same machinery handles any HTTP protocol — MCP
+forwarding via one `@on("/mcp")`, a webhook receiver, a custom RPC.
 
 ## Install
 
 ```bash
-pip install agentix-bridge
+pip install agentix-bridge[openai]      # OpenAIClient + AnthropicFromOpenAIClient
+pip install agentix-bridge[anthropic]   # AnthropicClient
+pip install agentix-bridge[all]         # both SDKs
+pip install agentix-bridge              # core only; bring your own handler classes
 ```
 
-## Usage
+The provider SDKs (`openai`, `anthropic`) are **optional extras** —
+they're only needed for the bundled clients that use them. Custom
+handlers can use raw httpx, mocks, or anything else without pulling
+either SDK.
 
-The agent runs **inside** the sandbox; `bridged` brings the proxy up
-around it (and tears it down after), points the SDK base-URL env vars at
-the proxy, and runs sync agents off the event loop so the proxy stays
-responsive. The host registers the consumer that forwards to the real
-endpoint and captures every call.
+## Five-minute usage
+
+### Anthropic agent → OpenAI upstream (Claude Code, Anthropic SDK)
 
 ```python
-import uuid
-from agentix.bridge import BridgeConfig, OpenAICompatibleClient, InMemoryStore, bridged
-from my_agent import solve   # an importable agent callable (NOT a __main__ function)
+from agentix.bridge import Proxy
+from agentix.bridge.clients import AnthropicFromOpenAIClient
 
-store = InMemoryStore()
-host = OpenAICompatibleClient(
+client = AnthropicFromOpenAIClient(
     base_url="https://api.openai.com/v1",   # OpenAI / OpenRouter / vLLM / your gateway
     api_key="sk-...",
-    model="gpt-4o-mini",                    # pin the upstream model (optional)
-    store=store,
+    upstream_model="gpt-4o",                # the agent keeps sending claude-* model ids
 )
+proxy = Proxy(client)
 
-session_id = uuid.uuid4().hex
-async with provider.session(SandboxConfig(...)) as sandbox:
-    sandbox.register_namespace(host)        # host half of /abridge — before first remote
-    answer = await sandbox.remote(
-        bridged, solve, task, _bridge=BridgeConfig(session_id=session_id)
-    )
-
-# Agent-eye text trajectory for this rollout (token-level data lives in
-# your gateway, keyed by the same session_id):
-for rec in store.trajectory(session_id):
-    print(rec.request_id, rec.family.value, rec.usage.total_tokens)
+async with provider.session(cfg) as sandbox:
+    async with proxy.session(sandbox) as handle:
+        await sandbox.remote(agent, env=client.environ(handle))
 ```
 
-The agent (`solve`) is pristine — it just constructs the Anthropic /
-OpenAI SDK and calls it; `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` already
-point at the in-sandbox proxy. It must be an **importable** function
-(`module::qualname`), not defined in the `__main__` script, so it
-resolves inside the sandbox.
+`client.environ(handle)` returns
+`{"ANTHROPIC_BASE_URL": ..., "ANTHROPIC_API_KEY": "<placeholder>"}`.
+The placeholder key matches Anthropic's real key format
+(`sk-ant-api03-...`) so SDK-side validation passes; the real upstream
+credential lives only on the host (the wrapped OpenAI client).
 
-`base_url` is just an OpenAI-compatible endpoint — OpenAI, Azure, vLLM,
-OpenRouter, or a separate gateway (e.g. an SGLang RL wrapper). abridge
-forwards `x-session-id` / `x-request-id` headers so such a gateway can
-group its own token-level trajectory by session.
+### OpenAI agent → OpenAI upstream
 
-### Tracing
+```python
+from agentix.bridge import Proxy
+from agentix.bridge.clients import OpenAIClient
+from agentix.bridge.clients.openai import PLACEHOLDER_API_KEY
 
-Each call becomes a `/trace` span tagged per OpenTelemetry GenAI
-conventions (`gen_ai.request.model`, `gen_ai.usage.*`, tool calls as a
-span event). abridge only *produces* spans; register a `trace.Processor`
-to export them to any OTel backend.
+client = OpenAIClient(base_url=..., api_key=..., model="gpt-4o")
+proxy = Proxy(client)
 
-## Modules
+async with proxy.session(sandbox) as handle:
+    await sandbox.remote(agent, base_url=f"{handle.url}/v1", api_key=PLACEHOLDER_API_KEY)
+```
 
-* `agentix.bridge.proxy` — sandbox HTTP server + SIO namespace.
-* `agentix.bridge.client` — host `OpenAICompatibleClient` + record sink.
-* `agentix.bridge.detection` — request API-family classification.
-* `agentix.bridge.transform.anthropic` — Anthropic <-> OpenAI shape
-  converters (request + response + SSE renderer + count-tokens
-  estimator). New families live as siblings under
-  `agentix.bridge.transform/`.
-* `agentix.bridge.storage` — `CompletionRecord`, `TokenUsage`,
-  `InMemoryStore`. Persistence sinks belong to consumers.
+`OpenAIClient` doesn't ship an `environ(handle)` helper — most OpenAI
+SDK callers construct the client with explicit `base_url=`/`api_key=`
+arguments rather than reading env vars.
+
+### Anthropic agent → native Anthropic upstream
+
+```python
+from agentix.bridge import Proxy
+from agentix.bridge.clients import AnthropicClient
+
+client = AnthropicClient(api_key="sk-ant-...")   # default base_url = api.anthropic.com
+proxy = Proxy(client)
+
+async with proxy.session(sandbox) as handle:
+    await sandbox.remote(agent, env=client.environ(handle))
+```
+
+## Writing your own handler
+
+Any class with `@on(path)`-decorated methods works. No base class to
+inherit, no Protocol to satisfy.
+
+```python
+from agentix.bridge import Proxy, Request, ClientResponse, AbridgeError, on
+
+class MyClient:
+    @on("/v1/messages")
+    async def messages(self, request: Request) -> ClientResponse:
+        # Inspect / route / mock / replay — whatever you want.
+        if some_condition:
+            raise AbridgeError("nope", status_code=503)  # in-band error to the agent
+        return ClientResponse.json({"id": "...", "content": [...], ...})
+
+proxy = Proxy(MyClient())
+```
+
+Common patterns:
+
+- **Per-call routing.** Inspect `request.body["model"]` and dispatch to
+  different upstreams.
+- **Replay.** Wrap a list of pre-captured responses; return the next
+  one on each call.
+- **RL trainer hook.** Pause/resume inside `messages()` while weights
+  swap; record logprobs from the upstream response.
+- **MCP / custom RPC.** One `@on("/mcp")` that dispatches on
+  `request.body["method"]` — abridge doesn't care about the protocol,
+  just the URL path.
+- **Test doubles.** Return canned dicts; no upstream needed.
+
+## Composing multiple handlers
+
+Two ways to combine handler sets in one Proxy. Pick whichever fits.
+
+### Variadic constructor (composition)
+
+```python
+proxy = Proxy(OpenAIClient(...), MyCustomTool(...))
+```
+
+The Proxy walks each client for `@on(...)` methods. Two clients
+registering the same path is a construction-time error.
+
+### Mixin (multiple inheritance)
+
+```python
+class WebFetchTool:
+    @on("/v1/webfetch")
+    async def fetch(self, request): ...
+
+class MyClient(OpenAIClient, WebFetchTool):
+    pass
+
+proxy = Proxy(MyClient(base_url=..., api_key=...))
+```
+
+Mixins must register disjoint paths. They don't call each other — each
+`@on(...)` method is independently routed.
+
+## Observability
+
+abridge's `Proxy` and tunnel do **no tracing themselves** — caller-side
+`trace.span(...)` doesn't propagate across the HTTP/SIO boundary, so
+each bundled client opens its own `trace.span(...)` inside its `@on`
+method (named like `openai chat <model>` / `anthropic messages
+<model>`). Inside that span the client calls `populate_openai_span` /
+`populate_anthropic_span` from `agentix.bridge.clients` to stamp OTel
+GenAI attrs (`gen_ai.request.model`, `gen_ai.usage.*`, prompt /
+completion content, tool-call names).
+
+Custom handlers can do the same — open a span, call the populate
+helpers (or set attrs directly with `trace.get_current_span()`).
+
+`@on(path)` itself wraps every invocation with DEBUG entry + INFO
+completion logs (elapsed-ms, status code). Wire-level errors come from
+`Proxy._dispatch_request` at WARNING / EXCEPTION level. Register a
+`trace.Processor` (e.g. `agentix.plugins.trace-otel`) to export to
+LangSmith / Langfuse / Datadog / any OTel backend.
+
+## Module layout
+
+```
+agentix/bridge/
+├── proxy.py                       # Proxy + @on + sandbox tunnel + wire types
+└── clients/                       # bundled handler implementations
+    ├── openai.py                  # OpenAIClient (openai SDK) + PLACEHOLDER_API_KEY
+    ├── anthropic.py               # AnthropicClient (anthropic SDK) + environ() + PLACEHOLDER_API_KEY
+    ├── anthropic_from_openai.py   # AnthropicFromOpenAIClient (openai SDK + translation) + environ()
+    ├── _genai_span.py             # populate_openai_span / populate_anthropic_span
+    └── _anthropic_transforms.py   # pure Anthropic↔OpenAI converters
+```
 
 ## What's next
 
-See [ROADMAP.md](ROADMAP.md) for the medium-term plan: real streaming
-proxy, per-call upstream routing, replay mode, tracing integration,
-Gemini / Bedrock / Cohere shape converters, and the eventual
-training-bridge pause/resume surface (which lands in
-`agentix/gateway/`, not here).
+See [ROADMAP.md](ROADMAP.md): real streaming, replay client, Gemini /
+Bedrock / Cohere clients, and the training-bridge pause/resume surface.

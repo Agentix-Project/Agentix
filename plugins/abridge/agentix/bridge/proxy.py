@@ -1,105 +1,256 @@
-"""Sandbox-side LLM proxy. Captures Anthropic/OpenAI requests inside
-the sandbox and ferries them to the host.
+"""abridge core: in-sandbox HTTP tunnel + host-side `Proxy` dispatcher.
 
 ```
-agent -> http://127.0.0.1:<port>/v1/messages
-              | detect family
-              | transform Anthropic -> OpenAI (if needed)
-              | capture record
-              | SIO request -> /abridge "llm_call"
-              v
-            host (`Bridge`)
-              | call real OpenAI-compatible upstream
-              | return JSON
-              v
-agent <- (transformed back to Anthropic if needed)
+agent  ──(HTTP POST /<path>)──▶  sandbox tunnel (this module, sandbox side)
+                                    │ SIO event = path; payload = body
+                                    ▼
+                                 host  ──▶  Proxy (this module, host side)
+                                               │  finds the matching @on(path)
+                                               │  method on a user `client` and
+                                               │  awaits it
+                                               ▼
+                                           user code   ──▶  upstream service
+                                                              ▲
+                                                              │  ClientResponse
+                                    ◀───────────────────────  │  (bytes + media_type)
+agent  ◀──(HTTP response)──  sandbox tunnel writes back verbatim
 ```
 
-Three reasons we run a plain HTTP server (no mitmproxy) inside the
-sandbox:
+abridge's core is shape- and protocol-blind: it's a tunnel that ferries
+HTTP requests by URL path, nothing more. *What* to do with the captured
+request (parse, translate, route, replay, mock) lives in user-supplied
+handler classes via `@on(path)`-decorated methods. The bundled
+`clients/` package ships LLM forwarders (`OpenAIClient`,
+`AnthropicClient`, …), but the same machinery handles any HTTP
+protocol that fits the request/response shape — e.g., MCP forwarding
+through a single `@on("/mcp")` that dispatches on the JSON-RPC body's
+`method` field, a webhook receiver, a custom RPC.
 
-  1. Zero extra system binaries — the previous bridge needed
-     `mitmdump` plus a trust-store-aware install. A FastAPI + uvicorn
-     setup is already present in the bundle.
-  2. The agent harnesses (Anthropic SDK, OpenAI SDK, mini-swe-agent's
-     LiteLLM) accept a base URL override (`ANTHROPIC_BASE_URL`,
-     `OPENAI_BASE_URL`), so rerouting to `http://127.0.0.1:<port>` is
-     a one-env-var move; no TLS interception needed.
-  3. The proxy is a single Python module that the host can introspect
-     for which requests have flown through it. No subprocess to babysit
-     and no mitmproxy hook IPC.
+Two pieces in one file because they share the wire protocol:
+
+  * **Sandbox side**: `_start_tunnel` / `_stop_tunnel` — async functions
+    invoked via `sandbox.remote(...)`. They run a FastAPI app that
+    listens on `127.0.0.1:<port>`, registers one POST route per declared
+    path (whitelist; nothing else gets through), and SIO-emits each
+    captured request on an event named after the path.
+  * **Host side**: `Proxy(AsyncClientNamespace)` — the user-facing
+    object. Discovers `@on(path)` methods on any number of handler
+    objects (mixins, composition — anything), wires each as the SIO
+    handler for that path-named event, and exposes `start(sandbox)` /
+    `stop(sandbox)` / `session(sandbox)` for tunnel lifecycle.
+
+The two halves never share a process; they only share the path strings
+that the host derives from `@on(...)` and ships to the sandbox at
+`start`.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import socket
 import time
-import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol, TypeVar, cast, runtime_checkable
 
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
+from fastapi import Request as FastAPIRequest
 from fastapi.responses import JSONResponse, Response
 
 import agentix
-from agentix.utils import trace
+from agentix import AsyncClientNamespace, RemoteSioError, Sandbox
+from agentix.runtime.shared.codec import unpack as _msgpack_unpack
 
-from .detection import ApiFamily, detect
-from .storage import CompletionRecord, InMemoryStore, make_record
-from .transform import (
-    anthropic_messages_to_openai,
-    anthropic_sse,
-    count_anthropic_tokens,
-    openai_to_anthropic_messages,
-)
-
-logger = logging.getLogger("agentix.bridge.proxy")
+logger = logging.getLogger(__name__)
 
 NAMESPACE = "/abridge"
-REQUEST_EVENT = "llm_call"
-RECORD_EVENT = "completion_record"
 
 
-# ── sandbox-side: HTTP proxy + SIO emitter ────────────────────────────────
+# ── wire types ───────────────────────────────────────────────────────────
+
+
+class AbridgeError(Exception):
+    def __init__(self, message: str, *, status_code: int = 502) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+
+
+@dataclass(frozen=True, slots=True)
+class Request:
+    """One inbound HTTP call captured by the sandbox tunnel.
+
+    `path` is the URL path the agent hit (matches the `@on(...)` value
+    that routed this request); `body` is the raw JSON the agent sent.
+    Nothing else — the tunnel ferries the body verbatim and stamps no
+    headers. Rollout identity (session_id, per-call request_id) lives
+    on the `Client` instance, which adds `x-session-id` /
+    `x-request-id` to the upstream call itself.
+    """
+
+    path: str
+    body: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class ClientResponse:
+    """What an `@on` handler returns to the bridge.
+
+    `body` is written to the agent's HTTP socket verbatim with
+    `media_type` as the Content-Type and `status_code` as the HTTP
+    status. Two constructors cover the common cases:
+
+      * `ClientResponse.json(dict)` — plain JSON response.
+      * `ClientResponse.sse(bytes, ...)` — pre-rendered SSE blob for
+        streaming agents (e.g. Anthropic SDK with `stream=true`).
+    """
+
+    body: bytes
+    media_type: str = "application/json"
+    status_code: int = 200
+
+    @classmethod
+    def json(cls, body: dict[str, Any], *, status_code: int = 200) -> ClientResponse:
+        return cls(
+            body=json.dumps(body).encode(),
+            media_type="application/json",
+            status_code=status_code,
+        )
+
+    @classmethod
+    def sse(cls, body: bytes, *, status_code: int = 200) -> ClientResponse:
+        return cls(body=body, media_type="text/event-stream", status_code=status_code)
+
+
+# ── handler type + Client marker + decorator ────────────────────────────
+
+
+# A handler is an `async def fn(self, request: Request) -> ClientResponse`
+# method on a user class, bound to its instance when `Proxy` collects it.
+# `Handler` is the bound shape (no `self`).
+Handler = Callable[[Request], Awaitable[ClientResponse]]
+
+
+@runtime_checkable
+class Client(Protocol):
+    """Marker protocol for any class with at least one `@on(path)`-decorated
+    method.
+
+    There's nothing for the protocol to require structurally — `@on` is a
+    method-level attribute, not a class-level signature, so `isinstance`
+    against `Client` doesn't validate handler presence (that's
+    `Proxy.__init__`'s job at construction time). The name exists so
+    `Proxy(*clients: Client)` reads as "pass handler classes here" rather
+    than `*clients: object`.
+    """
+
+
+# Preserves the decorated method's exact signature for IDE / pyright —
+# `@on(path)` is otherwise a pure side-effect (it tags the function with
+# an attribute), so callers and overriders see the unchanged signature.
+_F = TypeVar("_F", bound=Callable[..., Awaitable[ClientResponse]])
+
+_ON_ATTR = "_abridge_path"
+
+
+def on(path: str) -> Callable[[_F], _F]:
+    """Mark a method as the handler for HTTP `path`.
+
+    The decorated method must be `async def fn(self, request: Request) ->
+    ClientResponse`. abridge's `Proxy` walks the client's MRO at
+    construction, collects every `@on(path)`-decorated method, and routes
+    SIO events named after the path to the matching method.
+
+    The same `path` registered twice (e.g. by two different mixins) is a
+    construction-time `ValueError`. Two mixins handling unrelated paths
+    compose freely — that's the whole point.
+
+    The decorator also wraps the call with per-invocation logging:
+    DEBUG on entry, INFO on success with elapsed-ms + response status.
+    Errors propagate unlogged here — `Proxy._dispatch_request` owns the
+    wire-level error logging so the two layers don't double up.
+    """
+    if not isinstance(path, str) or not path.startswith("/"):
+        raise ValueError(f"@on(path) requires a path that starts with '/'; got {path!r}")
+
+    def decorator(fn: _F) -> _F:
+        @functools.wraps(fn)
+        async def wrapper(self: Any, request: Request) -> ClientResponse:
+            logger.debug("abridge → %s", path)
+            t0 = time.perf_counter()
+            response = await fn(self, request)
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            logger.info(
+                "abridge ✓ %s in %.1fms (status=%d, %s)",
+                path, elapsed_ms, response.status_code, response.media_type,
+            )
+            return response
+
+        setattr(wrapper, _ON_ATTR, path)
+        return cast(_F, wrapper)
+
+    return decorator
+
+
+def _collect_handlers(client: Client) -> dict[str, Handler]:
+    """Walk `type(client).__mro__` for `@on(...)`-decorated methods.
+
+    Subclass overrides win (we see them first); skipped if a same-named
+    attribute was already visited. Two different methods registering the
+    same path raise `ValueError`.
+    """
+    handlers: dict[str, Handler] = {}
+    seen_names: set[str] = set()
+    for cls in type(client).__mro__:
+        for name, attr in vars(cls).items():
+            if name in seen_names:
+                continue
+            seen_names.add(name)
+            path = getattr(attr, _ON_ATTR, None)
+            if not isinstance(path, str):
+                continue
+            if path in handlers:
+                raise ValueError(
+                    f"duplicate @on handler for path {path!r} "
+                    f"({type(client).__name__})"
+                )
+            handlers[path] = getattr(client, name)
+    return handlers
+
+
+# ── handles ──────────────────────────────────────────────────────────────
 
 
 @dataclass(slots=True)
-class ProxyHandle:
-    """Handle to a running sandbox proxy.
+class TunnelHandle:
+    """What `Proxy.start(sandbox)` returns: the sandbox-loopback URL the
+    agent's SDK should point at, plus the bound port for debugging."""
 
-    `anthropic_base_url` and `openai_base_url` are what an agent
-    harness should point its SDK at. Both URLs share the same server;
-    only the path family differs.
-    """
-
-    proxy_id: str
     url: str
     port: int
-    anthropic_base_url: str
-    openai_base_url: str
 
 
-@dataclass
+@dataclass(slots=True)
 class _Running:
-    handle: ProxyHandle
     server: uvicorn.Server
     task: asyncio.Task
 
 
+# Sandbox-process state. Keyed by url; populated in `_start_tunnel`,
+# consumed in `_stop_tunnel`.
 _running: dict[str, _Running] = {}
 
 
-class _SandboxNamespace(agentix.Namespace):
-    """SIO namespace the sandbox proxy uses to talk to the host.
+# ── sandbox-side: HTTP tunnel ────────────────────────────────────────────
 
-    Outbound events: `llm_call` (round-trip), `completion_record`
-    (fire-and-forget telemetry).
-    """
+
+class _SandboxNamespace(agentix.Namespace):
+    """SIO namespace the sandbox tunnel uses to talk to the host."""
 
     namespace = NAMESPACE
 
@@ -121,56 +272,44 @@ def _free_port(host: str) -> int:
         return s.getsockname()[1]
 
 
-async def start_proxy(
+async def _start_tunnel(
     *,
+    paths: list[str],
     host: str = "127.0.0.1",
     port: int = 0,
     request_timeout: float = 600.0,
-    session_id: str | None = None,
-    parent_trace_id: str | None = None,
-    parent_span_id: str | None = None,
-) -> ProxyHandle:
-    """Start the sandbox-side HTTP proxy.
-
-    Returns once the server is bound. Idempotent only per-call: each
-    invocation starts a fresh proxy with a new id, so call `stop_proxy`
-    when done. (For repeated agents in one sandbox, share the handle.)
-
-    `session_id`, when set, is stamped onto every captured call so the
-    host/gateway can group a rollout's LLM calls into one trajectory.
-    `Bridge.start_proxy(...)` wires this for you; the caller (host) supplies
-    the id so it can later query the gateway by the same key.
-    """
+) -> TunnelHandle:
+    """Sandbox entrypoint. Boots the FastAPI tunnel with one POST route
+    per path in the whitelist; everything else 404s."""
     ns = _get_namespace()
-    app = _build_app(
-        ns=ns,
-        request_timeout=request_timeout,
-        session_id=session_id,
-        parent_trace_id=parent_trace_id,
-        parent_span_id=parent_span_id,
-    )
+    app = FastAPI()
+
+    @app.get("/_health")
+    async def health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    for path in paths:
+        app.post(path)(_make_forwarder(
+            ns=ns, path=path, request_timeout=request_timeout,
+        ))
+
     bound_port = port or _free_port(host)
-    config = uvicorn.Config(app, host=host, port=bound_port, log_level="warning")
+    # `ws="none"`: tunnel handles HTTP POST only. Disabling WebSocket
+    # detection skips uvicorn's import of `websockets.legacy` (which is
+    # deprecated noise we don't need).
+    config = uvicorn.Config(app, host=host, port=bound_port, log_level="warning", ws="none")
     server = uvicorn.Server(config)
     task = asyncio.create_task(server.serve())
     await _wait_uvicorn_started(server)
 
-    proxy_id = uuid.uuid4().hex
     url = f"http://{host}:{bound_port}"
-    handle = ProxyHandle(
-        proxy_id=proxy_id,
-        url=url,
-        port=bound_port,
-        anthropic_base_url=url,
-        openai_base_url=f"{url}/v1",
-    )
-    _running[proxy_id] = _Running(handle=handle, server=server, task=task)
-    logger.info("abridge proxy %s listening on %s", proxy_id, url)
-    return handle
+    _running[url] = _Running(server=server, task=task)
+    logger.info("abridge tunnel listening on %s (paths=%s)", url, paths)
+    return TunnelHandle(url=url, port=bound_port)
 
 
-async def stop_proxy(handle: ProxyHandle) -> None:
-    rec = _running.pop(handle.proxy_id, None)
+async def _stop_tunnel(*, handle: TunnelHandle) -> None:
+    rec = _running.pop(handle.url, None)
     if rec is None:
         return
     rec.server.should_exit = True
@@ -186,355 +325,274 @@ async def _wait_uvicorn_started(server: uvicorn.Server) -> None:
     raise TimeoutError("uvicorn did not bind in time")
 
 
-def _build_app(
+def _make_forwarder(
     *,
     ns: _SandboxNamespace,
+    path: str,
     request_timeout: float,
-    session_id: str | None = None,
-    parent_trace_id: str | None = None,
-    parent_span_id: str | None = None,
-) -> FastAPI:
-    app = FastAPI()
+) -> Callable[[FastAPIRequest], Awaitable[Response]]:
+    """One FastAPI handler per path. Closes over `path` so the SIO event
+    name (= path) is fixed per route.
 
-    @app.get("/v1/_health")
-    async def health() -> dict[str, str]:
-        return {"status": "ok"}
+    The wire payload is just the agent's request body — no envelope, no
+    headers. Identity (session_id / record_id) belongs to the host-side
+    `Client`, which stamps `x-session-id` / `x-request-id` on the
+    upstream HTTP call it issues. The tunnel never sees them — it's a
+    pure byte ferry.
+    """
 
-    @app.post("/v1/messages")
-    async def anthropic_messages(request: Request) -> Response:
-        return await _handle_request(
-            ns=ns,
-            request=request,
-            api_path="/v1/messages",
-            request_timeout=request_timeout,
-            session_id=session_id,
-            parent_trace_id=parent_trace_id,
-            parent_span_id=parent_span_id,
-        )
-
-    @app.post("/v1/messages/count_tokens")
-    async def anthropic_count_tokens(request: Request) -> Response:
+    async def forward(request: FastAPIRequest) -> Response:
         body = await _read_json(request)
-        result = count_anthropic_tokens(body)
-        return JSONResponse({"input_tokens": result.input_tokens})
 
-    @app.post("/v1/chat/completions")
-    async def openai_chat_completions(request: Request) -> Response:
-        return await _handle_request(
-            ns=ns,
-            request=request,
-            api_path="/v1/chat/completions",
-            request_timeout=request_timeout,
-            session_id=session_id,
-            parent_trace_id=parent_trace_id,
-            parent_span_id=parent_span_id,
-        )
+        try:
+            # SIO event name IS the path; the host's `Proxy` has a
+            # matching handler registered under the same name. The wire
+            # payload is just the body — no wrapping envelope, no headers.
+            result = await asyncio.wait_for(
+                ns.request(path, body), timeout=request_timeout
+            )
+        except TimeoutError:
+            message = "tunnel timed out waiting for host"
+            logger.warning("abridge tunnel %s: %s", path, message)
+            return JSONResponse({"error": {"message": message}}, status_code=504)
+        except RemoteSioError as exc:
+            status = _status_from_remote_error(exc)
+            logger.warning(
+                "abridge tunnel %s: host raised %s: %s", path, exc.type, exc.message,
+            )
+            return JSONResponse({"error": {"message": exc.message}}, status_code=status)
 
-    return app
+        return _to_http_response(result)
+
+    return forward
 
 
-async def _read_json(request: Request) -> dict[str, Any]:
+async def _read_json(request: FastAPIRequest) -> dict[str, Any]:
     raw = await request.body()
     if not raw:
         return {}
     try:
-        return _json_loads(raw)
+        parsed = json.loads(raw)
     except ValueError:
         return {}
-
-
-def _json_loads(blob: bytes) -> dict[str, Any]:
-    import json as _json
-
-    parsed = _json.loads(blob)
     if not isinstance(parsed, dict):
-        raise ValueError("LLM request bodies must be JSON objects")
+        return {}
     return parsed
 
 
-async def _handle_request(
-    *,
-    ns: _SandboxNamespace,
-    request: Request,
-    api_path: str,
-    request_timeout: float,
-    session_id: str | None = None,
-    parent_trace_id: str | None = None,
-    parent_span_id: str | None = None,
-) -> Response:
-    body = await _read_json(request)
-    family = detect(api_path, body)
-    record_id = uuid.uuid4().hex
-    started_at = time.time()
-    # Synthetic carrier for the host's rollout span, so this LLM span nests
-    # under it (shared trace_id + parent_id) — one trace per rollout.
-    parent_span = (
-        trace.Span(span_id=parent_span_id, trace_id=parent_trace_id, parent_id=None, name="rollout")
-        if parent_span_id and parent_trace_id
-        else None
-    )
-
-    if family.is_anthropic:
-        upstream_body = anthropic_messages_to_openai(body)
-    else:
-        upstream_body = dict(body)
-    upstream_body["stream"] = False
-
-    payload = {
-        "record_id": record_id,
-        "session_id": session_id,
-        "family": family.value,
-        "request_path": api_path,
-        "upstream_body": upstream_body,
-        "client_stream": bool(body.get("stream")),
-        "anthropic_model": str(body.get("model") or "") if family.is_anthropic else None,
-    }
-
-    # One span per LLM call, opened around the in-flight request so its
-    # timing reflects what the agent observed (incl. the SIO round-trip).
-    # Ships over `/trace`; rollout calls correlate by `agentix.session_id`
-    # (cross-HTTP span parenting isn't available without the agent
-    # propagating traceparent, and the agent never intervenes).
-    with trace.span(
-        f"chat {body.get('model') or 'unknown'}",
-        parent=parent_span,
-        **_llm_request_attrs(family, body, session_id=session_id, record_id=record_id),
-    ) as sp:
-        try:
-            result = await asyncio.wait_for(ns.request(REQUEST_EVENT, payload), timeout=request_timeout)
-        except TimeoutError:
-            sp.set_error("proxy timed out waiting for host")
-            record = make_record(
-                request_id=record_id,
-                session_id=session_id,
-                family=family,
-                started_at=started_at,
-                request_path=api_path,
-                request_body=body,
-                upstream_body=upstream_body,
-                response_body=None,
-                status="timeout",
-                error="proxy timed out waiting for host",
-            )
-            await _emit_record(ns, record)
-            return JSONResponse(
-                {"error": {"type": "timeout", "message": record.error}}, status_code=504
-            )
-
-        if not isinstance(result, dict):
-            raise RuntimeError(f"abridge host returned non-dict result: {result!r}")
-        if "error" in result:
-            err = result["error"]
-            message = str(err.get("message") if isinstance(err, dict) else err)
-            sp.set_error(message)
-            record = make_record(
-                request_id=record_id,
-                session_id=session_id,
-                family=family,
-                started_at=started_at,
-                request_path=api_path,
-                request_body=body,
-                upstream_body=upstream_body,
-                response_body=None,
-                status="error",
-                error=message,
-            )
-            await _emit_record(ns, record)
-            status = int(err.get("status_code", 502)) if isinstance(err, dict) else 502
-            return JSONResponse({"error": {"type": "upstream_error", "message": message}}, status_code=status)
-
-        openai_response = result.get("response") or {}
-        if not isinstance(openai_response, dict):
-            raise RuntimeError("abridge host returned non-dict response")
-
-        if family.is_anthropic:
-            anthropic_body = openai_to_anthropic_messages(
-                openai_response, response_model=str(body.get("model") or "")
-            )
-            response_body: dict[str, Any] = anthropic_body
-            if body.get("stream"):
-                envelope = anthropic_sse(anthropic_body)
-                response: Response = Response(content=envelope, media_type="text/event-stream")
-            else:
-                response = JSONResponse(anthropic_body)
-        else:
-            response_body = openai_response
-            response = JSONResponse(openai_response)
-
-        record = make_record(
-            request_id=record_id,
-            session_id=session_id,
-            family=family,
-            started_at=started_at,
-            request_path=api_path,
-            request_body=body,
-            upstream_body=upstream_body,
-            response_body=response_body,
-        )
-        _apply_response_span(sp, record)
-        await _emit_record(ns, record)
-        return response
+def _to_http_response(result: object) -> Response:
+    if not isinstance(result, dict):
+        raise RuntimeError(f"abridge host returned non-dict result: {result!r}")
+    body_bytes = result.get("body") or b""
+    if not isinstance(body_bytes, (bytes, bytearray, memoryview)):
+        raise RuntimeError("abridge host returned non-bytes body")
+    media_type = str(result.get("media_type") or "application/json")
+    status_code = int(result.get("status_code", 200))
+    return Response(content=bytes(body_bytes), media_type=media_type, status_code=status_code)
 
 
-# ── OTel GenAI span attributes (abridge is a span producer; /trace owns export) ──
+def _status_from_remote_error(exc: RemoteSioError) -> int:
+    """`RemoteSioError(type, message)` carries no status code. We map
+    well-known exception type names to HTTP statuses; everything else
+    becomes 502."""
+    if exc.type == "UpstreamError":
+        # The client raised UpstreamError. The message format may include
+        # the status code, but it's not structured. Default 502.
+        return 502
+    return 502
 
 
-def _llm_request_attrs(
-    family: ApiFamily, body: dict[str, Any], *, session_id: str | None, record_id: str
-) -> dict[str, Any]:
-    """Initial span attributes from the request, per OTel GenAI conventions."""
-    attrs: dict[str, Any] = {
-        "gen_ai.operation.name": "chat",
-        "gen_ai.system": "anthropic" if family.is_anthropic else "openai",
-        "gen_ai.request.model": str(body.get("model") or ""),
-        "agentix.request_id": record_id,
-    }
-    if session_id:
-        attrs["agentix.session_id"] = session_id
-    for key, attr in (
-        ("max_tokens", "gen_ai.request.max_tokens"),
-        ("temperature", "gen_ai.request.temperature"),
-        ("top_p", "gen_ai.request.top_p"),
-    ):
-        if body.get(key) is not None:
-            attrs[attr] = body[key]
-
-    # Prompt content (system + messages) so backends show the input, not just
-    # tokens. GenAI `gen_ai.prompt.{i}.role/content` is what LangSmith/Langfuse read.
-    idx = 0
-    system = body.get("system")
-    if system:
-        attrs["gen_ai.prompt.0.role"] = "system"
-        attrs["gen_ai.prompt.0.content"] = _content_to_text(system)
-        idx = 1
-    for msg in body.get("messages") or []:
-        if not isinstance(msg, dict):
-            continue
-        attrs[f"gen_ai.prompt.{idx}.role"] = str(msg.get("role", "user"))
-        attrs[f"gen_ai.prompt.{idx}.content"] = _content_to_text(msg.get("content", ""))
-        idx += 1
-    return attrs
+# ── host-side: Proxy ─────────────────────────────────────────────────────
 
 
-def _content_to_text(content: Any) -> str:
-    """Flatten Anthropic/OpenAI message content (str or block list) to text."""
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, str):
-                parts.append(block)
-            elif isinstance(block, dict):
-                bt = block.get("type")
-                if bt == "text":
-                    parts.append(str(block.get("text", "")))
-                elif bt == "tool_use":
-                    parts.append(f"[tool_use {block.get('name', '')} {json.dumps(block.get('input') or {})}]")
-                elif bt == "tool_result":
-                    parts.append(f"[tool_result] {_content_to_text(block.get('content'))}")
-                else:
-                    parts.append(json.dumps(block, ensure_ascii=False))
-        return "\n".join(parts)
-    return str(content)
+class Proxy(AsyncClientNamespace):
+    """Host-side abridge: SIO namespace + sandbox-tunnel lifecycle +
+    `@on(path)`-based dispatch to one or more "client" objects.
 
+    Construction discovers handlers by walking `type(client).__mro__` for
+    `@on(path)`-decorated methods. Pass any number of clients (variadic):
+    a single mixin-composed object, or multiple independent handler
+    objects whose paths must not collide.
 
-def _response_content(rb: dict[str, Any], *, family: ApiFamily) -> Any:
-    if family.is_anthropic:
-        return rb.get("content")
-    choice = (rb.get("choices") or [{}])[0]
-    return (choice.get("message") or {}).get("content") if isinstance(choice, dict) else None
+    ```python
+    # Single object (mixin-composed handlers):
+    class MyClient(SomeHandlerMixin, AnotherHandlerMixin):
+        ...
+    proxy = Proxy(MyClient(...))
 
+    # Or compose at the constructor (multiple handler objects):
+    proxy = Proxy(SomeClient(...), AnotherClient(...))
 
-def _apply_response_span(sp: trace.Span, record: CompletionRecord) -> None:
-    """Backfill usage / response model / tool calls once the reply lands."""
-    sp.set_attributes(
-        **{
-            "gen_ai.usage.input_tokens": record.usage.prompt_tokens,
-            "gen_ai.usage.output_tokens": record.usage.completion_tokens,
-        }
-    )
-    rb = record.response_body
-    if not isinstance(rb, dict):
-        return
-    model = rb.get("model")
-    if isinstance(model, str) and model:
-        sp.set_attribute("gen_ai.response.model", model)
-    # Completion content so the backend shows the output, not just tokens.
-    sp.set_attribute("gen_ai.completion.0.role", "assistant")
-    sp.set_attribute("gen_ai.completion.0.content", _content_to_text(_response_content(rb, family=record.family)))
-    names = _tool_call_names(rb, family=record.family)
-    if names:
-        # The model's tool requests, derived from the response — no agent
-        # instrumentation. Full tool/observation span stitching (across
-        # calls) is a follow-up; it intersects the compaction / sub-agent
-        # open problems.
-        sp.add_event("gen_ai.tool_calls", names=names, count=len(names))
+    async with proxy.session(sandbox) as handle:
+        await sandbox.remote(agent, base_url=handle.url, ...)
+    ```
 
-
-def _tool_call_names(response_body: dict[str, Any], *, family: ApiFamily) -> list[str]:
-    names: list[str] = []
-    if family.is_anthropic:
-        for block in response_body.get("content") or []:
-            if isinstance(block, dict) and block.get("type") == "tool_use":
-                name = block.get("name")
-                if isinstance(name, str):
-                    names.append(name)
-        return names
-    for choice in response_body.get("choices") or []:
-        msg = choice.get("message") if isinstance(choice, dict) else None
-        for tc in (msg or {}).get("tool_calls") or []:
-            fn = tc.get("function") if isinstance(tc, dict) else None
-            name = (fn or {}).get("name")
-            if isinstance(name, str):
-                names.append(name)
-    return names
-
-
-async def _emit_record(ns: _SandboxNamespace, record: CompletionRecord) -> None:
-    """Fire-and-forget capture record to the host. Logging is best-effort."""
-    try:
-        await ns.emit(RECORD_EVENT, record.to_dict())
-    except Exception:
-        logger.exception("abridge: completion_record emit failed")
-
-
-# ── env helpers ───────────────────────────────────────────────────────────
-
-
-_PLACEHOLDER_KEY = "sk-abridge"
-
-
-def export_environ(handle: ProxyHandle) -> dict[str, str]:
-    """Env vars an agent harness should inherit to route through the proxy.
-
-    Pure function of the handle — safe to call host-side. Pre-fills the
-    standard base-URL overrides for the Anthropic SDK, OpenAI SDK, and
-    `LiteLLM`. The API-key values are a constant placeholder: SDKs refuse
-    to start without *some* key, but the real upstream credentials live
-    only on the host (the gateway substitutes them), so the placeholder
-    must never be a real key — reading one from the environment here would
-    leak it into the sandbox.
+    `session(sandbox)` is the recommended entry: registers the host
+    namespace, starts the in-sandbox tunnel, yields a `TunnelHandle`,
+    and tears it all down on exit. Use `start/stop` when you need
+    explicit lifecycle control. abridge core does no tracing — open
+    your own `trace.span(...)` around the session if you want OTel
+    grouping; the bundled clients populate it via `populate_*_span`.
     """
-    return {
-        "ANTHROPIC_BASE_URL": handle.anthropic_base_url,
-        "OPENAI_BASE_URL": handle.openai_base_url,
-        "OPENAI_API_BASE": handle.openai_base_url,
-        "ABRIDGE_PROXY_URL": handle.url,
-        "ANTHROPIC_API_KEY": _PLACEHOLDER_KEY,
-        "OPENAI_API_KEY": _PLACEHOLDER_KEY,
-    }
+
+    def __init__(self, *clients: Client) -> None:
+        super().__init__(NAMESPACE)
+        if not clients:
+            raise ValueError("Proxy requires at least one client with @on-decorated handlers")
+        self._handle: TunnelHandle | None = None
+
+        handlers: dict[str, Handler] = {}
+        for client in clients:
+            for path, method in _collect_handlers(client).items():
+                if path in handlers:
+                    raise ValueError(
+                        f"two clients register the same @on path {path!r}"
+                    )
+                handlers[path] = method
+        if not handlers:
+            raise ValueError(
+                "no @on-decorated handlers found on any client passed to Proxy(...)"
+            )
+        self._handlers: dict[str, Handler] = handlers
+        self.paths: tuple[str, ...] = tuple(handlers)
+
+    # ── SIO dispatch ───────────────────────────────────────────────────
+    #
+    # SIO event names contain `/` so the base class's `on_<event>` attribute
+    # lookup won't catch them at class-definition time — we override
+    # `trigger_event` to look the event up in `self._handlers` and run the
+    # standard request-handler envelope dance (unwrap `request_id`/`data`,
+    # call the user method, emit `<path>:result` or `<path>:error`).
+
+    async def trigger_event(self, event: str, *args: Any) -> Any:
+        if event in ("connect", "disconnect", "connect_error"):
+            return await super().trigger_event(event, *args)
+        method = self._handlers.get(event)
+        if method is None:
+            return await super().trigger_event(event, *args)
+
+        # Decode msgpack payload exactly like the base does, then run the
+        # handler detached so a slow upstream call doesn't block the SIO
+        # receive loop. `unpack` (public, agentix.runtime.shared.codec)
+        # accepts any buffer-protocol input — bytes, bytearray, memoryview.
+        if args and isinstance(args[0], (bytes, bytearray, memoryview)):
+            args = (_msgpack_unpack(args[0]),) + args[1:]
+        payload = args[0] if args else None
+
+        if not hasattr(self, "_detached_tasks"):
+            self._detached_tasks = set()
+        task = asyncio.create_task(self._dispatch_request(event, method, payload))
+        self._detached_tasks.add(task)
+        task.add_done_callback(self._detached_tasks.discard)
+        return None
+
+    async def _dispatch_request(
+        self, path: str, method: Handler, payload: object
+    ) -> None:
+        # SIO envelope = `{request_id, data}` (per `Namespace.request`);
+        # `data` IS the agent's request body — no further wrapping.
+        request_id = payload.get("request_id") if isinstance(payload, dict) else None
+        data = payload.get("data") if isinstance(payload, dict) else payload
+        body = data if isinstance(data, dict) else {}
+        request = Request(path=path, body=body)
+
+        try:
+            response = await method(request)
+        except AbridgeError as exc:
+            logger.warning(
+                "abridge %s: handler raised AbridgeError: %s (status=%d)",
+                path, exc.message, exc.status_code,
+            )
+            await self.emit(
+                f"{path}:error",
+                {
+                    "request_id": request_id,
+                    "error": {
+                        "type": "AbridgeError",
+                        "message": exc.message,
+                        "status_code": exc.status_code,
+                    },
+                },
+            )
+            return
+        except Exception as exc:  # noqa: BLE001 - any handler failure becomes a wire error
+            msg = f"{type(exc).__name__}: {exc}"
+            logger.exception("abridge %s: handler raised", path)
+            await self.emit(
+                f"{path}:error",
+                {
+                    "request_id": request_id,
+                    "error": {"type": type(exc).__name__, "message": msg},
+                },
+            )
+            return
+
+        # response is `ClientResponse`. The reply event name follows the
+        # `request_handler` convention so `Namespace.request(...)` resolves
+        # the future cleanly on the sandbox side.
+        await self.emit(
+            f"{path}:result",
+            {
+                "request_id": request_id,
+                "value": {
+                    "body": response.body,
+                    "media_type": response.media_type,
+                    "status_code": response.status_code,
+                },
+            },
+        )
+
+    # ── lifecycle ──────────────────────────────────────────────────────
+
+    async def start(self, sandbox: Sandbox) -> TunnelHandle:
+        """Register this `Proxy` as a host-side namespace, start the
+        in-sandbox tunnel with `self.paths` as the whitelist, and return
+        the `TunnelHandle` (loopback URL + port). Idempotent only per
+        lifecycle pair — a `start` without `stop` leaks the tunnel."""
+        sandbox.register_namespace(self)
+        self._handle = await sandbox.remote(_start_tunnel, paths=list(self.paths))
+        return self._handle
+
+    async def stop(self, sandbox: Sandbox) -> None:
+        if self._handle is None:
+            return
+        try:
+            await sandbox.remote(_stop_tunnel, handle=self._handle)
+        finally:
+            self._handle = None
+
+    @contextlib.asynccontextmanager
+    async def session(self, sandbox: Sandbox) -> AsyncIterator[TunnelHandle]:
+        """`start` + `stop`-on-exit sugar. Open your own `trace.span(...)`
+        around this CM if you want per-rollout grouping in OTel — abridge
+        core leaves tracing entirely to its clients and to caller code."""
+        handle = await self.start(sandbox)
+        try:
+            yield handle
+        finally:
+            await self.stop(sandbox)
+
+    # ── handy property ────────────────────────────────────────────────
+
+    @property
+    def url(self) -> str:
+        """Loopback URL the in-sandbox agent's SDK should point at. abridge
+        core stays shape-blind here — each bundled `clients.<name>` exposes
+        an `env_for(handle)` (or per-SDK convention) for prefixing this
+        URL the way the SDK expects."""
+        if self._handle is None:
+            raise RuntimeError("call await proxy.start(sandbox) (or use proxy.session) first")
+        return self._handle.url
 
 
 __all__ = [
+    "AbridgeError",
+    "Client",
+    "ClientResponse",
+    "Handler",
     "NAMESPACE",
-    "InMemoryStore",
-    "ProxyHandle",
-    "RECORD_EVENT",
-    "REQUEST_EVENT",
-    "export_environ",
-    "start_proxy",
-    "stop_proxy",
+    "Proxy",
+    "Request",
+    "TunnelHandle",
+    "on",
 ]

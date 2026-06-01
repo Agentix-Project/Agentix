@@ -1,29 +1,26 @@
-"""Sandbox proxy + host client round-trip.
+"""Sandbox tunnel + host `Proxy` round-trip.
 
-Issues an Anthropic-format and an OpenAI-format request through the
-in-process `wired` harness (see conftest) and asserts they round-trip,
-forward the rollout identity upstream, and produce session-grouped
-`CompletionRecord`s with correct usage.
-"""
+Hits the in-process `wired` harness (see conftest) with an
+Anthropic-format request and an OpenAI-format request, then with the
+streaming and count-tokens edge cases. Each call exercises the full
+path-named SIO event handshake and the bundled
+`AnthropicFromOpenAIClient` / `OpenAIClient` handlers."""
 
 from __future__ import annotations
 
-import asyncio
-
-import agentix.bridge.proxy as proxy_mod
 import httpx
 import pytest
-from agentix.bridge import InMemoryStore, detect
-from agentix.bridge.detection import ApiFamily
+from agentix.bridge import TunnelHandle
+from agentix.bridge.clients import AnthropicClient
+from agentix.bridge.clients.anthropic import PLACEHOLDER_API_KEY as ANTHROPIC_PLACEHOLDER_API_KEY
 
 
 @pytest.mark.asyncio
-async def test_anthropic_request_routes_through_proxy(wired) -> None:
+async def test_anthropic_request_routes_through_tunnel(wired) -> None:
     handle = wired["handle"]
-    store: InMemoryStore = wired["store"]
     upstream = wired["upstream"]
 
-    async with httpx.AsyncClient(base_url=handle.anthropic_base_url, timeout=10) as c:
+    async with httpx.AsyncClient(base_url=handle.url, timeout=10) as c:
         r = await c.post(
             "/v1/messages",
             json={
@@ -38,32 +35,20 @@ async def test_anthropic_request_routes_through_proxy(wired) -> None:
     assert body["content"][0]["text"] == "hello from upstream"
     assert body["usage"] == {"input_tokens": 7, "output_tokens": 4}
 
-    # Upstream saw the *translated* body with our overridden model...
+    # Upstream saw the *translated* body with the override model...
     assert upstream.last_body["model"] == "upstream-model"
     assert upstream.last_body["messages"][-1]["content"] == "hi"
-    # ...and the rollout identity forwarded as a header for the gateway.
+    # ...and the rollout identity forwarded as a header.
     assert upstream.last_headers.get("x-session-id") == "sess-test"
-
-    # A CompletionRecord landed in the host store, grouped by session.
-    await asyncio.sleep(0.05)  # let the fire-and-forget emit drain
-    records = store.snapshot()
-    assert len(records) == 1
-    rec = records[0]
-    assert rec.family is ApiFamily.ANTHROPIC_MESSAGES
-    assert rec.usage.prompt_tokens == 7
-    assert rec.usage.completion_tokens == 4
-    assert rec.session_id == "sess-test"
-    assert store.trajectory("sess-test") == records
 
 
 @pytest.mark.asyncio
-async def test_openai_request_routes_through_proxy(wired) -> None:
+async def test_openai_request_routes_through_tunnel(wired) -> None:
     handle = wired["handle"]
-    store: InMemoryStore = wired["store"]
 
-    async with httpx.AsyncClient(base_url=handle.openai_base_url, timeout=10) as c:
+    async with httpx.AsyncClient(base_url=handle.url, timeout=10) as c:
         r = await c.post(
-            "/chat/completions",
+            "/v1/chat/completions",
             json={
                 "model": "gpt-4o-mini",
                 "messages": [{"role": "user", "content": "hi"}],
@@ -73,28 +58,65 @@ async def test_openai_request_routes_through_proxy(wired) -> None:
     body = r.json()
     assert body["choices"][0]["message"]["content"] == "hello from upstream"
 
-    await asyncio.sleep(0.05)
-    records = store.snapshot()
-    assert len(records) == 1
-    assert records[0].family is ApiFamily.OPENAI_CHAT_COMPLETIONS
+
+@pytest.mark.asyncio
+async def test_anthropic_streaming_returns_sse(wired) -> None:
+    handle = wired["handle"]
+
+    async with httpx.AsyncClient(base_url=handle.url, timeout=10) as c:
+        r = await c.post(
+            "/v1/messages",
+            json={
+                "model": "claude-3-haiku",
+                "max_tokens": 100,
+                "stream": True,
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/event-stream")
+    assert b"event: message_start" in r.content
+    assert b"event: message_stop" in r.content
 
 
-def test_export_environ_shape() -> None:
-    handle = proxy_mod.ProxyHandle(
-        proxy_id="x",
-        url="http://127.0.0.1:8000",
-        port=8000,
-        anthropic_base_url="http://127.0.0.1:8000",
-        openai_base_url="http://127.0.0.1:8000/v1",
-    )
-    env = proxy_mod.export_environ(handle)
-    assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:8000"
-    assert env["OPENAI_BASE_URL"] == "http://127.0.0.1:8000/v1"
-    assert env["OPENAI_API_BASE"] == "http://127.0.0.1:8000/v1"
-    # Placeholder keys only — never a real key read from the environment.
-    assert env["ANTHROPIC_API_KEY"] == "sk-abridge"
-    assert env["OPENAI_API_KEY"] == "sk-abridge"
+@pytest.mark.asyncio
+async def test_count_tokens_handled_in_client_without_upstream(wired) -> None:
+    """`AnthropicFromOpenAI.count_tokens` resolves locally, no upstream call."""
+    handle = wired["handle"]
+    upstream = wired["upstream"]
+    upstream.last_body = {}  # reset
+
+    async with httpx.AsyncClient(base_url=handle.url, timeout=10) as c:
+        r = await c.post(
+            "/v1/messages/count_tokens",
+            json={"messages": [{"role": "user", "content": "y" * 16}]},
+        )
+    assert r.status_code == 200
+    assert r.json() == {"input_tokens": 4}
+    assert upstream.last_body == {}
 
 
-def test_detect_anthropic_count_tokens_path() -> None:
-    assert detect("/v1/messages/count_tokens") is ApiFamily.ANTHROPIC_COUNT_TOKENS
+@pytest.mark.asyncio
+async def test_unregistered_path_returns_404(wired) -> None:
+    """The sandbox tunnel only installs routes for the declared paths;
+    everything else 404s. That's the @on whitelist in action."""
+    handle = wired["handle"]
+    async with httpx.AsyncClient(base_url=handle.url, timeout=10) as c:
+        r = await c.post("/some/custom/path", json={"x": 1})
+    assert r.status_code == 404
+
+
+def test_anthropic_client_environ_shape() -> None:
+    """`AnthropicClient.environ(handle)` returns the two env vars an
+    Anthropic SDK needs to route through the tunnel. The placeholder
+    `ANTHROPIC_API_KEY` matches Anthropic's real key format
+    (`sk-ant-api03-...`) so the SDK's local validation accepts it,
+    while the body of the key makes clear it's not a real credential."""
+    client = AnthropicClient(api_key="real-upstream-key")
+    handle = TunnelHandle(url="http://127.0.0.1:8000", port=8000)
+    env = client.environ(handle)
+    assert env == {
+        "ANTHROPIC_BASE_URL": "http://127.0.0.1:8000",
+        "ANTHROPIC_API_KEY": ANTHROPIC_PLACEHOLDER_API_KEY,
+    }
+    assert env["ANTHROPIC_API_KEY"].startswith("sk-ant-api03-")

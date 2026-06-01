@@ -95,8 +95,12 @@ def pack(obj: Any) -> bytes:
     return _PACKER.pack(obj)
 
 
-def unpack(blob: bytes) -> Any:
-    """Deserialize msgpack bytes back to a Python object."""
+def unpack(blob: bytes | bytearray | memoryview) -> Any:
+    """Deserialize msgpack bytes back to a Python object. Accepts any
+    buffer-protocol input — `msgpack.unpackb` handles bytes/bytearray/
+    memoryview natively; widening the signature lets callers pass
+    Socket.IO payloads (often `bytearray` after framing) through
+    without copying."""
     return msgpack.unpackb(blob, ext_hook=_decode_ext, raw=False)
 
 

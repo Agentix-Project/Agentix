@@ -1,131 +1,115 @@
 # abridge Roadmap
 
-`agentix-bridge` is the Agentix LLM gateway. Today it captures
-Anthropic Messages and OpenAI Chat Completions traffic from inside a
-sandbox, ferries the request to the host, and returns the response.
-A `CompletionRecord` is buffered on the host for every call so the
-caller can attach LLM traces to a rollout, score a trajectory, or feed
-an RL buffer.
+`agentix-bridge` is a shape-blind HTTP→SIO tunnel + a host-side
+`Proxy` that routes path-named SIO events to `@on(path)`-decorated
+handler methods. Three bundled handlers in `agentix.bridge.clients`
+cover the OpenAI and Anthropic cases; custom handlers are plain
+classes you write yourself.
 
-This roadmap is the design plan for the next layers we expect to add.
-Every entry should preserve today's public surface:
+This roadmap is the design plan for the next layers. Every entry
+preserves today's surface:
 
 ```python
 from agentix.bridge import (
-    OpenAICompatibleClient,   # host SIO consumer
-    start_proxy, stop_proxy,  # sandbox lifecycle
-    export_environ,           # env-var hand-off for agent SDKs
-    InMemoryStore,            # capture sink
+    Proxy,              # host SIO consumer + sandbox tunnel lifecycle
+    on,                 # @on(path) — decorator that wires a method to a URL path
+    Client,             # marker Protocol for "any class with @on methods"
+    Handler,            # type alias for the bound @on method shape
+    Request,            # what an @on method receives (path + body)
+    ClientResponse,     # what an @on method returns (JSON / SSE / raw bytes)
+    AbridgeError,       # raise for in-band agent-side errors (carries status_code)
+    TunnelHandle,       # what proxy.start(sandbox) yields (url, port)
 )
-```
 
-Anything in this document is opt-in until shipped — until then,
-agents can keep using the OpenAI-compatible host client unchanged.
+from agentix.bridge.clients import (
+    OpenAIClient, AnthropicClient, AnthropicFromOpenAIClient,
+    OPENAI_PLACEHOLDER_API_KEY, ANTHROPIC_PLACEHOLDER_API_KEY,
+    populate_openai_span, populate_anthropic_span,
+)
+# `environ(handle)` is an instance method on the two Anthropic-side
+# clients; OpenAI agents typically use base_url=/api_key= args instead.
+```
 
 ## Layered structure (today)
 
 ```
-sandbox proxy        ── http://127.0.0.1:<port>
-   │  detect() ────────── family classification (OpenAI / Anthropic / …)
-   │  transform/ ─────── per-family request <-> OpenAI shape
-   │  storage ────────── CompletionRecord + bounded InMemoryStore
-   ▼  SIO /abridge
-host client
-   │  OpenAICompatibleClient  ── upstream POST /chat/completions
+sandbox tunnel       ── http://127.0.0.1:<port>/<declared path>
+   │  whitelist routes from `Proxy.paths`; byte forward only
+   ▼  SIO /abridge   event name == URL path; payload == agent body (no envelope)
+host Proxy
+   │  trigger_event(path) → @on(path) handler (detached task)
+   │  bundled clients open their own trace.span(...) and call
+   │  populate_*_span for OTel GenAI attrs
+   ▼  ClientResponse (bytes + media_type)
 ```
 
-This is intentionally a subset of `polar.gateway`'s gateway tree:
-`detection.py`, `transform/`, `proxy.py`, `storage.py` map 1:1, while
-`dispatcher.py`, `session.py`, `completion_writer.py`, and the
-pause/resume training-bridge controls land in this repo under
-`agentix/gateway/` (separate package, see the parent ROADMAP).
+## Near-term — same package
 
-## Near-term — same package, no new dependencies
+1. **Real streaming.** Today `AnthropicClient` streams via the SDK
+   internally but re-serialises the whole stream as a single SSE blob
+   before returning. `AnthropicFromOpenAIClient` is non-streaming
+   upstream regardless of the agent's `stream=True`. Real streaming =
+   split the SIO request into `<path>:open` / `<path>:chunk` /
+   `<path>:end`, iterate `chat.completions.stream(...)` on the host,
+   forward chunks through the tunnel as they arrive.
 
-1. **Streaming proxy.** Today the sandbox always asks the upstream
-   for `stream=False` and synthesises an SSE blob from the final
-   message when the agent asked for streaming. Move to true streaming
-   by:
-   * splitting the SIO request into `llm_call:open` / `llm_call:chunk`
-     / `llm_call:end`,
-   * iterating over `httpx.AsyncClient.stream(...)` on the host,
-   * re-encoding Anthropic SSE chunks block-by-block instead of one
-     post-hoc envelope.
+2. **`ReplayClient`** under `clients/replay.py`. Wraps a list of
+   pre-captured `(request, ClientResponse)` pairs; satisfies any
+   `@on(path)` by index. Useful for offline eval reruns, RL buffer
+   regression tests, CI-friendly assertions without burning tokens.
 
-2. **Per-call upstream selection.** `OpenAICompatibleClient` is one
-   model with one key. Add a `route(payload) -> RouteSpec` hook so a
-   single host process can fan out across providers (OpenAI vs Azure
-   vs a local vLLM) based on the requested model name.
+3. **Capture API.** Today storage is gone from the core (skipped in
+   the recent cleanup). Add `agentix.bridge.capture` — a small hook
+   that any handler can call (or a Proxy-level event subscriber) to
+   record full `(request, response)` pairs. Lightweight; in-memory
+   list with optional `JsonlSink` / `ParquetSink` overlays.
 
-3. **Replay mode.** A `ReplayClient(records)` host-side namespace
-   that satisfies `llm_call` from a previously captured
-   `InMemoryStore` snapshot — useful for offline eval reruns, RL
-   buffer regression tests, and CI-friendly assertions of agent
-   behaviour without burning tokens.
+## Medium-term — additional bundled clients
 
-4. **Jsonl / parquet sink alongside the buffer.** `InMemoryStore` is
-   the source of truth; a `Persistent...Sink(store, path)` writes
-   each record on `add()` so a long agent run survives a host
-   process crash. Keep the buffer; the sink is a tee.
+Each new family gets a sibling under `clients/`:
 
-5. **Tracing integration (task 3 in the parent batch).** Open a
-   `trace.span("llm.request", model=…)` per request, attach the
-   `record_id`, emit `add_event("first_chunk")` for streaming, and
-   close on completion. Spans cross the sandbox/host boundary already
-   via `/trace`, so the captured calls show up next to the rest of
-   the agent's work in any OTel-compatible viewer (task 4).
+* **`clients.gemini.GeminiClient`** — native Gemini Generative
+  Language API.
+* **`clients.cohere.CohereClient`** — native Cohere v2 Chat.
+* **`clients.bedrock.BedrockClient`** — native Bedrock Converse API.
+* **`*FromOpenAIClient` adapters** for each — translates an agent's
+  preferred shape to OpenAI on the upstream side.
+* **`OpenAIFromAnthropicClient`** — OpenAI agent → native Anthropic
+  upstream (reverse direction; useful for testing OpenAI agents
+  against Claude).
 
-## Medium-term — additional API families
-
-Each family gets its own transform module and a recogniser in
-`detection.py`:
-
-* **Gemini Generative Language API** — Gemini's
-  `/v1/models/<id>:generateContent` body is structurally close
-  enough to OpenAI that the converter is just a renaming pass.
-* **Cohere v2 Chat** — adopts the OpenAI shape mostly; a thin shim.
-* **Bedrock Converse API** — distinct schema, distinct streaming
-  envelope.
-* **Reasoning-heavy responses (o1, o3, …)** — propagate
-  `reasoning_effort`, `reasoning_content`, and reasoning-token counts
-  through both the proxy and the `CompletionRecord`.
-
-When a family appears here, the host gets an optional native client
-mirroring `OpenAICompatibleClient` (e.g. `BedrockClient`). The proxy
-keeps routing through "OpenAI body on the wire" by default, but a
-caller who wants to keep the native shape can opt into the family-
-specific host client.
+Each bundled client owns its SDK dep (declared as an optional extra
+in `pyproject.toml`) and its `environ(handle)` instance method if the
+SDK reads URL/key from env vars (Anthropic-side). OpenAI-side clients
+don't ship `environ` — OpenAI agents typically pass `base_url=` and
+`api_key=` as constructor args.
 
 ## Long-term — training-bridge surface
 
-Adopt `polar.gateway`'s pause/resume + completion writer split when
-this package is paired with a training loop:
+`polar.gateway`'s pause/resume + completion writer split, when this
+package is paired with a training loop:
 
-* **Pause / resume controls.** The host exposes `pause()` /
-  `resume()` so a trainer can stop new generation while weights are
-  being updated, then resume once the backend is ready. The sandbox
-  proxy stalls open requests at the `llm_call:open` step rather than
-  failing.
+* **Pause / resume controls.** A `TrainerClient` wrapper that stops
+  new generation while weights are being updated, then resumes once
+  the backend is ready. Easy as a `@on` decorator around an inner
+  client; doesn't need anything from the bridge core.
 
-* **CompletionWriter.** Move record persistence behind a writer
-  interface so high-throughput RL rollouts can write directly into
-  parquet shards / Kafka / a registered HF dataset.
+* **CompletionWriter.** A capture sink that writes directly into
+  parquet shards / Kafka / a registered HF dataset, decoupled from
+  the in-memory store.
 
-* **Session API.** A `Session` object groups multiple LLM calls under
-  one logical rollout so persistence and tracing have a stable key
-  beyond `request_id`. Maps onto `polar.gateway.session`.
-
-The `agentix/gateway/` package (parent ROADMAP, task 7) is the home
-for the trainer-facing pieces; abridge stays focused on the
-proxy/translate/capture surface and reuses the gateway's session
-model when both packages are installed.
+* **Session API.** Today `session_id` lives on the `Client` instance
+  (reused across proxies = same session). The trainer-facing Session
+  adds pause/resume + persistence handles on top of that grouping key.
 
 ## Non-goals
 
-* Re-implementing mitmproxy. The proxy intentionally is a regular
+* **Re-implementing mitmproxy.** The tunnel is intentionally a regular
   FastAPI server; SDK base-URL overrides are enough.
-* Owning credentials inside the sandbox. The sandbox proxy never
-  reads the real API key; only the host process holds it.
-* Per-token billing. `CompletionRecord.usage` carries the upstream's
-  reported token counts; the host or a downstream consumer is
-  responsible for any cost accounting on top of those.
+* **Owning credentials inside the sandbox.** The sandbox never reads
+  the real API key; only the host process holds it.
+* **Per-token billing.** Token usage comes from the upstream response
+  via `populate_*_span` attrs; cost accounting is downstream.
+* **Built-in shape detection.** Proxy stays shape-blind. Each bundled
+  client knows its own shape; users writing custom handlers do the
+  same. There is no `detect()` and no path-sniffing in the core.

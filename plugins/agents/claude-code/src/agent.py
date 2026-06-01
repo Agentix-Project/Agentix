@@ -7,14 +7,14 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel, Field
 
-logger = logging.getLogger("agentix.agents.claude_code")
+logger = logging.getLogger(__name__)
 
 
-class ClaudeCodeArgs(BaseModel):
+class ClaudeCodeInput(BaseModel):
     instruction: str
     model: str
     workdir: str
-    api_key: str = "sk-abridge"
+    api_key: str = "sk-ant-api03-claude-code-default-no-real-credentials-set"
     base_url: str = "https://api.anthropic.com"
     timeout: float = 1800
     max_turns: int | None = None
@@ -32,7 +32,7 @@ class ClaudeCodeResult:
     stderr: bytes
 
 
-async def run(args: ClaudeCodeArgs) -> ClaudeCodeResult:
+async def run(args: ClaudeCodeInput) -> ClaudeCodeResult:
     os.makedirs(args.workdir, exist_ok=True)  # the claude CLI's cwd must exist
     cmd: list[str] = [
         "claude",
@@ -61,22 +61,48 @@ async def run(args: ClaudeCodeArgs) -> ClaudeCodeResult:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
+    stdout_task = asyncio.create_task(_stream_to_log(proc.stdout, logging.INFO))
+    stderr_task = asyncio.create_task(_stream_to_log(proc.stderr, logging.WARNING))
     try:
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=args.timeout,
-        )
+        async with asyncio.timeout(args.timeout):
+            await proc.wait()
     except TimeoutError:
         logger.warning("claude-code timed out after %.1fs", args.timeout)
         proc.kill()
-        stdout, stderr = await proc.communicate()
+        await proc.wait()
+    stdout, stderr = await asyncio.gather(stdout_task, stderr_task)
     return ClaudeCodeResult(
         returncode=proc.returncode or 0,
-        stdout=stdout or b"",
-        stderr=stderr or b"",
+        stdout=stdout,
+        stderr=stderr,
     )
 
 
-def _build_env(args: ClaudeCodeArgs) -> dict[str, str]:
+async def _stream_to_log(stream: asyncio.StreamReader | None, level: int) -> bytes:
+    """Drain `stream` in chunks, logging each newline-terminated line; return all bytes."""
+    if stream is None:
+        return b""
+    chunks: list[bytes] = []
+    pending = bytearray()
+    while True:
+        chunk = await stream.read(8192)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        pending.extend(chunk)
+        while (nl := pending.find(b"\n")) >= 0:
+            line, pending[:] = bytes(pending[:nl]), pending[nl + 1 :]
+            text = line.rstrip(b"\r").decode(errors="replace")
+            if text:
+                logger.log(level, "%s", text)
+    if pending:  # trailing partial line (no final newline before EOF)
+        text = pending.decode(errors="replace")
+        if text:
+            logger.log(level, "%s", text)
+    return b"".join(chunks)
+
+
+def _build_env(args: ClaudeCodeInput) -> dict[str, str]:
     return {
         **os.environ,
         **args.env,
