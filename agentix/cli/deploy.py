@@ -176,48 +176,70 @@ def _deploy_command_entry_points() -> list[importlib.metadata.EntryPoint]:
     return list(eps.get("agentix.deploy.commands", []))  # type: ignore[attr-defined]  # pragma: no cover
 
 
-def _make_deploy_group() -> click.Group:
-    """Build the `agentix deploy` group by discovering plugin subcommands.
+class LazyDeployGroup(click.Group):
+    """`agentix deploy` group that discovers plugin subcommands lazily.
 
-    Walks the `agentix.deploy.commands` entry-point group via
-    `importlib.metadata`. Each entry must resolve to a `click.Command`
-    (typically a `@click.command(...)` function); the entry-point name
-    becomes the subcommand name. A loader that raises is logged and
-    skipped so a single broken plugin can't take the whole CLI down.
-    Names in `_RESERVED_SUBCOMMANDS` (currently just `list`) are owned
-    by core and refused — a plugin can't shadow `agentix deploy list`.
+    Each plugin-provided subcommand is an `agentix.deploy.commands`
+    entry point resolving to a `click.Command`; the entry-point name
+    becomes the subcommand name. Discovery happens on demand
+    (`list_commands` / `get_command`), NOT at construction — constructing
+    the group must not `ep.load()` anything, because a provider module
+    (e.g. `agentix.provider.docker`) imports this module at its own import
+    time. Eager loading here would re-enter that half-initialized module
+    and fail with a partial-init `AttributeError`.
+
+    A loader that raises is logged and skipped so a single broken plugin
+    can't take the whole CLI down. Names in `_RESERVED_SUBCOMMANDS`
+    (currently just `list`) are owned by core — a plugin can't shadow
+    `agentix deploy list`.
     """
-    group = click.Group(
+
+    def _load_plugin_command(self, name: str) -> click.Command | None:
+        """Resolve one plugin subcommand by name, or None if absent/broken."""
+        for ep in _deploy_command_entry_points():
+            if ep.name != name or ep.name in _RESERVED_SUBCOMMANDS:
+                continue
+            try:
+                cmd = ep.load()
+            except Exception as exc:
+                logger.warning("deploy plugin %r failed to load: %s", ep.name, exc)
+                return None
+            if not isinstance(cmd, click.Command):
+                logger.warning(
+                    "deploy plugin %r resolved to %r (expected click.Command); skipping",
+                    ep.name,
+                    type(cmd).__name__,
+                )
+                return None
+            return cmd
+        return None
+
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        names = set(super().list_commands(ctx))
+        for ep in _deploy_command_entry_points():
+            if ep.name not in _RESERVED_SUBCOMMANDS:
+                names.add(ep.name)
+        return sorted(names)
+
+    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
+        builtin = super().get_command(ctx, cmd_name)
+        if builtin is not None:
+            return builtin
+        return self._load_plugin_command(cmd_name)
+
+
+def _make_deploy_group() -> click.Group:
+    """Construct the lazy `agentix deploy` group with its built-in `list`
+    subcommand. Plugin subcommands are discovered on demand — see
+    `LazyDeployGroup`."""
+    group = LazyDeployGroup(
         name="deploy",
         help=_DEPLOY_HELP,
         short_help="Deploy a bundle tar to a provider backend.",
         context_settings={"help_option_names": ["-h", "--help"]},
         invoke_without_command=False,
     )
-
     group.add_command(deploy_list_cmd, name="list")
-
-    for ep in _deploy_command_entry_points():
-        if ep.name in _RESERVED_SUBCOMMANDS:
-            logger.warning(
-                "deploy plugin %r tried to register reserved subcommand name; skipping",
-                ep.name,
-            )
-            continue
-        try:
-            cmd = ep.load()
-        except Exception as exc:
-            logger.warning("deploy plugin %r failed to load: %s", ep.name, exc)
-            continue
-        if not isinstance(cmd, click.Command):
-            logger.warning(
-                "deploy plugin %r resolved to %r (expected click.Command); skipping",
-                ep.name,
-                type(cmd).__name__,
-            )
-            continue
-        group.add_command(cmd, name=ep.name)
-
     return group
 
 

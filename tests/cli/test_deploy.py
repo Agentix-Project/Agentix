@@ -30,12 +30,47 @@ from agentix.provider.base import DeployedBundle
 
 def test_deploy_group_includes_installed_provider_subcommands() -> None:
     """The docker plugin (workspace-installed) registers `docker` and
-    `podman` deploy subcommands; both must show up in the group."""
-    cmds = deploy_mod.deploy.commands
-    assert "docker" in cmds
-    assert "podman" in cmds
-    assert isinstance(cmds["docker"], click.Command)
-    assert isinstance(cmds["podman"], click.Command)
+    `podman` deploy subcommands; both must resolve through the group's
+    lazy discovery (`list_commands` / `get_command`)."""
+    ctx = click.Context(deploy_mod.deploy)
+    names = deploy_mod.deploy.list_commands(ctx)
+    assert "docker" in names
+    assert "podman" in names
+    assert isinstance(deploy_mod.deploy.get_command(ctx, "docker"), click.Command)
+    assert isinstance(deploy_mod.deploy.get_command(ctx, "podman"), click.Command)
+
+
+def test_importing_provider_module_has_no_circular_import() -> None:
+    """Regression: a deploy-command entry point points back into the
+    provider module that imports `agentix.cli.deploy` (for
+    `common_options` / `print_deploy_result`). The deploy group must be
+    built lazily — eager `ep.load()` at module import re-enters the
+    half-initialized provider module and fails with a partial-init
+    `AttributeError`, which the registry would swallow as a "failed to
+    load" warning. Importing the provider in a fresh interpreter must
+    therefore be warning-free.
+    """
+    import subprocess
+    import sys
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-W",
+            "error::Warning",
+            "-c",
+            "import agentix.provider.docker; "
+            "import agentix.cli.deploy as d; "
+            "assert d.deploy.get_command(__import__('click').Context(d.deploy), 'docker') is not None",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    # The registry logs circular-import failures via `logging`, not
+    # `warnings`, so also assert the tell-tale string never appears.
+    assert "circular import" not in (proc.stderr + proc.stdout)
+    assert "failed to load" not in (proc.stderr + proc.stdout)
 
 
 def test_deploy_unknown_backend_reports_no_such_command(tmp_path) -> None:
@@ -113,7 +148,7 @@ def test_deploy_list_json_format_emits_structured_payload() -> None:
 
 
 def test_deploy_list_cannot_be_shadowed_by_plugin(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A plugin that registers an `agentix.deploy.commands` entry named
     `list` must NOT replace the core's built-in introspection command."""
@@ -148,12 +183,14 @@ def test_deploy_list_cannot_be_shadowed_by_plugin(
 
     monkeypatch.setattr(deploy_mod.importlib.metadata, "entry_points", fake_entry_points)
 
-    with caplog.at_level("WARNING", logger="agentix.cli.deploy"):
-        group = deploy_mod._make_deploy_group()
+    group = deploy_mod._make_deploy_group()
+    ctx = click.Context(group)
 
-    list_cmd = group.commands["list"]
-    assert list_cmd is deploy_mod.deploy_list_cmd
-    assert any("reserved subcommand" in record.message for record in caplog.records)
+    # `list` resolves to the built-in command, never the plugin's — the
+    # reserved name is owned by core and the plugin entry is skipped (its
+    # `load()` is never called). `list` appears exactly once in the group.
+    assert group.get_command(ctx, "list") is deploy_mod.deploy_list_cmd
+    assert group.list_commands(ctx).count("list") == 1
 
 
 # ── rendering: print_deploy_result text + JSON ───────────────────────

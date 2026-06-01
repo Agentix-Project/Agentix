@@ -22,8 +22,9 @@ from agentix.agents.claude_code import ClaudeCodeInput
 from agentix.agents.claude_code import run as claude_code_run
 from agentix.bridge import Proxy
 from agentix.bridge.clients import ANTHROPIC_PLACEHOLDER_API_KEY, AnthropicFromOpenAIClient
-from agentix.provider.base import SandboxConfig
 from agentix.provider.docker import DockerProvider, DockerProviderConfig
+
+from agentix.provider.base import SandboxConfig
 from agentix.utils import trace
 from agentix.utils.log import configure_logging
 
