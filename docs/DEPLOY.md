@@ -1,15 +1,20 @@
-# Docs deploy — one-time setup
+# Docs deploy
 
-The docs are built with [Mintlify](https://mintlify.com) (Anthropic-style
-look) and self-hosted on GitHub Pages via the
-[`docs.yml`](../.github/workflows/docs.yml) workflow.
+For maintainers. The public docs site at **`https://agentiix.github.io/`**
+is built from the [`docs/`](.) directory with
+[Mintlify](https://mintlify.com) and self-hosted on GitHub Pages.
 
-The workflow runs `mint validate` (strict) → `mint export` (static
-Next.js site) → cross-repo push to **`Agentiix/Agentiix.github.io`**.
+The [`docs.yml`](../.github/workflows/docs.yml) workflow runs on every
+push that touches `docs/**`:
 
-Final URL: **`https://agentiix.github.io/`**.
+```text
+mint validate (strict)  →  mint export (static Next.js site)  →  push to Agentiix/Agentiix.github.io
+```
 
-## What you need to do once
+The one-time setup below wires up that cross-repo push. Once it's done,
+day-to-day work is just [editing pages](#adding-a-page) and pushing.
+
+## One-time setup
 
 1. **Create the sibling repo `Agentiix/Agentiix.github.io`** (public,
    empty). GitHub Pages serves any repo named `<org>.github.io` at

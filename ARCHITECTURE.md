@@ -1,54 +1,57 @@
 # Agentix Architecture
 
-## Audience
+Agentix is a framework for **agent evaluation**, **RL rollout
+execution**, and **training-data collection**. Host-side trainers and
+eval scripts orchestrate sandboxes; sandbox-side code is ordinary Python
+(agents, bash, scorers). [`abridge`](plugins/abridge/README.md) correlates
+traces into rollout logs for RL buffers. The design goal is a lower
+integration tax than bespoke rollout servers — see the README comparison
+with [ProRL-Agent-Server](https://github.com/NVIDIA-NeMo/ProRL-Agent-Server).
 
-Agentix is a user-friendly framework for **agent evaluation**, **RL
-rollout execution**, and **training data collection**. Host-side trainers
-and eval scripts orchestrate sandboxes; sandbox-side code is ordinary
-Python (agents, bash, scorers). [`abridge`](plugins/abridge/README.md)
-correlates traces into rollout logs for RL buffers. The design goal is
-lower integration tax than bespoke rollout servers—see the README
-comparison with [ProRL-Agent-Server](https://github.com/NVIDIA-NeMo/ProRL-Agent-Server).
+## The two pieces
 
-## Core pieces
+Everything reduces to two operations, and the split between them is the
+whole mental model:
 
-Agentix has two core pieces:
+1. **Bundle** — `agentix build [path]` packages one Python project (the
+   framework, your code, integration modules, dependencies, optional
+   system binaries) into one deploy-ready runtime image. *The bundle
+   decides what code and dependencies exist in the sandbox.*
+2. **Remote call** — `client.remote(fn, ...)` runs a Python callable
+   inside that image from host-side Python and returns its value. *The
+   remote call decides which callable runs.*
 
-1. **Bundle**: build one runtime image containing the framework, user
-   code, integration modules, Python dependencies, and optional system
-   binaries.
-2. **Remote calls**: call Python callables inside that runtime image from
-   host-side Python with `RuntimeClient.remote(fn, ...)`.
-
-The important split is simple:
-
-- Bundle decides what code and dependencies exist in the sandbox.
-- `client.remote(fn, ...)` decides which callable to run.
-
-## Programming Model
-
-Users pass a normal Python callable:
-
-```python
-from agentix import RuntimeClient
-from app import run
-
-async with RuntimeClient(sandbox.runtime_url) as client:
-    result = await client.remote(run, input="hello")
+```text
+Bundle              = what code and dependencies exist in the sandbox
+client.remote(fn)   = which importable function to call
+Worker              = where user code executes
+agentix.sio         = host ↔ sandbox side channels (trace, log, plugins)
+SandboxProvider     = where the bundle image runs
 ```
 
-This form is the primary API. Importing the module first also works:
+## Programming model
+
+Pass a normal Python callable. The provider hands you a `Sandbox` with a
+`remote(...)` method; `RuntimeClient` is the lower-level handle it wraps.
+
+```python
+from app import run
+
+async with provider.session(config) as sandbox:
+    result = await sandbox.remote(run, input="hello")
+```
+
+Importing the module first gives Agentix the same callable object:
 
 ```python
 import app
 
-result = await client.remote(app.run, input="hello")
+result = await sandbox.remote(app.run, input="hello")
 ```
 
-Both forms give Agentix the same callable object. The host encodes it as
-an import-path `RemoteCallable` (`module::qualname`). Lambdas, bound
-methods, partials, and other non-importable callables are rejected at
-the host before the call leaves.
+The host encodes the callable as an import-path `RemoteCallable`
+(`module::qualname`). Lambdas, bound methods, partials, and other
+non-importable callables are rejected at the host before the call leaves.
 
 ## Bundle
 
@@ -62,7 +65,8 @@ my-project/
 └── default.nix              # optional, for system binaries
 ```
 
-Python dependencies come from the project's `pyproject.toml`:
+Python dependencies come from the project's `pyproject.toml` — installing
+the project pulls in everything the sandbox needs:
 
 ```toml
 [project]
@@ -70,47 +74,39 @@ name = "my-project"
 version = "0.1.0"
 dependencies = [
     "agentixx>=0.1.0",
-    "agentix-runtime-basic>=0.1.0",
-    "agentix-swebench>=0.1.0",
+    "agentix-runtime-basic>=0.1.0",   # agentix.bash, file ops
+    "agentix-dataset-swe>=0.1.0",     # agentix.plugins.datasets.swe
 ]
 ```
 
-During build, Agentix stages the source and runs one install into the
-runtime venv:
+The build splits along one hard line — **uv owns Python, Nix owns system
+binaries; there is no uv2nix.** Inside the build container Agentix creates
+the runtime venv and installs the full (non-editable) dependency closure
+with uv:
 
 ```bash
-/nix/runtime/bin/pip install --no-cache-dir /src/project
+uv venv /nix/runtime/venv
+uv sync          # the project + direct + transitive deps + integration modules
 ```
 
-That single install brings in:
-
-- the user project
-- direct dependencies
-- transitive dependencies
-- integration modules such as `agentix.bash` or `agentix.swebench`
-
-At runtime, all installed modules live in the same Python environment:
+If the project ships a `default.nix`, a Nix builder stage materializes its
+derivation closure and symlinks `bin/*` into `/nix/runtime/bin`. The
+result is one merged tree, mounted at `/nix`:
 
 ```text
 /nix/runtime/
 ├── bootstrap.sh           # container entry point (provider backends exec this)
-├── bin/
-│   ├── python
-│   └── pip
+├── bin/                   # symlinkJoin of every Nix closure (e.g. git, rg)
 └── venv/
     └── lib/python3.11/site-packages/
         ├── agentix/
         ├── agentix/bash/
-        ├── agentix/swebench/
+        ├── agentix/plugins/datasets/swe/
         └── app.py
 ```
 
-If the project includes `default.nix`, `agentix build` adds a Nix
-builder stage, copies the derivation closure into the final image, and
-symlinks `bin/*` into `/nix/runtime/bin`.
-
-Worker processes inherit the runtime server environment, with the
-bundle venv and Nix runtime bins prepended to `PATH`:
+Worker processes inherit the runtime-server environment, with the bundle
+venv and Nix bins prepended to `PATH`:
 
 ```text
 /nix/runtime/venv/bin:/nix/runtime/bin:${PATH}
@@ -123,21 +119,19 @@ await asyncio.create_subprocess_exec("git", "status")
 await asyncio.create_subprocess_exec("claude", "-p", instruction)
 ```
 
-## Remote Calls
+## Remote calls
 
-`RuntimeClient.remote(fn, ...)` runs one Python callable in the sandbox
-and returns its value. The host:
+`sandbox.remote(fn, ...)` runs one callable in the sandbox and returns its
+value. The host:
 
 1. builds a `RemoteCallable` from `fn.__module__` and `fn.__qualname__`
 2. pickles `(args, kwargs)` with stdlib pickle
 3. sends both over Socket.IO on the `/` namespace
 
-For example:
-
 ```python
-from agentix.swebench import run
+from agentix.plugins.datasets import swe
 
-score = await client.remote(run, instance=inst, patch=patch)
+score = await sandbox.remote(swe.score, instance=inst, patch=patch)
 ```
 
 becomes a wire payload like:
@@ -145,25 +139,20 @@ becomes a wire payload like:
 ```python
 {
     "call_id": "…uuid…",
-    "callable": "agentix.swebench::run",
+    "callable": "agentix.plugins.datasets.swe::score",
     "arguments": pickle.dumps(((), {"instance": inst, "patch": patch})),
 }
 ```
 
-The runtime server forwards the request to one worker subprocess. The
-worker imports the module, resolves the function, unpickles args/kwargs,
-calls it (awaiting when the return value is awaitable), and pickles the
-result back.
-
-Sync and async functions both work as targets. Args and return values
-round-trip as pickle blobs; the runtime does not run pydantic
-validation on the wire today.
+Sync and async functions both work as targets; the worker awaits when the
+return value is awaitable. Args and return values round-trip as pickle
+blobs — the runtime does not run pydantic validation on the wire today.
 
 ## Flow
 
 ```text
 Host
-  RuntimeClient.remote(fn, ...)
+  sandbox.remote(fn, ...)
     RemoteCallable._resolve(fn)  ->  module::qualname
     pickle.dumps((args, kwargs))
       |
@@ -175,57 +164,45 @@ Sandbox
 Single runtime worker process
   RemoteCallable.resolve()  ->  import fn
   pickle.loads(arguments)
-  call fn(*args, **kwargs)
+  call fn(*args, **kwargs)   (awaiting when needed)
   pickle.dumps(result)
 ```
 
-Side channels on the same Socket.IO connection:
+Side channels share the same Socket.IO connection:
 
 - `/trace` — span lifecycle from sandbox to host
 - `/log` — stdlib logging records from sandbox to host
 - `/<plugin>` — plugin namespaces registered via `agentix.sio`
 
-## Worker Model
+## Worker model
 
-The current runtime server owns one worker subprocess. That worker
-handles all remote calls for the runtime. This is an implementation
-detail: future runtimes may use worker pools or per-call isolation
-without changing `RuntimeClient.remote(...)`.
-
-For each call, the worker:
+The runtime server owns **one** worker subprocess that handles all remote
+calls. The worker uses the same `/nix/runtime` venv as the server, so
+anything installed into the bundle can be imported. For each call it:
 
 1. resolves the `RemoteCallable` import path
 2. unpickles `(args, kwargs)`
 3. calls the callable (awaiting when needed)
 4. pickles the return value
 
-The worker uses the same `/nix/runtime` venv as the runtime server, so
-anything installed into the bundle can be imported by the worker.
+The single-worker model is intentional for now — it keeps runtime state
+and debugging simple while the public API settles. It is an
+implementation detail: future runtimes may use worker pools or per-call
+isolation without changing `sandbox.remote(...)`.
 
-## End-to-End Example
+## End-to-end example
 
 ```python
-from agentix import RuntimeClient
 from agentix.bash import run as bash_run
-from agentix.swebench import run as score_swebench
+from agentix.plugins.datasets import swe
 from my_project.tasks import generate_patch
 
-async with RuntimeClient(sandbox.runtime_url) as client:
-    await client.remote(bash_run, command="git clone ...")
-    patch = await client.remote(generate_patch, prompt="fix the bug")
-    score = await client.remote(score_swebench, patch=patch)
+async with provider.session(config) as sandbox:
+    await sandbox.remote(bash_run, command="git clone ...")
+    patch = await sandbox.remote(generate_patch, prompt="fix the bug")
+    score = await sandbox.remote(swe.score, patch=patch)
 ```
 
-All three calls run inside the same bundle image. They may target
-different modules, but those modules all come from the same installed
-runtime environment.
-
-## Mental Model
-
-```text
-Bundle = what code and dependencies exist in the sandbox
-client.remote(fn) = which importable function to call
-Worker = where user code executes
-agentix.sio = host ↔ sandbox side channels (trace, log, plugins)
-SandboxProvider = where the bundle image runs
-```
+All three calls run inside the same bundle image. They target different
+modules, but those modules all come from the same installed runtime
+environment.

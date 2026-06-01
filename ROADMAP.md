@@ -97,20 +97,27 @@ Remaining transport work:
 - optional annotation-driven msgpack codec path alongside pickle
 - collapse event naming if the current `call:*` family becomes noisy
 
-## Sibling Repos
+## Plugins
 
-Sibling repos are updated in lockstep with Agentix HEAD while the design
-is still moving quickly.
+Plugins live in this monorepo under [`plugins/`](plugins) as separate
+workspace members — each its own PyPI package, all updated in lockstep
+with Agentix HEAD while the design is still moving quickly.
 
-- [`Agentix-Runtime-Basic`](https://github.com/Agentiix/Agentix-Runtime-Basic)
-  — `bash` and `files` modules. Published as `agentix-runtime-basic`.
-- [`Agentix-SandboxProvider-Docker`](https://github.com/Agentiix/Agentix-SandboxProvider-Docker)
-  — local Docker backend. Published as `agentix-provider-docker`.
-- [`Agentix-SandboxProvider-Daytona`](https://github.com/Agentiix/Agentix-SandboxProvider-Daytona)
-  and [`Agentix-SandboxProvider-E2B`](https://github.com/Agentiix/Agentix-SandboxProvider-E2B)
-  — hosted provider backends.
-- [`abridge`](https://github.com/Agentiix/abridge) — host-side
-  rollout-to-RL-buffer bridge.
+- [`agentix-runtime-basic`](plugins/runtime-basic) — `bash` and `files`
+  modules.
+- [`agentix-provider-docker`](plugins/providers/docker) /
+  [`-daytona`](plugins/providers/daytona) /
+  [`-e2b`](plugins/providers/e2b) /
+  [`-apptainer`](plugins/providers/apptainer) — sandbox backends.
+- [`agentix-runner`](plugins/runner) — `run_rollouts(...)` batch
+  orchestration.
+- [`agentix-dataset-swe`](plugins/datasets/swebench) — SWE-bench task
+  images and harness scoring.
+- [`agentix-agent-*`](plugins/agents) — agent adapters (Claude Code,
+  mini-swe-agent, Qwen Code).
+- [`agentix-bridge`](plugins/abridge) — model translation and host-side
+  rollout-to-RL-buffer capture (abridge).
+- [`agentix-trace-otel`](plugins/trace-otel) — OTLP trace export.
 
 ## Later
 

@@ -5,8 +5,9 @@
 ### The universal bridge between agents and environments.
 
 <p>
-Train, evaluate, and collect rollouts across <strong>any agent</strong> and
-<strong>any sandbox</strong> — one API, no bespoke microservice per pairing.
+Evaluate agents, run RL rollouts, and collect rollout data across
+<strong>any agent</strong> and <strong>any sandbox</strong> — one API, no
+bespoke microservice per pairing.
 </p>
 
 [![GitHub Stars](https://img.shields.io/github/stars/Agentiix/Agentix?style=flat-square)](https://github.com/Agentiix/Agentix)
@@ -52,153 +53,38 @@ await sandbox.remote(fn, *args, **kwargs)
 </tr>
 </table>
 
-## End-to-end loop
+## Two ideas
 
-Requires: `pip install agentixx agentix-runtime-basic agentix-provider-docker` (plus Docker or Podman).
+Agentix is small on purpose. The whole framework is two operations:
+
+| | You write | You get |
+|---|---|---|
+| **Bundle** | `agentix build [path]` | A deploy-ready image with your code and its dependencies |
+| **Remote call** | `await sandbox.remote(fn, ...)` | The return value of `fn`, executed *inside* the sandbox |
+
+`fn` is any importable Python callable — an agent, a shell helper, a
+scorer, or a whole multi-step rollout. Args travel in, the typed return
+value comes back out. There is no fixed RPC surface to conform to and no
+base class for your code to inherit.
 
 ```python
-from agentix import SandboxConfig
-from agentix.bash import run
-from agentix.provider.docker import DockerProvider
+from app import run
 
-config = SandboxConfig(
-    image="python:3.13-slim",
-    bundle="/home/me/.cache/agentix/bundles/sha256-...",  # printed by `agentix deploy`
-)
-
-async with DockerProvider().session(config) as sandbox:
-    result = await sandbox.remote(run, command="echo hello from $(uname -a)")
+result = await sandbox.remote(run, input="hello")
 ```
 
-Building the bundle (`agentix build` + `agentix deploy`) is a one-time step
-that takes a few minutes; after that, each `sandbox.remote(...)` call takes
-seconds.
-
-That's the whole loop. **Bundle** what runs inside the box. **Remote-call**
-agents, tools, and scorers as ordinary callables. **Capture** trajectories
-with [`abridge`](https://github.com/Agentiix/abridge) for eval and RL.
-
-## Three primitives, one bridge
-
-<table>
-<tr><th>Primitive</th><th>You do</th><th>You get</th></tr>
-<tr>
-<td><strong>Bundle</strong></td>
-<td><code>agentix build [path]</code></td>
-<td>A portable tar with your code and dependencies</td>
-</tr>
-<tr>
-<td><strong>Remote call</strong></td>
-<td><code>await sandbox.remote(fn, ...)</code></td>
-<td>Return value of <code>fn</code>, executed inside the sandbox</td>
-</tr>
-<tr>
-<td><strong>Rollout data</strong></td>
-<td><code>agentix.utils.trace</code> + <code>abridge</code></td>
-<td>Per-rollout logs ready for eval and RL buffers</td>
-</tr>
-</table>
-
-## Why Agentix exists
-
-Agent **eval**, **RL training**, and **rollout data collection** usually mean
-the same bespoke glue: wrap each agent CLI, fork each benchmark harness, bolt
-on tracing, then rewrite everything when sandboxes or trainers change.
-
-Agentix collapses that into one rule:
-
-> If your bundle has it, your orchestrator can call it.
-
-<table>
-<tr><th>You have</th><th>You expose</th><th>You call</th></tr>
-<tr>
-<td>An agent (Claude Code, Codex, OpenHands, …)</td>
-<td><code>async def run(...) -> RunResult</code></td>
-<td><code>await sandbox.remote(run, ...)</code></td>
-</tr>
-<tr>
-<td>Shell, files, repo setup</td>
-<td><code>async def run(command: str) -> BashResult</code></td>
-<td><code>await sandbox.remote(bash_run, ...)</code></td>
-</tr>
-<tr>
-<td>A benchmark or reward model</td>
-<td><code>async def score(...) -> Score</code></td>
-<td><code>await sandbox.remote(score, ...)</code></td>
-</tr>
-</table>
-
-End-to-end loop in [`examples/eval-cc-swe`](examples/eval-cc-swe/README.md):
-sandbox agent run → patch extraction → harness score → rollout log per
-instance.
-
-## Compared to rollout-as-a-service
-
-[ProRL-Agent-Server](https://github.com/NVIDIA-NeMo/ProRL-Agent-Server)
-popularized **rollout-as-a-service**: an HTTP server with task-specific
-handlers and token trajectories for RL trainers. Agentix shares the same
-decoupling — training stays separate from rollout execution — with a much
-lighter surface for the user:
-
-<table>
-<tr><th></th><th>ProRL-Agent-Server</th><th>Agentix</th></tr>
-<tr><td><strong>Add a new task</strong></td><td>Implement a handler, register it</td><td>Write a function, install it</td></tr>
-<tr><td><strong>Call a rollout</strong></td><td>HTTP request to the service</td><td><code>await sandbox.remote(fn, ...)</code></td>
-</tr>
-<tr><td><strong>Trajectories</strong></td><td>Token-in / token-out over the service API</td><td>Captured by abridge as rollout logs</td></tr>
-<tr><td><strong>Sweet spot</strong></td><td>HPC-scale multi-turn RL fleets</td><td>Teams wiring eval + RL data without a platform team</td></tr>
-</table>
-
-Rollout-as-a-service is powerful. So is `await remote(fn)` — with fewer
-moving parts for most research and product teams.
-
-## Compared to sandbox runners
-
-Sandbox tools like [swe-rex](https://github.com/SWE-agent/SWE-ReX), E2B,
-Daytona, and Harbor hand you a box and a *fixed* way to reach into it — a
-predefined RPC surface (swe-rex), or "run a shell / `docker exec` command"
-plus a vendor SDK (E2B, Daytona). Anything richer means squeezing your logic
-through that narrow hole.
-
-Agentix inverts it: the bundle installs your real Python, and
-`sandbox.remote(fn, ...)` calls **any importable function** inside the box —
-an agent, a scorer, a tool, a whole multi-step rollout — and returns its
-typed value. No fixed API to conform to, no shell-string marshalling.
-
-<table>
-<tr><th></th><th>swe-rex · E2B · Daytona · Harbor</th><th>Agentix</th></tr>
-<tr><td><strong>Reach into the sandbox</strong></td><td>Fixed RPC surface, or shell / <code>docker exec</code> + vendor SDK</td><td><code>await sandbox.remote(fn, ...)</code> — any importable function</td></tr>
-<tr><td><strong>Sandbox logs &amp; stdout</strong></td><td>Scrape command output</td><td>stdlib <code>logging</code> auto-bridged to the host over <code>/log</code></td></tr>
-<tr><td><strong>Observability</strong></td><td>Bring your own</td><td><code>/trace</code> spans (OTel-shaped) for every step</td></tr>
-<tr><td><strong>Model under test</strong></td><td>Whatever the agent's SDK speaks</td><td>abridge translates Claude ⇄ OpenAI ⇄ Gemini — any agent on any model</td></tr>
-</table>
-
-A backend decides *where* the box runs; Agentix decides *what you can call
-inside it* — so you can layer it on top of Docker, E2B, or Daytona. And
-because the model call rides [`abridge`](https://github.com/Agentiix/abridge),
-the host can capture each rollout's trajectory (token-in / token-out) for RL,
-with OTel LLM-call tracing on the way.
-
-## What you get
-
-- **One API for everything.** Run an agent, a tool, or a scorer with the
-  same `await sandbox.remote(fn, ...)`.
-- **Bundles from a normal Python project.** `agentix build` reads
-  `pyproject.toml`; an optional `default.nix` adds system binaries.
-- **Backends you choose.** Local Docker, Daytona, E2B, or your own.
-- **Out-of-the-box tracing & observability.** Trajectory capture works the
-  same across agents and environments — ready for eval and RL buffers.
-- **Sandbox logs on the host.** `print` and stdlib `logging` from inside any
-  `sandbox.remote(...)` call replay into your host logging tree over `/log` —
-  no scraping command output.
-- **Any model behind any agent.** [`abridge`](https://github.com/Agentiix/abridge)
-  translates between Claude, OpenAI, and Gemini, so an agent that speaks only
-  one provider can be evaluated against any model — and the host captures the
-  trajectory (token-in / token-out) for RL.
+Side traffic rides along automatically: stdlib `logging` from inside the
+sandbox replays into your host logs, and OTel-shaped `/trace` spans
+capture every step — ready for eval dashboards and RL buffers.
 
 ## Quickstart
 
-From [`examples/hello-world`](examples/hello-world/README.md):
+```bash
+pip install agentixx agentix-runtime-basic agentix-provider-docker
+```
+
+Build a bundle once (takes a few minutes), then every remote call is
+seconds. From [`examples/hello-world`](examples/hello-world/README.md):
 
 ```bash
 cd examples/hello-world
@@ -208,28 +94,111 @@ BUNDLE=$(uv run agentix deploy docker dist/hello-world.bundle.tar --format json 
 uv run python main.py --bundle "$BUNDLE"
 ```
 
-Cross-arch sandboxes:
+The host code is just provider → session → remote call:
 
-```bash
-uv run agentix build . --platform linux/amd64 --output dist/hello-world.bundle.tar
-BUNDLE=$(uv run agentix deploy docker dist/hello-world.bundle.tar --platform linux/amd64 --format json | jq -r .bundle)
+```python
+from agentix.bash import run
+from agentix.provider.base import SandboxConfig
+from agentix.provider.docker import DockerProvider
+
+config = SandboxConfig(image="python:3.13-slim", bundle=BUNDLE)
+
+async with DockerProvider().session(config) as sandbox:
+    result = await sandbox.remote(run, command="echo hello from $(uname -a)")
 ```
 
-Full walkthrough: [quickstart](https://agentiix.github.io/quickstart).
+Build a cross-arch bundle by passing `--platform linux/amd64` to both
+`agentix build` and `agentix deploy`. Full walkthrough:
+[quickstart](https://agentiix.github.io/quickstart).
+
+## What you can call
+
+The point of one call surface is that an eval or RL loop wires together
+out of the same primitive — the agent, the environment setup, and the
+scorer are all just functions you remote-call:
+
+| You have | You expose | You call |
+|---|---|---|
+| An agent (Claude Code, Codex, OpenHands, …) | `async def run(...) -> RunResult` | `await sandbox.remote(run, ...)` |
+| Shell, files, repo setup | `async def run(command: str) -> BashResult` | `await sandbox.remote(bash_run, ...)` |
+| A benchmark or reward model | `async def score(...) -> Score` | `await sandbox.remote(score, ...)` |
+
+[`examples/run-swe-rollouts`](examples/run-swe-rollouts/README.md) is the
+full loop end to end: sandbox agent run → patch extraction → SWE-bench
+harness score → one rollout log per instance.
+
+## How it compares
+
+**vs. sandbox runners** ([swe-rex](https://github.com/SWE-agent/SWE-ReX),
+E2B, Daytona, Harbor). A runner hands you a box and a *fixed* way to reach
+into it — a predefined RPC surface, or "run a shell / `docker exec`
+command" plus a vendor SDK. Anything richer means squeezing your logic
+through that narrow hole. Agentix inverts it: the bundle installs your
+real Python, and `sandbox.remote(fn, ...)` calls **any importable
+function** and returns its typed value. A backend decides *where* the box
+runs; Agentix decides *what you can call inside it* — so you layer it on
+top of Docker, E2B, or Daytona.
+
+| | swe-rex · E2B · Daytona · Harbor | Agentix |
+|---|---|---|
+| **Reach into the sandbox** | Fixed RPC surface, or shell / `docker exec` + vendor SDK | `await sandbox.remote(fn, ...)` — any importable function |
+| **Sandbox logs & stdout** | Scrape command output | stdlib `logging` auto-bridged to the host over `/log` |
+| **Observability** | Bring your own | `/trace` spans (OTel-shaped) for every step |
+| **Model under test** | Whatever the agent's SDK speaks | [`abridge`](plugins/abridge/README.md) translates Claude ⇄ OpenAI ⇄ Gemini — any agent on any model |
+
+**vs. rollout-as-a-service**
+([ProRL-Agent-Server](https://github.com/NVIDIA-NeMo/ProRL-Agent-Server)).
+ProRL popularized an HTTP server with task-specific handlers and token
+trajectories for RL trainers. Agentix shares the decoupling — training
+stays separate from rollout execution — with a lighter surface.
+
+| | ProRL-Agent-Server | Agentix |
+|---|---|---|
+| **Add a new task** | Implement a handler, register it | Write a function, install it |
+| **Call a rollout** | HTTP request to the service | `await sandbox.remote(fn, ...)` |
+| **Trajectories** | Token-in / token-out over the service API | Captured by [`abridge`](plugins/abridge/README.md) as rollout logs |
+| **Sweet spot** | HPC-scale multi-turn RL fleets | Teams wiring eval + RL data without a platform team |
+
+Both designs are powerful at HPC scale. Agentix targets the much larger
+set of research and product teams that want `await remote(fn)` with fewer
+moving parts.
+
+## What you get
+
+- **One API for everything.** Agent, tool, or scorer — the same
+  `await sandbox.remote(fn, ...)`.
+- **Bundles from a normal Python project.** `agentix build` reads
+  `pyproject.toml`; an optional `default.nix` adds system binaries.
+- **Backends you choose.** Local Docker/Podman, Daytona, E2B, Apptainer,
+  or your own `SandboxProvider`.
+- **Sandbox logs on the host.** `print` and stdlib `logging` from any
+  remote call replay into your host logging tree over `/log` — no
+  scraping command output.
+- **Tracing built in.** OTel-shaped `/trace` spans for every step, the
+  same across agents and environments; ship them anywhere with
+  [`agentix-trace-otel`](plugins/trace-otel/README.md).
+- **Any model behind any agent.** [`abridge`](plugins/abridge/README.md)
+  translates between Claude, OpenAI, and Gemini, so an agent that speaks
+  one provider can be evaluated against any model — and the host captures
+  the trajectory (token-in / token-out) for RL.
 
 ## Ecosystem
 
-<table>
-<tr><th>Package</th><th>Role</th></tr>
-<tr><td><a href="https://github.com/Agentiix/Agentix-Runtime-Basic">Agentix-Runtime-Basic</a></td><td><code>bash</code>, file ops, sandbox primitives</td></tr>
-<tr><td><a href="https://github.com/Agentiix/Agentix-SandboxProvider-Docker">Agentix-SandboxProvider-Docker</a></td><td>Local Docker backend</td></tr>
-<tr><td><a href="https://github.com/Agentiix/Agentix-SandboxProvider-Daytona">Agentix-SandboxProvider-Daytona</a> · <a href="https://github.com/Agentiix/Agentix-SandboxProvider-E2B">E2B</a></td><td>Hosted sandbox backends</td></tr>
-<tr><td><a href="https://github.com/Agentiix/agentix-cookbook">agentix-cookbook</a></td><td>Agent and benchmark recipes</td></tr>
-<tr><td><a href="https://github.com/Agentiix/abridge">abridge</a></td><td>Rollout → RL buffer bridge</td></tr>
-</table>
+One monorepo, separate PyPI packages. The core is `agentixx`; everything
+else is an optional plugin under [`plugins/`](plugins).
 
-These are separate PyPI packages but are maintained together in this
-monorepo under [`plugins/`](https://github.com/Agentiix/Agentix/tree/master/plugins).
+| Package | Role |
+|---|---|
+| [`agentix-runtime-basic`](plugins/runtime-basic/README.md) | `agentix.bash`, file ops, sandbox primitives |
+| [`agentix-provider-docker`](plugins/providers/docker) · [`-daytona`](plugins/providers/daytona) · [`-e2b`](plugins/providers/e2b) · [`-apptainer`](plugins/providers/apptainer) | Sandbox backends |
+| [`agentix-runner`](plugins/runner/README.md) | `run_rollouts(...)` — batch eval/rollout orchestration |
+| [`agentix-dataset-swe`](plugins/datasets/swebench) | SWE-bench task images + official-harness scoring |
+| [`agentix-agent-claude-code`](plugins/agents/claude-code) · [`-mini-swe-agent`](plugins/agents/mini-swe-agent) · [`-qwen-code`](plugins/agents/qwen-code) | Agent adapters |
+| [`agentix-bridge`](plugins/abridge/README.md) | Model translation + rollout → RL buffer capture (abridge) |
+| [`agentix-trace-otel`](plugins/trace-otel/README.md) | Export `/trace` spans to any OTLP backend |
+
+Drop a directory under `plugins/` and it becomes a workspace member;
+`uv sync --all-packages` installs it editable.
 
 ## Development
 
@@ -242,13 +211,15 @@ uv run ruff check agentix/ tests/
 ```
 
 This repo is a **uv workspace** — core, plugins, and examples share one
-lockfile.
+lockfile, so editing any member is live in the shared venv with no
+publish cycle. See [ARCHITECTURE.md](ARCHITECTURE.md) for how bundles and
+remote calls work under the hood.
 
 ## Links
 
 - [Docs](https://agentiix.github.io/) · [Quickstart](https://agentiix.github.io/quickstart)
 - [Remote calls](https://agentiix.github.io/concepts/remote-calls) · [Bundles](https://agentiix.github.io/concepts/bundles)
-- [Roadmap](ROADMAP.md)
+- [Architecture](ARCHITECTURE.md) · [Roadmap](ROADMAP.md)
 
 <div align="center">
 <sub>MIT licensed · built on <a href="https://docs.astral.sh/uv/">uv</a> workspaces</sub>
