@@ -5,9 +5,9 @@
 ### The universal bridge between agents and environments.
 
 <p>
-Evaluate agents, run RL rollouts, and collect rollout data across
-<strong>any agent</strong> and <strong>any sandbox</strong> — one API, no
-bespoke microservice per pairing.
+Evaluate agents, train them with RL, and collect rollout data across
+<strong>any agent</strong> and <strong>any sandbox</strong> — one Python call,
+no bespoke microservice per pairing and no changes to the agent.
 </p>
 
 [![GitHub Stars](https://img.shields.io/github/stars/Agentiix/Agentix?style=flat-square)](https://github.com/Agentiix/Agentix)
@@ -20,6 +20,30 @@ bespoke microservice per pairing.
 </div>
 
 ---
+
+Agentix is the universal bridge between agents and environments — the
+single path connecting **any agent**, **any sandbox**, and **any model**
+for evaluation, RL training, rollout-data collection, and observability.
+It stays small on purpose: two ideas (a *bundle* and a *remote call*) plus
+one model-call bridge ([abridge](plugins/abridge/README.md)), with no
+heavy stack of disconnected sandbox runners, rollout services, and agent
+frameworks to hold together. Five core capabilities:
+
+1. **Drive a sandbox with a Python function** — call any importable
+   callable inside the box and get its typed value back; extend the loop
+   by writing another function.
+2. **Eval/run any agent, in any sandbox, with any model** — abridge
+   translates Claude ⇄ OpenAI ⇄ Gemini at the wire, so any off-the-shelf
+   agent runs against any provider, with no agent changes.
+3. **Train any agent as an RL rollout — no code change** — the agent is an
+   opaque trajectory producer; Agentix makes no assumption about how it is
+   built.
+4. **Token-in / token-out, captured automatically** — abridge stamps every
+   model call, so each rollout's full token trajectory is collected and
+   grouped per session, ready for the trainer.
+5. **Observability for free** — every model call becomes an OTel span,
+   exportable to LangSmith / LangFuse / Docent / any OTLP backend with zero
+   agent instrumentation.
 
 <table>
 <tr>
@@ -165,22 +189,57 @@ moving parts.
 
 ## What you get
 
-- **One API for everything.** Agent, tool, or scorer — the same
-  `await sandbox.remote(fn, ...)`.
-- **Bundles from a normal Python project.** `agentix build` reads
-  `pyproject.toml`; an optional `default.nix` adds system binaries.
-- **Backends you choose.** Local Docker/Podman, Daytona, E2B, Apptainer,
-  or your own `SandboxProvider`.
-- **Sandbox logs on the host.** `print` and stdlib `logging` from any
-  remote call replay into your host logging tree over `/log` — no
-  scraping command output.
-- **Tracing built in.** OTel-shaped `/trace` spans for every step, the
-  same across agents and environments; ship them anywhere with
-  [`agentix-trace-otel`](plugins/trace-otel/README.md).
-- **Any model behind any agent.** [`abridge`](plugins/abridge/README.md)
-  translates between Claude, OpenAI, and Gemini, so an agent that speaks
-  one provider can be evaluated against any model — and the host captures
-  the trajectory (token-in / token-out) for RL.
+Five capabilities, one primitive underneath each:
+
+### 1 · Drive a sandbox with a Python function
+
+`await sandbox.remote(fn, ...)` runs **any importable Python callable**
+inside the sandbox and returns its typed value. No fixed RPC surface to
+conform to, no base class to inherit — extend the loop by writing another
+function. The agent, the repo setup, the scorer are all just functions
+you remote-call. `print`, stdlib `logging`, and OTel-shaped `/trace`
+spans from inside the sandbox replay on the host automatically.
+
+### 2 · Eval/run any agent, in any sandbox, with any model
+
+Bring an off-the-shelf agent (Claude Code, Codex, OpenHands, your own),
+drop it in any backend (Docker/Podman, Daytona, E2B, Apptainer, or your
+own `SandboxProvider`), and point it at any model.
+[`abridge`](plugins/abridge/README.md) tunnels the agent's LLM calls back
+to the host and translates **Claude ⇄ OpenAI ⇄ Gemini** at the wire — so
+an agent that only speaks one provider runs against whatever you've got:
+OpenAI, OpenRouter, a private vLLM/SGLang, your own gateway. The agent ×
+sandbox × model matrix, with zero changes to the agent.
+
+### 3 · Turn that same agent into an RL rollout — no code change
+
+Agentix treats the agent as an **opaque trajectory producer** and makes
+no assumption about how it's built: single-shot or multi-turn,
+deep-thinking loops, hierarchical multi-agent — all opaque internal
+logic. The exact context presented to the model at each completion
+request is captured as a self-contained `(state, action)` sample, with
+**zero instrumentation in the agent**. The same run you evaluate is the
+run you train on.
+
+### 4 · Token-in / token-out, captured automatically
+
+[`abridge`](plugins/abridge/README.md) stamps every model call with a
+session/request id at the transport layer — the agent never sees it — so
+each rollout's full **token-in / token-out** trajectory (prompt,
+completion, logprobs) is collected and grouped per session, ready for the
+trainer. Nothing to wire into the agent: the same run you evaluate is the
+run you train on.
+
+### 5 · Observability, with zero agent instrumentation
+
+Every model call abridge tunnels also becomes an OTel-shaped span — tagged
+with GenAI semantic conventions (model, token usage, prompt/completion
+content, tool calls) — and fed into the core `/trace` system. Register one
+`Processor` ([`agentix-trace-otel`](plugins/trace-otel/README.md)) and the
+full agent trajectory exports to **LangSmith, LangFuse, Docent, Phoenix,
+or any OTLP backend**. The agent stays pristine — Agentix derives the
+spans from the traffic it already bridges, so there is nothing to
+instrument.
 
 ## Ecosystem
 
