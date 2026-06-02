@@ -116,11 +116,15 @@ def _decode_result_value(raw: Any) -> Any:
     elif isinstance(raw, bytearray):
         raw = bytes(raw)
     if not isinstance(raw, bytes):
-        raise RuntimeError(f"invalid sandbox return payload type: expected bytes, got {type(raw).__name__}")
+        raise RuntimeError(
+            "sandbox return value must be msgpack bytes; "
+            f"got {type(raw).__name__}. "
+            "This security boundary prevents host-side pickle deserialization."
+        )
     try:
         return unpack(raw)
     except Exception as exc:
-        raise RuntimeError("failed to decode sandbox return payload") from exc
+        raise RuntimeError(f"failed to decode sandbox return payload: {type(exc).__name__}: {exc}") from exc
 
 
 class RuntimeClient:

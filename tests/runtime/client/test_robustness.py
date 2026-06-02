@@ -26,7 +26,7 @@ from agentix.runtime.shared.codec import pack
 from tests._worker_target import count_exec_and_sleep, self_sigkill
 
 
-class _HostSideExploit:
+class _SandboxPickleExploit:
     def __reduce__(self):
         return (os.putenv, ("AGENTIX_UNSAFE_PICKLE_TRIGGERED", "1"))
 
@@ -95,9 +95,9 @@ def test_decode_result_value_accepts_msgpack_value() -> None:
     assert _decode_result_value(pack({"ok": True})) == {"ok": True}
 
 
-def test_decode_result_value_rejects_pickle_payload_without_host_execution(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_decode_result_value_rejects_pickle_exploit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AGENTIX_UNSAFE_PICKLE_TRIGGERED", raising=False)
-    payload = pickle.dumps(_HostSideExploit())
+    payload = pickle.dumps(_SandboxPickleExploit())
     with pytest.raises(RuntimeError, match="failed to decode sandbox return payload"):
         _decode_result_value(payload)
     assert os.environ.get("AGENTIX_UNSAFE_PICKLE_TRIGGERED") is None
