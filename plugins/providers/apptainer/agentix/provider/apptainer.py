@@ -163,8 +163,12 @@ def _extract_bundle(bundle_tar: Path, target: Path) -> Path:
         return normalized
 
     def ensure_safe_parent(root: Path, path: Path) -> None:
+        try:
+            relative_parent = path.parent.relative_to(root)
+        except ValueError as exc:
+            raise RuntimeError(f"bundle tar member escaped extraction root: {path}") from exc
         current = root
-        for part in path.parent.relative_to(root).parts:
+        for part in relative_parent.parts:
             current = current / part
             if os.path.lexists(current):
                 if current.is_symlink() or not current.is_dir():
@@ -198,7 +202,13 @@ def _extract_bundle(bundle_tar: Path, target: Path) -> Path:
             os.symlink(member.linkname, member_path)
             return
         if member.islnk():
-            link_target = root / checked_nix_member_name(member.linkname)
+            try:
+                link_name = checked_nix_member_name(member.linkname)
+            except RuntimeError as exc:
+                raise RuntimeError(f"bundle tar produced unsafe hard-link target: {member.linkname!r}") from exc
+            link_target = root / link_name
+            if not os.path.lexists(link_target):
+                raise RuntimeError(f"bundle tar hard-link target does not exist: {member.linkname!r}")
             os.link(link_target, member_path)
             return
         if member.isfile():
