@@ -10,12 +10,12 @@ Evaluate agents, train them with RL, and collect rollout data across
 no bespoke microservice per pairing and no changes to the agent.
 </p>
 
-[![GitHub Stars](https://img.shields.io/github/stars/Agentiix/Agentix?style=flat-square)](https://github.com/Agentiix/Agentix)
+[![GitHub Stars](https://img.shields.io/github/stars/Agentix-Project/Agentix?style=flat-square)](https://github.com/Agentix-Project/Agentix)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg?style=flat-square)](https://www.python.org/downloads/)
-[![Docs](https://img.shields.io/badge/docs-agentiix.github.io-cc785c?style=flat-square)](https://agentiix.github.io/)
+[![Docs](https://img.shields.io/badge/docs-online-cc785c?style=flat-square)](https://agentix-project.github.io/Agentix/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg?style=flat-square)](LICENSE)
 
-**[Docs](https://agentiix.github.io/)** · **[Quickstart](https://agentiix.github.io/quickstart)** · **[Cookbook](https://github.com/Agentiix/agentix-cookbook)** · **[Roadmap](ROADMAP.md)**
+**[Docs](https://agentix-project.github.io/Agentix/)** · **[Quickstart](https://agentix-project.github.io/Agentix/quick-start/)** · **[Cookbook](https://github.com/Agentix-Project/agentix-cookbook)** · **[Roadmap](ROADMAP.md)**
 
 </div>
 
@@ -133,7 +133,7 @@ async with DockerProvider().session(config) as sandbox:
 
 Build a cross-arch bundle by passing `--platform linux/amd64` to both
 `agentix build` and `agentix deploy`. Full walkthrough:
-[quickstart](https://agentiix.github.io/quickstart).
+[quickstart](https://agentix-project.github.io/Agentix/quick-start/).
 
 ## What you can call
 
@@ -262,7 +262,7 @@ Drop a directory under `plugins/` and it becomes a workspace member;
 ## Development
 
 ```bash
-git clone https://github.com/Agentiix/Agentix
+git clone https://github.com/Agentix-Project/Agentix
 cd Agentix
 uv sync --all-packages --all-extras
 uv run pytest
@@ -276,9 +276,9 @@ remote calls work under the hood.
 
 ## Links
 
-- [Docs](https://agentiix.github.io/) · [Quickstart](https://agentiix.github.io/quickstart)
-- [Remote calls](https://agentiix.github.io/concepts/remote-calls) · [Bundles](https://agentiix.github.io/concepts/bundles)
-- [Architecture](ARCHITECTURE.md) · [Roadmap](ROADMAP.md)
+- [Docs](https://agentix-project.github.io/Agentix/) · [Quickstart](https://agentix-project.github.io/Agentix/quick-start/)
+- [Architecture](https://agentix-project.github.io/Agentix/architecture/) · [CLI](https://agentix-project.github.io/Agentix/cli/) · [Plugins](https://agentix-project.github.io/Agentix/plugins/)
+- [Architecture (source)](ARCHITECTURE.md) · [Roadmap](ROADMAP.md)
 
 <div align="center">
 <sub>MIT licensed · built on <a href="https://docs.astral.sh/uv/">uv</a> workspaces</sub>
