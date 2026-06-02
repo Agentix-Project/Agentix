@@ -5,8 +5,8 @@ Every type here is part of the runtime wire surface between
 and the worker subprocess. Both client and server import from here.
 
 Wire encoding: callable identity travels as an import path
-(`module::qualname`). Args, kwargs, and return values travel as stdlib
-pickle blobs so arbitrary Python values can cross the boundary.
+(`module::qualname`). Args/kwargs travel as stdlib pickle blobs, while
+return values travel as msgpack blobs via `agentix.runtime.shared.codec`.
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ class RemoteError(BaseModel):
 
 
 class RemoteResponse(BaseModel):
-    """Internal worker response. `value` is a pickle blob on success."""
+    """Internal worker response. `value` is a msgpack blob on success."""
 
     ok: bool
     value: bytes | None = None

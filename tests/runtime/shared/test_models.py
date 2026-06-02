@@ -8,6 +8,7 @@ import pytest
 
 from agentix.provider.base import SandboxConfig, SandboxResource
 from agentix.runtime.shared.callables import RemoteCallable
+from agentix.runtime.shared.codec import pack, unpack
 from agentix.runtime.shared.models import RemoteError, RemoteRequest, RemoteResponse
 
 BUNDLE_REF = "/cache/agentix/bundles/sha256-deadbeef"
@@ -33,9 +34,9 @@ def test_remote_callable_rejects_non_callable():
 
 
 def test_remote_response_ok_shape():
-    resp = RemoteResponse(ok=True, value=pickle.dumps({"x": 1}))
+    resp = RemoteResponse(ok=True, value=pack({"x": 1}))
     assert resp.error is None
-    assert pickle.loads(resp.value) == {"x": 1}
+    assert unpack(resp.value) == {"x": 1}
 
 
 def test_remote_response_error_shape():

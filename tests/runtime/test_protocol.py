@@ -55,10 +55,8 @@ async def test_socketio_call_serialized_callable(use_inprocess_worker, live_serv
         await sio.disconnect()
 
     assert payload["call_id"] == "call-ok"
-    import pickle
-
-    result = pickle.loads(payload["value"])
-    assert result.msg == "echo:hi"
+    result = unpack(payload["value"])
+    assert result["msg"] == "echo:hi"
 
 
 async def test_socketio_bad_callable_returns_error(use_inprocess_worker, live_server):
@@ -97,7 +95,7 @@ async def test_client_remote_round_trip(use_inprocess_worker, live_server):
     base_url = await live_server()
     async with RuntimeClient(base_url) as c:
         result = await c.remote(target.echo, msg="hello")
-    assert result.msg == "echo:hello"
+    assert result["msg"] == "echo:hello"
 
 
 async def test_client_remote_http_fast_path_falls_back_to_sio(use_inprocess_worker, live_server):
@@ -157,8 +155,7 @@ async def test_same_call_id_via_mixed_paths_runs_fn_exactly_once(use_inprocess_w
         await sio.disconnect()
 
     assert payload["call_id"] == call_id
-    import pickle as _pickle
-    assert _pickle.loads(payload["value"]) == 1, "fn must have run exactly once"
+    assert unpack(payload["value"]) == 1, "fn must have run exactly once"
 
 
 async def test_runtime_replays_unacked_result_after_reconnect(use_inprocess_worker, live_server):
@@ -210,8 +207,7 @@ async def test_runtime_replays_unacked_result_after_reconnect(use_inprocess_work
         await sio_b.disconnect()
 
     assert payload["call_id"] == call_id
-    import pickle as _pickle
-    assert _pickle.loads(payload["value"]) == 1, "fn must run exactly once"
+    assert unpack(payload["value"]) == 1, "fn must run exactly once"
 
 
 async def test_client_remote_http_fallback_does_not_double_execute(use_inprocess_worker, live_server):

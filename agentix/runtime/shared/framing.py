@@ -19,7 +19,7 @@ Frame schemas (`{"type": "...", ...}` — extra fields per type):
   ─── worker → runtime ─────────────────────────────────────
     ready        {}                               — sent once after worker startup
     boot_error   {error}                          — sent once if startup fails
-    result       {call_id, value}                 — call succeeded (value is pickle bytes)
+    result       {call_id, value}                 — call succeeded (value is msgpack bytes)
     error        {call_id, error}                 — call failed
     sio_open     {namespace}                      — open a side-channel namespace
     sio_emit     {namespace, event, data}         — emit side-channel data
@@ -32,7 +32,7 @@ captures fd 1 separately and forwards those lines as `/log` records so
 
 `callable` is an import-path `RemoteCallable` string
 (`module::qualname`); `arguments` is pickle.dumps((args, kwargs)); the
-worker pickles the return value back into `value`.
+worker msgpack-encodes the return value back into `value`.
 """
 
 from __future__ import annotations
