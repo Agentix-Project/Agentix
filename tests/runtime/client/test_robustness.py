@@ -8,6 +8,8 @@ Three minimal-cost guarantees:
 
 from __future__ import annotations
 
+import os
+import pickle
 import socket
 
 import pytest
@@ -18,8 +20,15 @@ from agentix.runtime.client.client import (
     RuntimeClient,
     RuntimeUnreachable,
     WorkerExited,
+    _decode_result_value,
 )
+from agentix.runtime.shared.codec import pack
 from tests._worker_target import count_exec_and_sleep, self_sigkill
+
+
+class _SandboxPickleExploit:
+    def __reduce__(self):
+        return (os.putenv, ("AGENTIX_UNSAFE_PICKLE_TRIGGERED", "1"))
 
 
 @pytest.mark.asyncio
@@ -80,3 +89,15 @@ async def test_fail_pending_drains_queues_with_fatal_error():
         assert data is err
     finally:
         await client._client.aclose()
+
+
+def test_decode_result_value_accepts_msgpack_value() -> None:
+    assert _decode_result_value(pack({"ok": True})) == {"ok": True}
+
+
+def test_decode_result_value_rejects_pickle_exploit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AGENTIX_UNSAFE_PICKLE_TRIGGERED", raising=False)
+    payload = pickle.dumps(_SandboxPickleExploit())
+    with pytest.raises(RuntimeError, match="failed to decode sandbox return payload"):
+        _decode_result_value(payload)
+    assert os.environ.get("AGENTIX_UNSAFE_PICKLE_TRIGGERED") is None

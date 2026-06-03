@@ -1,8 +1,7 @@
 """Worker-side callable execution.
 
-The worker unpickles the callable + args/kwargs, calls it, and pickles
-the result back. No shape detection, no TypeAdapter validation — pickle
-preserves Python object identity end to end.
+The worker unpickles the callable + args/kwargs, calls it, and
+msgpack-encodes the result back.
 
 A coroutine function is awaited directly on the worker's event loop; a
 plain (sync) function runs in a thread via ``asyncio.to_thread`` so a
@@ -31,6 +30,7 @@ from collections.abc import Iterator
 from typing import Any
 
 from agentix.runtime.shared.callables import display_name_for
+from agentix.runtime.shared.codec import pack
 from agentix.runtime.shared.models import RemoteError, RemoteRequest, RemoteResponse
 from agentix.utils import context as _context
 from agentix.utils.trace._bridge import DISPATCH_CALL_ID
@@ -86,13 +86,13 @@ class CallableInvoker:
                 ),
             )
         try:
-            payload = pickle.dumps(result)
+            payload = pack(result)
         except Exception as exc:
             return RemoteResponse(
                 ok=False,
                 error=RemoteError(
                     type="ResultEncodeError",
-                    message=f"failed to pickle return value: {exc}",
+                    message=f"failed to encode return value: {exc}",
                 ),
             )
         return RemoteResponse(ok=True, value=payload)

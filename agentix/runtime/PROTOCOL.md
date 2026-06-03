@@ -22,7 +22,8 @@ instances are intentionally outside the callable boundary. Put remote
 code behind an importable top-level function instead.
 
 Args and kwargs travel separately as `arguments = pickle.dumps((args, kwargs))`.
-Return values travel as `value = pickle.dumps(result)`.
+Return values travel as `value = pack(result)` using
+`agentix.runtime.shared.codec`.
 
 ```python
 from my_project.tasks import run
@@ -51,7 +52,7 @@ runtime.
 
 ```text
 call          {call_id, callable, arguments}
-call:result   {call_id, value}                  # value is pickle.dumps(result)
+call:result   {call_id, value}                  # value is pack(result)
 call:error    {call_id, error}
 cancel        {call_id}
 ```
@@ -127,4 +128,4 @@ Client mapping:
 - Per-call timeouts; callers use `asyncio.wait_for(...)`.
 - Retries; calls are at-most-once.
 - Auth/TLS; providers own that layer.
-- Annotation-driven validation on the wire (args/return are pickle today).
+- Annotation-driven validation on the wire (args are pickle today).

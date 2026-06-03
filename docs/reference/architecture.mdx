@@ -90,7 +90,7 @@ arguments = pickle.dumps((args, kwargs))
 ```
 
 The runtime worker imports the module, resolves the function, unpickles
-the arguments, and invokes it. Return values travel back as pickle
+the arguments, and invokes it. Return values travel back as msgpack
 blobs inside `call:result`.
 
 ## Call Flow
@@ -102,8 +102,8 @@ blobs inside `call:result`.
 4. Client emits `call` on Socket.IO `/rpc`.
 5. Runtime server forwards the request to the worker subprocess.
 6. Worker imports `app`, resolves `run`, unpickles args, and calls it.
-7. Worker pickles the return value.
-8. Server emits `call:result`; client unpickles the value and returns it.
+7. Worker msgpack-encodes the return value.
+8. Server emits `call:result`; client msgpack-decodes the value and returns it.
 ```
 
 ## Transports
@@ -158,7 +158,7 @@ For each call, the worker:
 1. resolves the `RemoteCallable` import path
 2. unpickles `(args, kwargs)`
 3. calls the callable (awaiting when the return value is awaitable)
-4. pickles the return value
+4. msgpack-encodes the return value
 
 The worker also hosts the sandbox-side `agentix.sio` bridge. Plugin
 namespaces register inside the worker and forward events through

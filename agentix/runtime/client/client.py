@@ -108,8 +108,23 @@ def _decode_payload(raw: Any) -> dict[str, Any]:
     return raw
 
 
-def _unpickle_value(raw: Any) -> Any:
-    return pickle.loads(raw) if raw is not None else None
+def _decode_result_value(raw: Any) -> Any:
+    if raw is None:
+        return None
+    if isinstance(raw, memoryview):
+        raw = raw.tobytes()
+    elif isinstance(raw, bytearray):
+        raw = bytes(raw)
+    if not isinstance(raw, bytes):
+        raise RuntimeError(
+            "sandbox return value must be msgpack bytes; "
+            f"got {type(raw).__name__}. "
+            "This security boundary prevents host-side pickle deserialization."
+        )
+    try:
+        return unpack(raw)
+    except Exception as exc:
+        raise RuntimeError(f"failed to decode sandbox return payload: {type(exc).__name__}: {exc}") from exc
 
 
 class RuntimeClient:
@@ -271,7 +286,7 @@ class RuntimeClient:
         if not isinstance(reply, dict):
             raise RuntimeError("invalid /call reply payload")
         if reply.get("ok") is True:
-            return "result", _unpickle_value(reply.get("value"))
+            return "result", _decode_result_value(reply.get("value"))
         if reply.get("ok") is False:
             err = RemoteError.model_validate(reply.get("error") or {})
             return "error", err
@@ -325,7 +340,7 @@ class RuntimeClient:
                     kind, data = await q.get()
                     if kind == "result":
                         terminated = True
-                        return cast(R, _unpickle_value(data.get("value")))
+                        return cast(R, _decode_result_value(data.get("value")))
                     if kind == "error":
                         err = RemoteError.model_validate(data["error"])
                         terminated = True

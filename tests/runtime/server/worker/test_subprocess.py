@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from agentix.runtime.server.worker import RuntimeWorkerClient
+from agentix.runtime.shared.codec import unpack
 from agentix.runtime.shared.models import RemoteRequest
 from tests import _worker_target as target
 from tests._rpc_helpers import request_for
@@ -34,8 +35,8 @@ async def test_subprocess_worker_round_trip():
     try:
         resp = await mp.call(request_for(target.echo, kwargs={"msg": "hi"}))
         assert resp.ok, resp.error
-        result = pickle.loads(resp.value)
-        assert result.msg == "echo:hi"
+        result = unpack(resp.value)
+        assert result["msg"] == "echo:hi"
     finally:
         await mp.shutdown()
 
@@ -53,7 +54,7 @@ async def test_subprocess_worker_handles_many_concurrent_calls():
         responses = await asyncio.gather(
             *(mp.call(request_for(target.echo, kwargs={"msg": str(i)})) for i in range(25))
         )
-        msgs = sorted(pickle.loads(r.value).msg for r in responses)
+        msgs = sorted(unpack(r.value)["msg"] for r in responses)
         assert msgs == sorted(f"echo:{i}" for i in range(25))
     finally:
         await mp.shutdown()
@@ -93,8 +94,8 @@ async def test_subprocess_worker_ignores_cwd_agentix_package(
     try:
         resp = await mp.call(request_for(target.echo, kwargs={"msg": "shadow"}))
         assert resp.ok, resp.error
-        result = pickle.loads(resp.value)
-        assert result.msg == "echo:shadow"
+        result = unpack(resp.value)
+        assert result["msg"] == "echo:shadow"
     finally:
         await mp.shutdown()
 
@@ -110,13 +111,13 @@ async def test_subprocess_worker_child_reading_stdin_does_not_steal_frames():
     try:
         r1 = await mp.call(request_for(target.spawn_stdin_reading_child))
         assert r1.ok, r1.error
-        assert pickle.loads(r1.value) == 0
+        assert unpack(r1.value) == 0
 
         # If the child had stolen frame bytes, the pipe would be desynced
         # and this call would hang or return garbage.
         r2 = await mp.call(request_for(target.echo, kwargs={"msg": "after"}))
         assert r2.ok, r2.error
-        assert pickle.loads(r2.value).msg == "echo:after"
+        assert unpack(r2.value)["msg"] == "echo:after"
     finally:
         await mp.shutdown()
 
@@ -179,7 +180,7 @@ async def test_subprocess_worker_respawns_after_death():
 
         r2 = await mp.call(request_for(target.echo, kwargs={"msg": "two"}))
         assert r2.ok, r2.error
-        assert pickle.loads(r2.value).msg == "echo:two"
+        assert unpack(r2.value)["msg"] == "echo:two"
         assert mp._worker is not worker1  # a fresh worker was spawned
 
         # The dead worker must be torn down on respawn, not leaked: its drain
