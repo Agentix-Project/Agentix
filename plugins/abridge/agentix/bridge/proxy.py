@@ -220,6 +220,26 @@ def _collect_handlers(client: Client) -> dict[str, Handler]:
                     f"({type(client).__name__})"
                 )
             handlers[path] = getattr(client, name)
+
+    # Dynamic routes: a client may expose `abridge_routes() -> dict[str,
+    # Handler]` for paths chosen at construction time (e.g. `Forward(target,
+    # paths=[...])`), which the class-level `@on` tag can't express. They
+    # compose with `@on` handlers under the same duplicate-path rule.
+    dynamic = getattr(client, "abridge_routes", None)
+    if callable(dynamic):
+        routes = dynamic()
+        if not isinstance(routes, dict):
+            raise TypeError(
+                f"{type(client).__name__}.abridge_routes() must return a dict[str, handler]"
+            )
+        for path, handler in routes.items():
+            if not isinstance(path, str) or not path.startswith("/"):
+                raise ValueError(f"abridge_routes path must start with '/'; got {path!r}")
+            if path in handlers:
+                raise ValueError(
+                    f"duplicate handler for path {path!r} ({type(client).__name__})"
+                )
+            handlers[path] = handler
     return handlers
 
 
