@@ -1,15 +1,16 @@
 # abridge in Agentix
 
 abridge is the bridge between an in-sandbox agent and the LLMs it calls.
-Its one irreplaceable job is **transport + credential isolation**: the
-agent runs inside a sandbox and reaches the outside world *only* through
-abridge's tunnel, so the real upstream API key never enters the sandbox.
+When the agent SDK is pointed at abridge's loopback URL, abridge provides
+**request routing + credential isolation**: the placeholder credential
+stays in the sandbox while the real upstream API key remains on the host.
 
 Everything shape-aware — Anthropic↔OpenAI translation, vLLM/SGLang
-quirks, RL pretokenization and trajectory recording — lives **behind**
-abridge in host-side **sidecars**. abridge core stays shape- and
-protocol-blind: it ferries bytes to a sidecar URL and returns the bytes
-verbatim.
+quirks, RL pretokenization and trajectory recording — can live in an
+existing in-process client or behind abridge in a host-side **sidecar**.
+The current tunnel is shape-blind at the JSON-schema level, not a generic
+HTTP byte proxy: it accepts declared JSON POST routes, sends the decoded
+object over Socket.IO, and returns one fully buffered response.
 
 ```mermaid
 flowchart TB
@@ -19,7 +20,7 @@ flowchart TB
   end
 
   subgraph hs["host — real key lives here"]
-    proxy["abridge Proxy · Forward<br/>shape-blind byte ferry"]
+    proxy["abridge Proxy · Forward<br/>shape-blind JSON POST"]
     cc["cc_convert sidecar<br/>Anthropic ↔ OpenAI + quirks"]
     tito["tito sidecar<br/>pretokenize + record"]
     trace["/trace → trainer / eval"]
@@ -41,34 +42,39 @@ flowchart TB
   class tito,trace planned;
 ```
 
-Solid = landed in this PR. Dashed = planned (see below).
+Solid = code present in this branch. Dashed = planned (see below).
 
 ## The three layers
 
 | Layer | What | Where |
 |---|---|---|
-| **Transport kernel** | sandbox↔host byte ferry, credential isolation, path routing | abridge core (`proxy.py`, `forward.py`, `sidecar.py`) |
+| **Transport kernel** | sandbox↔host JSON POST routing, credential isolation, buffered responses | abridge core (`proxy.py`, `forward.py`, `sidecar.py`) |
 | **Gateway** | translation, pretokenization, mock/replay — all protocol/ML logic | host-side sidecars (`cc_convert`, `tito`), reused as-is |
 | **Rollout data** | per-session trajectory → `/trace` → trainer/eval | `rollout.py` + trajectory bridge *(planned)* |
 
 ## Primitives
 
-- **`Forward(target_url, paths=[...])`** — the only "client" abridge
-  needs: a protocol-blind handler that POSTs the agent's request to a
-  sidecar and returns the bytes. Stamps `x-session-id` / `x-request-id`
-  for rollout identity.
+- **`Forward(target_url, paths=[...])`** — a shape-blind handler that
+  POSTs the decoded JSON body to a sidecar and returns one buffered
+  response. It stamps `x-session-id` / `x-request-id` for rollout
+  identity. Request headers, query parameters, and non-JSON bodies are
+  outside the current contract.
 - **`Sidecar(command=..., health_path=...)`** — owns a local sidecar
   process's lifecycle (spawn → health → URL → teardown). abridge-managed
   by default; pass an external URL straight to `Forward` to opt out.
-- **`cc_convert_sidecar(...)`** — preset that runs the `cc_convert` Rust
-  binary as an Anthropic↔OpenAI translation sidecar.
+- **`cc_convert_sidecar(...)`** — preset that runs an externally installed
+  `cc_convert` Rust binary as an Anthropic↔OpenAI translation sidecar.
 
 ## Status
 
-- **Landed:** `Forward`, `Sidecar`, the `cc_convert` translation sidecar,
-  end-to-end tested (Anthropic agent → abridge → cc_convert → OpenAI
-  upstream → translated Anthropic back, streaming and non-streaming).
-- **Planned:** the `tito` pretokenize/record sidecar + a first-class
-  `Session`/`Trajectory` model bridged onto `/trace`; a streaming
-  Plugin primitive (`@on` / `@stream`) with abridge as a specialization;
-  removal of the legacy in-process translation clients.
+- **Implemented in this branch:** `Forward`, `Sidecar`, and a
+  `cc_convert_sidecar` process preset. Unit tests use a local HTTP
+  sidecar; an optional binary-backed test covers translated JSON and a
+  completed SSE payload when `cc_convert_sidecar` is installed.
+- **Not implemented yet:** incremental SSE delivery. `Forward` buffers the
+  complete sidecar response before the tunnel sends it to the agent.
+- **Planned:** a required full tunnel/SIO/sidecar integration check; the
+  `tito` pretokenize/record sidecar; a first-class `Session`/`Trajectory`
+  model bridged onto `/trace`; and an open/chunk/end streaming primitive.
+  Existing in-process clients remain supported until a separate migration
+  removes them.

@@ -1,10 +1,10 @@
 """Tests for the Layer-1 primitives: `Forward` + `Sidecar`.
 
-`Forward` is the protocol-blind handler that ferries an agent's request to
-a sidecar URL; `Sidecar` owns a local gateway process's lifecycle. The
-unit tests mock httpx; the integration tests spawn a tiny echo HTTP server
-as a real sidecar to prove the whole launch → health → forward path
-locally, with no LLM in the loop.
+`Forward` is the schema-agnostic JSON POST handler that sends an agent's
+decoded JSON object to a sidecar URL; `Sidecar` owns a local gateway
+process's lifecycle. The unit tests mock httpx; the integration tests spawn
+a tiny echo HTTP server as a real sidecar to prove the whole launch →
+health → forward path locally, with no LLM in the loop.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from agentix.bridge import (
     Request,
     Sidecar,
     SidecarError,
+    TunnelHandle,
 )
 
 # A minimal HTTP server: 200 on any GET (health), echo JSON on POST.
@@ -91,7 +92,8 @@ async def test_forward_posts_body_and_stamps_identity(monkeypatch) -> None:
     assert "x-request-id" in captured["headers"]
 
 
-async def test_forward_sse_passthrough(monkeypatch) -> None:
+async def test_forward_returns_buffered_sse_compatibility(monkeypatch) -> None:
+    """SSE bytes and media type survive, but only after the body is buffered."""
     fwd = Forward("http://side.car", paths=["/v1/messages"])
 
     async def fake_post(url, *, json, headers):
@@ -107,16 +109,16 @@ async def test_forward_sse_passthrough(monkeypatch) -> None:
     assert b"event: message_start" in resp.body
 
 
-async def test_forward_upstream_error_preserves_status(monkeypatch) -> None:
+async def test_forward_upstream_http_error_is_a_response(monkeypatch) -> None:
     fwd = Forward("http://side.car", paths=["/v1/messages"])
 
     async def fake_post(url, *, json, headers):
         return httpx.Response(503, content=b'{"error":"down"}', headers={"content-type": "application/json"})
 
     monkeypatch.setattr(fwd._client, "post", fake_post)
-    with pytest.raises(AbridgeError) as ei:
-        await fwd.abridge_routes()["/v1/messages"](_req("/v1/messages", {}))
-    assert ei.value.status_code == 503
+    resp = await fwd.abridge_routes()["/v1/messages"](_req("/v1/messages", {}))
+    assert resp.status_code == 503
+    assert resp.body == b'{"error":"down"}'
 
 
 async def test_forward_network_error_is_502(monkeypatch) -> None:
@@ -129,6 +131,122 @@ async def test_forward_network_error_is_502(monkeypatch) -> None:
     with pytest.raises(AbridgeError) as ei:
         await fwd.abridge_routes()["/v1/messages"](_req("/v1/messages", {}))
     assert ei.value.status_code == 502
+
+
+async def test_forward_http_status_survives_tunnel_and_sio(monkeypatch) -> None:
+    """A sidecar 503 stays a normal result across the complete wire path."""
+    import agentix.bridge.proxy as proxy_mod
+
+    import agentix as agentix_mod
+
+    monkeypatch.setattr(agentix_mod, "register_namespace", lambda ns: None)
+    monkeypatch.setattr(proxy_mod, "_namespace_singleton", None)
+
+    fwd = Forward("http://side.car", paths=["/v1/messages"])
+
+    async def fake_post(url, *, json, headers):
+        return httpx.Response(
+            503,
+            content=b'{"error":"sidecar unavailable"}',
+            headers={"content-type": "application/json"},
+        )
+
+    assert fwd._client is not None
+    monkeypatch.setattr(fwd._client, "post", fake_post)
+    host = Proxy(fwd)
+    handle = await proxy_mod._start_tunnel(paths=list(host.paths))
+    sandbox_ns = proxy_mod._get_namespace()
+
+    async def sandbox_emit(event, data=None):
+        await host.trigger_event(event, data)
+
+    async def host_emit(event, data=None, **kwargs):
+        if event.endswith(":result"):
+            await sandbox_ns._on_reply_success(data)
+        elif event.endswith(":error"):
+            await sandbox_ns._on_reply_error(data)
+
+    monkeypatch.setattr(sandbox_ns, "emit", sandbox_emit)
+    monkeypatch.setattr(host, "emit", host_emit)
+
+    try:
+        async with httpx.AsyncClient(base_url=handle.url, timeout=10) as client:
+            response = await client.post("/v1/messages", json={"model": "claude"})
+        assert response.status_code == 503
+        assert response.content == b'{"error":"sidecar unavailable"}'
+    finally:
+        await proxy_mod._stop_tunnel(handle=handle)
+        await fwd.aclose()
+
+
+class _CloseAwareClient:
+    def __init__(self) -> None:
+        self.close_calls = 0
+
+    def abridge_routes(self):
+        return {"/v1/messages": self.handle}
+
+    async def handle(self, request: Request) -> ClientResponse:
+        return ClientResponse.json({"ok": True})
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
+
+
+class _FakeSandbox:
+    def __init__(self, *, fail_start: bool = False) -> None:
+        self.fail_start = fail_start
+        self.remote_calls = 0
+
+    def register_namespace(self, namespace) -> None:
+        pass
+
+    async def remote(self, fn, **kwargs):
+        self.remote_calls += 1
+        if self.fail_start:
+            raise RuntimeError("tunnel failed to start")
+        return TunnelHandle(url="http://127.0.0.1:1", port=1)
+
+
+async def test_proxy_session_closes_clients_once() -> None:
+    client = _CloseAwareClient()
+    proxy = Proxy(client)
+    sandbox = _FakeSandbox()
+
+    async with proxy.session(sandbox):
+        assert client.close_calls == 0
+
+    assert client.close_calls == 1
+    await proxy.stop(sandbox)
+    assert client.close_calls == 1
+
+
+async def test_proxy_closes_clients_when_start_fails() -> None:
+    client = _CloseAwareClient()
+    proxy = Proxy(client)
+    sandbox = _FakeSandbox(fail_start=True)
+
+    with pytest.raises(RuntimeError, match="failed to start"):
+        await proxy.start(sandbox)
+
+    assert client.close_calls == 1
+    await proxy.stop(sandbox)
+    assert client.close_calls == 1
+
+
+async def test_forward_pool_can_reopen_after_idempotent_close() -> None:
+    fwd = Forward("http://side.car", paths=["/v1/messages"])
+    original = fwd._client
+    assert original is not None
+
+    await fwd.aclose()
+    await fwd.aclose()
+    assert original.is_closed
+
+    replacement = fwd._get_client()
+    assert replacement is not original
+    assert not replacement.is_closed
+    await fwd.aclose()
 
 
 # ── Sidecar + Forward (integration, real subprocess) ──────────────────

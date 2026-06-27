@@ -1,11 +1,16 @@
-"""Forward — a protocol-blind handler that ferries calls to a sidecar URL.
+"""Forward — a schema-agnostic JSON POST handler for a sidecar URL.
 
-This is the only "client" abridge needs in the redesigned architecture.
-The agent's request body arrives over the tunnel; `Forward` POSTs it
-verbatim to `target_url + path` and returns the response bytes verbatim.
-All shape/translation/pretokenization lives *behind* `target_url` — a
-`cc_convert` translator sidecar, a `tito` gateway, or any HTTP service —
-so abridge core stays shape- and protocol-blind.
+The sandbox tunnel decodes an inbound JSON object and sends that object to
+the host. `Forward` serializes it as a new JSON POST to `target_url + path`,
+then buffers the complete sidecar response and returns its body, media type,
+and HTTP status. Shape translation and pretokenization can therefore live
+*behind* `target_url` — in a `cc_convert` translator sidecar, a `tito`
+gateway, or another JSON service — without teaching abridge those schemas.
+
+This is intentionally not an HTTP-transparent byte ferry: the original
+method, query, headers, and JSON encoding are not preserved. An SSE response
+keeps its media type and payload for compatibility, but is fully buffered;
+there is no chunk streaming or backpressure on this wire contract.
 
     proxy = Proxy(Forward(sidecar_url, paths=["/v1/messages"]))
     async with proxy.session(sandbox) as handle:
@@ -34,13 +39,19 @@ logger = logging.getLogger(__name__)
 
 
 class Forward:
-    """Forward `paths` to `target_url` over httpx, returning bytes verbatim.
+    """Forward JSON POSTs on `paths` to `target_url` over httpx.
 
     `session_id` identifies the rollout this forwarder serves (auto-gen if
     not passed); stamped as `x-session-id` on every upstream call. Reusing
-    one `Forward` across multiple `Proxy` instances shares the session —
-    the intended model. `headers` are merged into every upstream request
-    (e.g. an upstream auth token the sidecar expects).
+    a `Forward` across sequential proxy sessions keeps that identity. A
+    `Proxy` closes the forwarder's HTTP pool when its lifecycle stops; the
+    pool is recreated lazily if the forwarder is used again. `headers` are
+    merged into every upstream request (e.g. an upstream auth token the
+    sidecar expects).
+
+    Responses, including 4xx and 5xx responses, remain normal
+    `ClientResponse` values so their status and body survive the tunnel.
+    `AbridgeError(502)` is reserved for failures to obtain an HTTP response.
     """
 
     def __init__(
@@ -58,7 +69,8 @@ class Forward:
         self._paths = tuple(paths)
         self.session_id = session_id or uuid.uuid4().hex
         self._headers = dict(headers or {})
-        self._client = httpx.AsyncClient(timeout=timeout)
+        self._timeout = timeout
+        self._client: httpx.AsyncClient | None = httpx.AsyncClient(timeout=timeout)
 
     def abridge_routes(self) -> dict[str, Handler]:
         return {path: self._make_handler(path) for path in self._paths}
@@ -79,27 +91,31 @@ class Forward:
         }
         url = self._target + path
         try:
-            resp = await self._client.post(url, json=request.body, headers=headers)
+            resp = await self._get_client().post(url, json=request.body, headers=headers)
         except httpx.HTTPError as exc:
             logger.warning("abridge forward %s: %s", url, exc)
             raise AbridgeError(f"forward to {url}: {exc}", status_code=502) from exc
 
         media_type = resp.headers.get("content-type", "application/json").split(";")[0].strip()
-        if resp.status_code >= 400:
-            # Surface the sidecar's error in-band to the agent, preserving
-            # its status. The body is the sidecar's error payload verbatim.
-            raise AbridgeError(
-                resp.text or f"sidecar {url} returned {resp.status_code}",
-                status_code=resp.status_code,
-            )
         return ClientResponse(
             body=resp.content,
             media_type=media_type or "application/json",
             status_code=resp.status_code,
         )
 
+    def _get_client(self) -> httpx.AsyncClient:
+        client = self._client
+        if client is None or client.is_closed:
+            client = httpx.AsyncClient(timeout=self._timeout)
+            self._client = client
+        return client
+
     async def aclose(self) -> None:
-        await self._client.aclose()
+        """Close the HTTP pool. Safe to call repeatedly and reusable later."""
+        client = self._client
+        self._client = None
+        if client is not None and not client.is_closed:
+            await client.aclose()
 
 
 __all__ = ["Forward"]

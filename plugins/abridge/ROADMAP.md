@@ -1,6 +1,6 @@
 # abridge Roadmap
 
-`agentix-bridge` is a shape-blind HTTP→SIO tunnel + a host-side
+`agentix-bridge` is a shape-blind JSON-POST→SIO tunnel + a host-side
 `Proxy` that routes path-named SIO events to `@on(path)`-decorated
 handler methods. Three bundled handlers in `agentix.bridge.clients`
 cover the OpenAI and Anthropic cases; custom handlers are plain
@@ -15,8 +15,8 @@ from agentix.bridge import (
     on,                 # @on(path) — decorator that wires a method to a URL path
     Client,             # marker Protocol for "any class with @on methods"
     Handler,            # type alias for the bound @on method shape
-    Request,            # what an @on method receives (path + body)
-    ClientResponse,     # what an @on method returns (JSON / SSE / raw bytes)
+    Request,            # what an @on method receives (path + decoded JSON object)
+    ClientResponse,     # one buffered JSON / SSE / byte response
     AbridgeError,       # raise for in-band agent-side errors (carries status_code)
     TunnelHandle,       # what proxy.start(sandbox) yields (url, port)
 )
@@ -34,31 +34,41 @@ from agentix.bridge.clients import (
 
 ```
 sandbox tunnel       ── http://127.0.0.1:<port>/<declared path>
-   │  whitelist routes from `Proxy.paths`; byte forward only
+   │  whitelist routes from `Proxy.paths`; JSON POST object only
    ▼  SIO /abridge   event name == URL path; payload == agent body (no envelope)
 host Proxy
    │  trigger_event(path) → @on(path) handler (detached task)
    │  bundled clients open their own trace.span(...) and call
    │  populate_*_span for OTel GenAI attrs
-   ▼  ClientResponse (bytes + media_type)
+   ▼  one buffered ClientResponse (bytes + media_type + status)
 ```
+
+`Forward` and `Sidecar` add an optional host-side process boundary to this
+structure. They do not widen the HTTP contract: `Forward` re-serializes the
+decoded JSON object and buffers the full sidecar response. Existing bundled
+clients remain valid while sidecar gateways mature.
 
 ## Near-term — same package
 
 1. **Real streaming.** Today `AnthropicClient` streams via the SDK
    internally but re-serialises the whole stream as a single SSE blob
-   before returning. `AnthropicFromOpenAIClient` is non-streaming
-   upstream regardless of the agent's `stream=True`. Real streaming =
+   before returning, and `Forward` buffers the complete HTTP response.
+   `AnthropicFromOpenAIClient` is non-streaming upstream regardless of
+   the agent's `stream=True`. Real streaming =
    split the SIO request into `<path>:open` / `<path>:chunk` /
    `<path>:end`, iterate `chat.completions.stream(...)` on the host,
    forward chunks through the tunnel as they arrive.
 
-2. **`ReplayClient`** under `clients/replay.py`. Wraps a list of
+2. **Required sidecar integration coverage.** Install a pinned gateway
+   binary in CI and exercise sandbox tunnel → SIO → `Forward` → sidecar →
+   mock upstream, including HTTP errors and lifecycle cleanup.
+
+3. **`ReplayClient`** under `clients/replay.py`. Wraps a list of
    pre-captured `(request, ClientResponse)` pairs; satisfies any
    `@on(path)` by index. Useful for offline eval reruns, RL buffer
    regression tests, CI-friendly assertions without burning tokens.
 
-3. **Capture API.** Today storage is gone from the core (skipped in
+4. **Capture API.** Today storage is gone from the core (skipped in
    the recent cleanup). Add `agentix.bridge.capture` — a small hook
    that any handler can call (or a Proxy-level event subscriber) to
    record full `(request, response)` pairs. Lightweight; in-memory

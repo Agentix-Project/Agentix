@@ -2,25 +2,27 @@
 
 `agentix-bridge` is the Agentix HTTP tunnel. Inside the sandbox it runs
 a tiny HTTP server on `127.0.0.1` that catches your agent's outbound
-calls and ferries each one over Agentix's Socket.IO connection to the
+JSON POST calls and ferries each decoded object over Agentix's Socket.IO connection to the
 host. On the host, a `Proxy` routes by URL path to `@on(path)`-decorated
 handler methods you supply. The handler decides what happens (POST
 upstream, translate shapes, replay, mock) and returns a
-`ClientResponse`; the bridge ferries the bytes back to the agent.
+`ClientResponse`; the bridge returns its fully buffered body to the agent.
 
 ```text
 agent in sandbox
-  -> http://127.0.0.1:<port>/<declared path>    (sandbox tunnel, byte forward)
+  -> http://127.0.0.1:<port>/<declared path>    (sandbox tunnel, JSON POST)
   -> Agentix /abridge SIO namespace             (SIO event name == URL path)
   -> host Proxy → your @on(path) method         (your code)
   <- ClientResponse (bytes + media_type)
 ```
 
-abridge's core is **shape- and protocol-blind**. It doesn't know
-Anthropic from OpenAI, doesn't look at message bodies, doesn't predefine
-event names. Bundled handlers in `agentix.bridge.clients` cover OpenAI
-and Anthropic; the same machinery handles any HTTP protocol — MCP
-forwarding via one `@on("/mcp")`, a webhook receiver, a custom RPC.
+abridge's core is **shape-blind**. It does not know Anthropic from OpenAI
+and does not predefine message fields, but its current transport contract
+is deliberately narrower than a generic HTTP proxy: declared POST routes,
+JSON object bodies, and one buffered response per request. Request headers,
+query parameters, non-JSON bodies, and incremental response chunks are not
+forwarded today. Bundled handlers in `agentix.bridge.clients` cover OpenAI
+and Anthropic; custom JSON protocols can use the same machinery.
 
 ## Install
 
@@ -92,6 +94,28 @@ proxy = Proxy(client)
 async with proxy.session(sandbox) as handle:
     await sandbox.remote(agent, env=client.environ(handle))
 ```
+
+### Forward through a host-side sidecar
+
+`Forward` keeps protocol-specific translation outside abridge. `Sidecar`
+owns a local process; an external service URL can be passed directly when
+another system owns its lifecycle.
+
+```python
+from agentix.bridge import Forward, Proxy, Sidecar
+
+async with Sidecar(
+    command=["my-sidecar", "--listen", "{host}:{port}"],
+    health_path="/healthz",
+) as sidecar_url:
+    proxy = Proxy(Forward(sidecar_url, paths=["/v1/messages"]))
+    async with proxy.session(sandbox) as handle:
+        await sandbox.remote(agent, base_url=handle.url)
+```
+
+This path forwards JSON bodies and buffers the complete sidecar response.
+An SSE payload is preserved as `text/event-stream`, but chunks do not reach
+the sandbox incrementally yet.
 
 ## Writing your own handler
 
@@ -179,6 +203,9 @@ LangSmith / Langfuse / Datadog / any OTel backend.
 ```
 agentix/bridge/
 ├── proxy.py                       # Proxy + @on + sandbox tunnel + wire types
+├── forward.py                     # JSON POST forwarding to a host-side service
+├── sidecar.py                     # local process lifecycle + health supervision
+├── sidecars.py                    # presets for external sidecar binaries
 └── clients/                       # bundled handler implementations
     ├── openai.py                  # OpenAIClient (openai SDK) + PLACEHOLDER_API_KEY
     ├── anthropic.py               # AnthropicClient (anthropic SDK) + environ() + PLACEHOLDER_API_KEY
@@ -189,5 +216,6 @@ agentix/bridge/
 
 ## What's next
 
-See [ROADMAP.md](ROADMAP.md): real streaming, replay client, Gemini /
-Bedrock / Cohere clients, and the training-bridge pause/resume surface.
+See [ARCHITECTURE.md](ARCHITECTURE.md) and [ROADMAP.md](ROADMAP.md): real
+streaming, required sidecar integration coverage, replay/capture, and the
+training-bridge pause/resume surface.
