@@ -59,9 +59,12 @@ clients remain valid while sidecar gateways mature.
    `<path>:end`, iterate `chat.completions.stream(...)` on the host,
    forward chunks through the tunnel as they arrive.
 
-2. **Required sidecar integration coverage.** Install a pinned gateway
-   binary in CI and exercise sandbox tunnel → SIO → `Forward` → sidecar →
-   mock upstream, including HTTP errors and lifecycle cleanup.
+2. **Deployed sidecar integration coverage.** Run a deterministic local HTTP
+   sidecar in CI and exercise a built sandbox/runtime → tunnel → SIO →
+   `Proxy` → `Forward` → sidecar round trip, including HTTP errors and
+   lifecycle cleanup. Gateway-specific binary adapters belong in separate
+   changes and must bring a pinned source or release artifact plus their own
+   required compatibility test.
 
 3. **`ReplayClient`** under `clients/replay.py`. Wraps a list of
    pre-captured `(request, ClientResponse)` pairs; satisfies any

@@ -55,6 +55,24 @@ class H(BaseHTTPRequestHandler):
 HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
 """
 
+ENV_FACTORY_SERVER = r"""#!/usr/bin/env python3
+import os
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+host, raw_port = os.environ["SIDECAR_LISTEN_ADDR"].rsplit(":", 1)
+
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+HTTPServer((host, int(raw_port)), H).serve_forever()
+"""
+
+
 def _available_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -164,6 +182,30 @@ async def test_fixed_port_is_not_replaced_after_bind_conflict(tmp_path: Path) ->
 
     assert ports == [fixed_port]
     assert sidecar.url == f"http://127.0.0.1:{fixed_port}"
+
+
+async def test_env_factory_receives_allocated_port_on_entry(tmp_path: Path) -> None:
+    binary = tmp_path / "env_factory_sidecar"
+    binary.write_text(ENV_FACTORY_SERVER)
+    binary.chmod(0o755)
+    seen: list[tuple[str, int]] = []
+
+    def env(host: str, port: int) -> dict[str, str]:
+        seen.append((host, port))
+        return {"SIDECAR_LISTEN_ADDR": f"{host}:{port}"}
+
+    sidecar = Sidecar(
+        command=[str(binary)],
+        env=env,
+        ready_timeout=5.0,
+    )
+
+    assert sidecar.url == "http://127.0.0.1:0"
+    async with sidecar as url:
+        _, raw_port = url.rsplit(":", 1)
+        assert seen == [("127.0.0.1", int(raw_port))]
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            assert (await client.get(url + "/healthz")).status_code == 200
 
 
 async def test_teardown_cancels_and_awaits_stuck_drain_tasks(monkeypatch: pytest.MonkeyPatch) -> None:
