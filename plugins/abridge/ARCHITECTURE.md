@@ -21,7 +21,7 @@ flowchart TB
 
   subgraph hs["host — real key lives here"]
     proxy["abridge Proxy · Forward<br/>shape-blind JSON POST"]
-    cc["cc_convert sidecar<br/>Anthropic ↔ OpenAI + quirks"]
+    gateway["user-provided sidecar<br/>translation · routing · recording"]
     tito["tito sidecar<br/>pretokenize + record"]
     trace["/trace → trainer / eval"]
   end
@@ -30,16 +30,16 @@ flowchart TB
 
   agent -->|"HTTP /path"| tunnel
   tunnel -->|"/abridge over Socket.IO"| proxy
-  proxy -->|"httpx forward"| cc
+  proxy -->|"httpx forward"| gateway
   proxy -->|"httpx forward"| tito
-  cc --> up
+  gateway --> up
   tito --> up
   tito -. "session records" .-> trace
 
   classDef built fill:#E6F1FB,stroke:#0C447C,color:#042C53;
   classDef planned fill:#ffffff,stroke:#8a8a86,stroke-dasharray:5 3,color:#3a3a38;
-  class agent,tunnel,proxy,cc,up built;
-  class tito,trace planned;
+  class agent,tunnel,proxy,up built;
+  class gateway,tito,trace planned;
 ```
 
 Solid = code present in this branch. Dashed = planned (see below).
@@ -49,7 +49,7 @@ Solid = code present in this branch. Dashed = planned (see below).
 | Layer | What | Where |
 |---|---|---|
 | **Transport kernel** | sandbox↔host JSON POST routing, credential isolation, buffered responses | abridge core (`proxy.py`, `forward.py`, `sidecar.py`) |
-| **Gateway** | translation, pretokenization, mock/replay — all protocol/ML logic | host-side sidecars (`cc_convert`, `tito`), reused as-is |
+| **Gateway** | translation, pretokenization, mock/replay — all protocol/ML logic | user-provided host-side sidecars or external services |
 | **Rollout data** | per-session trajectory → `/trace` → trainer/eval | `rollout.py` + trajectory bridge *(planned)* |
 
 ## Primitives
@@ -62,19 +62,17 @@ Solid = code present in this branch. Dashed = planned (see below).
 - **`Sidecar(command=..., health_path=...)`** — owns a local sidecar
   process's lifecycle (spawn → health → URL → teardown). abridge-managed
   by default; pass an external URL straight to `Forward` to opt out.
-- **`cc_convert_sidecar(...)`** — preset that runs an externally installed
-  `cc_convert` Rust binary as an Anthropic↔OpenAI translation sidecar.
 
 ## Status
 
-- **Implemented in this branch:** `Forward`, `Sidecar`, and a
-  `cc_convert_sidecar` process preset. Unit tests use a local HTTP
-  sidecar; an optional binary-backed test covers translated JSON and a
-  completed SSE payload when `cc_convert_sidecar` is installed.
+- **Implemented in this branch:** `Forward` and generic `Sidecar` process
+  supervision. Tests cover a local HTTP sidecar, the complete in-process
+  tunnel/namespace/Proxy/Forward path, process cleanup, noisy output, and
+  auto-port bind retries.
 - **Not implemented yet:** incremental SSE delivery. `Forward` buffers the
   complete sidecar response before the tunnel sends it to the agent.
-- **Planned:** a required full tunnel/SIO/sidecar integration check; the
-  `tito` pretokenize/record sidecar; a first-class `Session`/`Trajectory`
-  model bridged onto `/trace`; and an open/chunk/end streaming primitive.
-  Existing in-process clients remain supported until a separate migration
-  removes them.
+- **Planned:** pinned adapters for specific gateway binaries, a deployed
+  runtime/SIO/sidecar integration check, the `tito` pretokenize/record
+  sidecar, a first-class `Session`/`Trajectory` model bridged onto `/trace`,
+  and an open/chunk/end streaming primitive. Existing in-process clients
+  remain supported until a separate migration removes them.

@@ -1,13 +1,12 @@
 """Sidecar — manage a local host-side protocol/gateway process.
 
 abridge keeps JSON-schema-specific and ML logic outside its request router.
-That logic can live behind a sidecar — a `cc_convert` translator binary, a
-`tito` pretokenize gateway, or another JSON HTTP service. `Sidecar` owns the
-process lifecycle: pick a port, spawn the command, wait for health, hand
-back the base URL, and tear the process down on exit.
+That logic can live behind any JSON HTTP sidecar. `Sidecar` owns the process
+lifecycle: pick a port, spawn the command, wait for health, hand back the base
+URL, and tear the process down on exit.
 
     async with Sidecar(
-        command=lambda host, port: ["cc_convert_sidecar", "--listen", f"{host}:{port}"],
+        command=lambda host, port: ["my-gateway", "--listen", f"{host}:{port}"],
         health_path="/healthz",
     ) as url:
         proxy = Proxy(Forward(url, paths=["/v1/messages"]))

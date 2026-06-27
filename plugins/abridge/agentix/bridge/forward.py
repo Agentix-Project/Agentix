@@ -3,9 +3,9 @@
 The sandbox tunnel decodes an inbound JSON object and sends that object to
 the host. `Forward` serializes it as a new JSON POST to `target_url + path`,
 then buffers the complete sidecar response and returns its body, media type,
-and HTTP status. Shape translation and pretokenization can therefore live
-*behind* `target_url` — in a `cc_convert` translator sidecar, a `tito`
-gateway, or another JSON service — without teaching abridge those schemas.
+and HTTP status. Shape translation, recording, and routing can therefore live
+*behind* `target_url` in any JSON service without teaching abridge those
+schemas.
 
 This is intentionally not an HTTP-transparent byte ferry: the original
 method, query, headers, and JSON encoding are not preserved. An SSE response

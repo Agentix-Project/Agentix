@@ -11,7 +11,6 @@ import agentix.bridge.sidecar as sidecar_mod
 import httpx
 import pytest
 from agentix.bridge import Sidecar, SidecarError
-from agentix.bridge.sidecars import cc_convert_sidecar
 
 NOISY_SERVER = r"""
 import os
@@ -55,24 +54,6 @@ class H(BaseHTTPRequestHandler):
 
 HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
 """
-
-PRESET_SERVER = r"""#!/usr/bin/env python3
-import os
-from http.server import BaseHTTPRequestHandler, HTTPServer
-
-host, raw_port = os.environ["CC_CONVERT_LISTEN_ADDR"].rsplit(":", 1)
-
-class H(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-
-    def log_message(self, *args):
-        pass
-
-HTTPServer((host, int(raw_port)), H).serve_forever()
-"""
-
 
 def _available_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -183,23 +164,6 @@ async def test_fixed_port_is_not_replaced_after_bind_conflict(tmp_path: Path) ->
 
     assert ports == [fixed_port]
     assert sidecar.url == f"http://127.0.0.1:{fixed_port}"
-
-
-async def test_cc_convert_preset_allocates_port_and_env_on_entry(tmp_path: Path) -> None:
-    binary = tmp_path / "fake_cc_convert_sidecar"
-    binary.write_text(PRESET_SERVER)
-    binary.chmod(0o755)
-    sidecar = cc_convert_sidecar(
-        binary=str(binary),
-        upstream_url="http://upstream.invalid/v1/chat/completions",
-        ready_timeout=5.0,
-    )
-
-    assert sidecar.url == "http://127.0.0.1:0"
-    async with sidecar as url:
-        assert not url.endswith(":0")
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            assert (await client.get(url + "/healthz")).status_code == 200
 
 
 async def test_teardown_cancels_and_awaits_stuck_drain_tasks(monkeypatch: pytest.MonkeyPatch) -> None:
