@@ -33,6 +33,7 @@ blocks; abridge core stays shape-blind.
 
 from __future__ import annotations
 
+from .forward import Forward
 from .proxy import (
     NAMESPACE,
     AbridgeError,
@@ -44,6 +45,7 @@ from .proxy import (
     TunnelHandle,
     on,
 )
+from .sidecar import Command, Sidecar, SidecarError
 
 __version__ = "0.5.0"
 
@@ -51,10 +53,14 @@ __all__ = [
     "AbridgeError",
     "Client",
     "ClientResponse",
+    "Command",
+    "Forward",
     "Handler",
     "NAMESPACE",
     "Proxy",
     "Request",
+    "Sidecar",
+    "SidecarError",
     "TunnelHandle",
     "__version__",
     "on",
