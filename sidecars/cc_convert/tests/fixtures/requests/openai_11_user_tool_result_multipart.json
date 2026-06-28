@@ -1,0 +1,22 @@
+{
+  "max_tokens": 100,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "see image:",
+          "type": "text"
+        },
+        {
+          "image_url": {
+            "url": "https://x/y.png"
+          },
+          "type": "image_url"
+        }
+      ],
+      "role": "tool",
+      "tool_call_id": "t1"
+    }
+  ],
+  "model": "gpt-4o-mini"
+}

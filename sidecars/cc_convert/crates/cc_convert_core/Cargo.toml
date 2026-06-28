@@ -1,0 +1,17 @@
+[package]
+name = "cc_convert_core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Anthropic <-> OpenAI Chat Completions protocol converter (pure Rust, no I/O)"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+hex.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+pretty_assertions = "1"

@@ -1,0 +1,15 @@
+{
+  "model": "claude-opus-4-7",
+  "max_tokens": 2000,
+  "thinking": {
+    "type": "enabled",
+    "budget_tokens": 12000
+  },
+  "system": "Be concise.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Explain why the sky is blue, with reasoning shown."
+    }
+  ]
+}

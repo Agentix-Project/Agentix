@@ -1,0 +1,27 @@
+{
+  "max_tokens": 100,
+  "messages": [
+    {
+      "content": [
+        {
+          "content": "previous tool output",
+          "tool_use_id": "tu_x",
+          "type": "tool_result"
+        },
+        {
+          "text": "Now look at this image:",
+          "type": "text"
+        },
+        {
+          "source": {
+            "type": "url",
+            "url": "https://example.com/a.png"
+          },
+          "type": "image"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "gpt-4o-mini"
+}

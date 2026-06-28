@@ -1,0 +1,19 @@
+{
+  "max_tokens": 100,
+  "messages": [
+    {
+      "content": "hi",
+      "role": "user"
+    }
+  ],
+  "model": "gpt-4o-mini",
+  "system": [
+    {
+      "cache_control": {
+        "type": "ephemeral"
+      },
+      "text": "rule 1",
+      "type": "text"
+    }
+  ]
+}

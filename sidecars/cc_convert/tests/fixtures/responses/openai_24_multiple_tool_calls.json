@@ -1,0 +1,32 @@
+{
+  "choices": [
+    {
+      "finish_reason": "tool_calls",
+      "index": 0,
+      "message": {
+        "content": null,
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{}",
+              "name": "f"
+            },
+            "id": "c1",
+            "type": "function"
+          },
+          {
+            "function": {
+              "arguments": "{}",
+              "name": "g"
+            },
+            "id": "c2",
+            "type": "function"
+          }
+        ]
+      }
+    }
+  ],
+  "id": "chatcmpl-y",
+  "model": "gpt-4o-mini"
+}

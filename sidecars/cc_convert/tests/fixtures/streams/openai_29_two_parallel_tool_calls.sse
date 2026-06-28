@@ -1,0 +1,4 @@
+data: {"id":"chatcmpl-y","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"a","type":"function","function":{"name":"f","arguments":"{}"}},{"index":1,"id":"b","type":"function","function":{"name":"g","arguments":"{}"}}]}}]}
+
+data: {"id":"chatcmpl-y","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+

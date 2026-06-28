@@ -1,0 +1,30 @@
+{
+  "model": "claude-opus-4-7",
+  "max_tokens": 2000,
+  "tools": [
+    {
+      "name": "calc",
+      "description": "Run a math expression",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "expr": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "expr"
+        ]
+      }
+    }
+  ],
+  "tool_choice": {
+    "type": "any"
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": "What is (17 * 23) + sqrt(196)?"
+    }
+  ]
+}

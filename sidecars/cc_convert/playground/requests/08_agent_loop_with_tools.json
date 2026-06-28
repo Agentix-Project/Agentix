@@ -1,0 +1,122 @@
+{
+  "model": "claude-opus-4-7",
+  "max_tokens": 2000,
+  "temperature": 0.3,
+  "system": "You are a coding assistant. Use the provided tools to read files and run shell commands.",
+  "tools": [
+    {
+      "name": "read_file",
+      "description": "Read the contents of a file at the given path.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute or relative file path"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
+    },
+    {
+      "name": "run_shell",
+      "description": "Run a shell command and return stdout+stderr.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "timeout_sec": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 60,
+            "default": 10
+          }
+        },
+        "required": [
+          "command"
+        ]
+      }
+    },
+    {
+      "name": "grep_codebase",
+      "description": "Search the codebase for a regex pattern.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "pattern": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string",
+            "default": "."
+          },
+          "max_results": {
+            "type": "integer",
+            "default": 20
+          }
+        },
+        "required": [
+          "pattern"
+        ]
+      }
+    }
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": "How many .py files are in the current directory and what's in setup.py?"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "I'll check both: count Python files and read setup.py."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_count",
+          "name": "run_shell",
+          "input": {
+            "command": "find . -maxdepth 1 -name '*.py' | wc -l"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_read",
+          "name": "read_file",
+          "input": {
+            "path": "setup.py"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_count",
+          "content": "12\n"
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_read",
+          "content": "from setuptools import setup, find_packages\n\nsetup(\n    name='myproject',\n    version='0.3.1',\n    packages=find_packages(),\n    install_requires=['requests>=2.31', 'pyyaml>=6'],\n)\n"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": "There are 12 Python files in the current directory. setup.py defines a package called 'myproject' at version 0.3.1, depending on requests and pyyaml."
+    },
+    {
+      "role": "user",
+      "content": "Now grep for any TODO comments in the .py files."
+    }
+  ]
+}

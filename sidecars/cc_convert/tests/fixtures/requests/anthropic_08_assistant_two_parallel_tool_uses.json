@@ -1,0 +1,27 @@
+{
+  "max_tokens": 100,
+  "messages": [
+    {
+      "content": [
+        {
+          "id": "tu_a",
+          "input": {
+            "a": 1
+          },
+          "name": "f1",
+          "type": "tool_use"
+        },
+        {
+          "id": "tu_b",
+          "input": {
+            "b": 2
+          },
+          "name": "f2",
+          "type": "tool_use"
+        }
+      ],
+      "role": "assistant"
+    }
+  ],
+  "model": "gpt-4o-mini"
+}

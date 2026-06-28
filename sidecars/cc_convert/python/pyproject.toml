@@ -1,0 +1,57 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "cc-convert"
+version = "0.1.0"
+description = "Anthropic Messages API <-> OpenAI Chat Completions protocol converter (Rust core via PyO3 + CLI sidecar)"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT OR Apache-2.0" }
+keywords = [
+    "anthropic", "openai", "claude", "translator", "proxy",
+    "chat-completions", "messages-api", "sglang", "vllm", "litellm",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Homepage = "https://github.com/yitianlian/cc_convert"
+Repository = "https://github.com/yitianlian/cc_convert"
+Issues = "https://github.com/yitianlian/cc_convert/issues"
+
+[project.scripts]
+cc_convert = "cc_convert.cli:main"
+cc-convert = "cc_convert.cli:main"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+parity = ["litellm>=1.0"]
+
+[tool.maturin]
+manifest-path = "../crates/cc_convert_py/Cargo.toml"
+module-name = "cc_convert._native"
+python-source = "."
+features = ["pyo3/extension-module"]

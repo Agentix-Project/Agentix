@@ -1,0 +1,12 @@
+# This file is committed; keep it portable across platforms (Linux/macOS/Windows
+# native runners in CI). For local dev speedups (lld linker, line-tables-only
+# debug info), copy `.cargo/config.local.toml.example` to `.cargo/config.local.toml`
+# — Cargo will merge it on top of this one.
+
+[profile.dev]
+debug = "line-tables-only"
+incremental = true
+
+[profile.test]
+debug = "line-tables-only"
+incremental = true

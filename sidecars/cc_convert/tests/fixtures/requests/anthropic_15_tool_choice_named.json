@@ -1,0 +1,22 @@
+{
+  "max_tokens": 100,
+  "messages": [
+    {
+      "content": "hi",
+      "role": "user"
+    }
+  ],
+  "model": "gpt-4o-mini",
+  "tool_choice": {
+    "name": "f",
+    "type": "tool"
+  },
+  "tools": [
+    {
+      "input_schema": {
+        "type": "object"
+      },
+      "name": "f"
+    }
+  ]
+}

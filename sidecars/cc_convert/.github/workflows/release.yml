@@ -1,0 +1,207 @@
+# Build cc_convert wheels for every platform and publish to PyPI.
+#
+# Triggers
+#   - push of a tag matching v*  → build + publish to PyPI
+#   - manual workflow_dispatch    → build + publish to TestPyPI (dry run)
+#
+# Authentication
+#   Uses PyPI Trusted Publishing (OIDC). NO API token in secrets.
+#
+#   One-time setup on pypi.org BEFORE the first tag push:
+#     1) Create the project on PyPI (or via this workflow's TestPyPI run first).
+#     2) Go to https://pypi.org/manage/project/cc-convert/settings/publishing/
+#     3) Add a "Trusted Publisher" with:
+#          - Owner:           yitianlian
+#          - Repository name: cc_convert
+#          - Workflow name:   release.yml
+#          - Environment:     pypi      (must match the job's `environment: pypi` below)
+#     4) Same on TestPyPI: https://test.pypi.org/manage/project/cc-convert/settings/publishing/
+#        with Environment: testpypi
+#
+# Reference: https://docs.pypi.org/trusted-publishers/
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Publish to PyPI or TestPyPI"
+        required: true
+        default: "testpypi"
+        type: choice
+        options:
+          - pypi
+          - testpypi
+
+permissions: {}
+
+jobs:
+  # ---------- build wheels ----------
+  build-linux:
+    name: build (linux-${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - target: x86_64
+            runner: ubuntu-latest
+          - target: aarch64
+            runner: ubuntu-24.04-arm    # native ARM runner; no QEMU docker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          # `--release` is implied. `--strip` shrinks the wheel.
+          # `--out dist` is required by maturin-action.
+          # ABI3 is enabled in Cargo.toml (pyo3 features = ["abi3-py38"]),
+          # so each (os, arch) gets ONE wheel that works on Python 3.8+.
+          working-directory: python
+          args: --release --out ../dist --strip
+          manylinux: auto
+          sccache: "true"
+      - name: List dist/
+        run: ls -lh dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: dist/
+
+  build-macos:
+    name: build (macos-${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        # Only Apple Silicon. macos-13 (Intel) runners on the free GitHub
+        # plan are perpetually queue-bound (>30 min waits common) and
+        # block the publish step. Intel mac users can pip-install from
+        # sdist (requires local Rust toolchain) until/unless we add it
+        # back on a paid runner.
+        include:
+          - target: aarch64
+            runner: macos-14       # Apple Silicon
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          working-directory: python
+          args: --release --out ../dist --strip
+          sccache: "true"
+      - name: List dist/
+        run: ls -lh dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: dist/
+
+  build-windows:
+    name: build (windows-x64)
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: x86_64
+          working-directory: python
+          args: --release --out ../dist --strip
+          sccache: "true"
+      - name: List dist/
+        run: dir dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-x64
+          path: dist/
+
+  build-sdist:
+    name: build (sdist)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist
+        # Build from python/ where pyproject.toml lives. The maturin-action
+        # `working-directory` input controls where maturin runs from.
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          working-directory: python
+          args: --out ../dist
+      - name: List dist/
+        run: ls -lh dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/
+
+  # ---------- publish ----------
+  publish-testpypi:
+    name: publish to TestPyPI
+    needs: [build-linux, build-macos, build-windows, build-sdist]
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'testpypi'
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/cc-convert/
+    permissions:
+      id-token: write   # required for OIDC
+    steps:
+      - name: Download all wheels + sdist
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: List dist/
+        run: ls -lh dist/
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+
+  publish-pypi:
+    name: publish to PyPI
+    needs: [build-linux, build-macos, build-windows, build-sdist]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/cc-convert/
+    permissions:
+      id-token: write   # required for OIDC
+    steps:
+      - name: Download all wheels + sdist
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: List dist/
+        run: ls -lh dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

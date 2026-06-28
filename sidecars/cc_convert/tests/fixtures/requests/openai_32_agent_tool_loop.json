@@ -1,0 +1,35 @@
+{
+  "max_tokens": 200,
+  "messages": [
+    {
+      "content": "What's the weather in Tokyo?",
+      "role": "user"
+    },
+    {
+      "content": "Let me check.",
+      "role": "assistant",
+      "thinking_blocks": null,
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"city\": \"Tokyo\"}",
+            "name": "get_weather"
+          },
+          "id": "toolu_w1",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "Sunny, 25C",
+      "role": "tool",
+      "tool_call_id": "toolu_w1"
+    },
+    {
+      "content": "It's sunny and 25\u00b0C in Tokyo.",
+      "role": "assistant",
+      "thinking_blocks": null
+    }
+  ],
+  "model": "gpt-4o-mini"
+}
