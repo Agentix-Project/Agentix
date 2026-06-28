@@ -1,0 +1,19 @@
+[package]
+name = "cc_convert_py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Python bindings for cc_convert_core"
+
+[lib]
+name = "_native"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+cc_convert_core = { path = "../cc_convert_core" }
+serde.workspace = true
+serde_json.workspace = true
+# abi3-py38: build a single forward-compatible wheel that works on
+# Python 3.8 through future 3.x versions (one wheel per OS/arch instead
+# of seven per-Python-minor). PyO3 0.22 supports this since #3653.
+pyo3 = { workspace = true, features = ["extension-module", "abi3-py38"] }

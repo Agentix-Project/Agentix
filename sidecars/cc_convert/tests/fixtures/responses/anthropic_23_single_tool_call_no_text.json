@@ -1,0 +1,23 @@
+{
+  "content": [
+    {
+      "id": "call_1",
+      "input": {
+        "city": "Paris"
+      },
+      "name": "get_weather",
+      "provider_specific_fields": null,
+      "type": "tool_use"
+    }
+  ],
+  "id": "chatcmpl-x",
+  "model": "gpt-4o-mini",
+  "role": "assistant",
+  "stop_reason": "tool_use",
+  "stop_sequence": null,
+  "type": "message",
+  "usage": {
+    "input_tokens": 0,
+    "output_tokens": 0
+  }
+}

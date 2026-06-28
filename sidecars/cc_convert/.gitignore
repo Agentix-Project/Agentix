@@ -1,0 +1,56 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Python build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Maturin / wheels
+target/wheels/
+*.whl
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Local secrets / config (never commit!)
+.env
+.env.local
+*.pem
+*.key
+secrets/
+~/.pypirc
+
+# Build / dev cache from this workspace
+.cargo/registry/
+.cargo/git/
+
+# Logs / scratch
+*.log
+/tmp/
+# Ignore generated playground outputs (round-trip run results), but keep
+# the runner script + seed fixtures committed so the workflow is
+# reproducible.
+playground/runs/
+playground/online/

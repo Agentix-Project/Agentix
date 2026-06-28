@@ -1,0 +1,14 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "content": null,
+        "role": "assistant"
+      }
+    }
+  ],
+  "id": "chatcmpl-1",
+  "model": "gpt-4o-mini"
+}

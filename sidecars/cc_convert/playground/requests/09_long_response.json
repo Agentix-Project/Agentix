@@ -1,0 +1,12 @@
+{
+  "model": "claude-opus-4-7",
+  "max_tokens": 4000,
+  "temperature": 0.5,
+  "system": "Be thorough. Always answer in English.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Explain in detail how HTTPS works, covering: 1) TCP handshake, 2) TLS handshake including certificate verification and key exchange, 3) symmetric vs asymmetric encryption, 4) what gets encrypted vs not, 5) common attack vectors and how HTTPS defends against them. Use sub-headings."
+    }
+  ]
+}

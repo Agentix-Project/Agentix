@@ -1,0 +1,11 @@
+{
+  "max_tokens": 100,
+  "messages": [
+    {
+      "content": "hi",
+      "role": "user"
+    }
+  ],
+  "model": "gpt-4o-mini",
+  "reasoning_effort": "high"
+}

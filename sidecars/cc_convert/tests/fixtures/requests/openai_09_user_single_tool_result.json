@@ -1,0 +1,11 @@
+{
+  "max_tokens": 100,
+  "messages": [
+    {
+      "content": "21C",
+      "role": "tool",
+      "tool_call_id": "toolu_1"
+    }
+  ],
+  "model": "gpt-4o-mini"
+}

@@ -1,0 +1,10 @@
+{
+  "max_tokens": 200,
+  "messages": [
+    {
+      "content": "hi",
+      "role": "user"
+    }
+  ],
+  "model": "o3-mini"
+}

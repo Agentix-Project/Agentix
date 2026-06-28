@@ -1,0 +1,27 @@
+{
+  "model": "claude-opus-4-7",
+  "max_tokens": 2000,
+  "system": "You are a math tutor.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "What's 2+2?"
+    },
+    {
+      "role": "assistant",
+      "content": "Four."
+    },
+    {
+      "role": "user",
+      "content": "Now what is its square?"
+    },
+    {
+      "role": "assistant",
+      "content": "Sixteen."
+    },
+    {
+      "role": "user",
+      "content": "And the square root of that?"
+    }
+  ]
+}

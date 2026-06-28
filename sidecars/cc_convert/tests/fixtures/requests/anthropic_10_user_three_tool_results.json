@@ -1,0 +1,26 @@
+{
+  "max_tokens": 100,
+  "messages": [
+    {
+      "content": [
+        {
+          "content": "a",
+          "tool_use_id": "t1",
+          "type": "tool_result"
+        },
+        {
+          "content": "b",
+          "tool_use_id": "t2",
+          "type": "tool_result"
+        },
+        {
+          "content": "c",
+          "tool_use_id": "t3",
+          "type": "tool_result"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "gpt-4o-mini"
+}

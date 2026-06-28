@@ -1,0 +1,9 @@
+{"message": {"content": [], "id": "msg_444b0173-71c5-4703-b1e2-970510339fe2", "model": "claude-opus-4-7", "role": "assistant", "stop_reason": null, "stop_sequence": null, "type": "message", "usage": {"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "input_tokens": 0, "output_tokens": 0}}, "type": "message_start"}
+{"content_block": {"text": "", "type": "text"}, "index": 0, "type": "content_block_start"}
+{"index": 0, "type": "content_block_stop"}
+{"content_block": {"id": "call_1", "input": {}, "name": "get_weather", "type": "tool_use"}, "index": 1, "type": "content_block_start"}
+{"delta": {"partial_json": "{\"city\":", "type": "input_json_delta"}, "index": 1, "type": "content_block_delta"}
+{"delta": {"partial_json": "\"Paris\"}", "type": "input_json_delta"}, "index": 1, "type": "content_block_delta"}
+{"index": 1, "type": "content_block_stop"}
+{"delta": {"stop_reason": "tool_use"}, "type": "message_delta", "usage": {"input_tokens": 0, "output_tokens": 0}}
+{"type": "message_stop"}

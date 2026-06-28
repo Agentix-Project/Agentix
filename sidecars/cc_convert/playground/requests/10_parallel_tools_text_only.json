@@ -1,0 +1,50 @@
+{
+  "model": "claude-opus-4-7",
+  "max_tokens": 2000,
+  "system": "Use tools concurrently when the user asks for multiple independent things.",
+  "tools": [
+    {
+      "name": "get_stock_price",
+      "description": "Get current stock price for a ticker symbol.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "ticker": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ticker"
+        ]
+      }
+    },
+    {
+      "name": "get_news_headlines",
+      "description": "Get top news headlines for a topic.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "topic": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "default": 5
+          }
+        },
+        "required": [
+          "topic"
+        ]
+      }
+    }
+  ],
+  "tool_choice": {
+    "type": "any"
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": "Get me the current price of AAPL and the top 3 news headlines about Apple."
+    }
+  ]
+}

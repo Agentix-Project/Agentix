@@ -1,0 +1,6 @@
+data: {"id":"chatcmpl-r","choices":[{"index":0,"delta":{"reasoning_content":"let me think..."}}]}
+
+data: {"id":"chatcmpl-r","choices":[{"index":0,"delta":{"content":"Done."}}]}
+
+data: {"id":"chatcmpl-r","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+

@@ -1,0 +1,14 @@
+{
+  "max_tokens": 100,
+  "messages": [
+    {
+      "content": "tell a joke",
+      "role": "user"
+    }
+  ],
+  "model": "gpt-4o-mini",
+  "stop_sequences": [
+    "END",
+    "STOP"
+  ]
+}

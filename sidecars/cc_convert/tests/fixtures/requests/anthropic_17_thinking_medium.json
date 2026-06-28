@@ -1,0 +1,14 @@
+{
+  "max_tokens": 100,
+  "messages": [
+    {
+      "content": "hi",
+      "role": "user"
+    }
+  ],
+  "model": "gpt-4o-mini",
+  "thinking": {
+    "budget_tokens": 5000,
+    "type": "enabled"
+  }
+}
