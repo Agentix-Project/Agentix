@@ -107,10 +107,9 @@ Also public:
 The timeout knobs apply to both `sandbox.remote` and `RuntimeClient`.
 `RuntimeClient(url, timeout=...)` sets the per-request timeout in seconds. The
 default is `300`; raise it for agent workloads (roughly `600`–`1800`s), e.g.
-`RuntimeClient(url, timeout=1800)`. `http_sync_ms` (default `1000`) tunes the
-inline HTTP fast-path budget for short calls; set `http_sync_ms=None` to disable
-it so every call goes over Socket.IO. To bound a single call independently of
-the request timeout, wrap it in `asyncio.wait_for(sandbox.remote(...), deadline)`.
+`RuntimeClient(url, timeout=1800)`. Every call rides one transport —
+Socket.IO on `/rpc`. To bound a single call independently of the request
+timeout, wrap it in `asyncio.wait_for(sandbox.remote(...), deadline)`.
 
 ## SandboxProvider API
 

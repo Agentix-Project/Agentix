@@ -14,7 +14,7 @@ Submodules in this package:
 
   - `callables` — `RemoteCallable` import-path encoding
   - `idents`    — branded NewType ids on the wire (`CallId`)
-  - `codec`     — msgpack pack/unpack + ext types (numpy, pydantic)
+  - `codec`     — plain msgpack pack/unpack (no ext types)
   - `framing`   — length-prefixed msgpack framing for worker stdio
   - `models`    — pydantic wire types (`RemoteRequest`, `RemoteResponse`, …)
   - `env`       — bundle runtime contract: runtime paths, env vars,

@@ -26,12 +26,13 @@ import logging
 import pickle
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Any, Literal, ParamSpec, TypeVar, cast
+from typing import Any, ParamSpec, TypeVar, cast
 
 import httpx
 import socketio
 from socketio.exceptions import ConnectionError as SioConnectionError
 
+from agentix.runtime.client.result import Failed, Ok, Result
 from agentix.runtime.shared import MAX_MESSAGE_BYTES
 from agentix.runtime.shared.callables import RemoteCallable, display_name_for
 from agentix.runtime.shared.codec import pack, unpack
@@ -90,9 +91,18 @@ class WorkerExited(RemoteCallError):
         return self.error.returncode
 
 
+class CallCancelled(RemoteCallError):
+    """The runtime reported the call as cancelled — a terminal *server-side*
+    state, distinct from local `asyncio` task cancellation. Subclasses
+    `RemoteCallError` so it rides the normal terminal-state path: `remote()`
+    raises it and `try_remote()` surfaces it as `Failed`. (A bare
+    `asyncio.CancelledError` here would escape the `Ok | Failed` sum type and
+    read as local cancellation.)"""
+
+
 def _raise_remote_error(display_name: str, error: RemoteError):
     if error.cancelled:
-        raise asyncio.CancelledError(error.message)
+        raise CallCancelled(display_name=display_name, error=error)
     if error.type == "WorkerDied":
         raise WorkerExited(display_name=display_name, error=error)
     raise RemoteCallError(display_name=display_name, error=error)
@@ -120,32 +130,22 @@ class RuntimeClient:
         base_url: str,
         timeout: float = 300,
         *,
-        http_sync_ms: int | None = 1000,
         call_deadline: float | None = None,
-        reconnection: bool | None = None,
-        reconnection_attempts: int | None = None,
-        reconnection_delay: float | None = None,
-        reconnection_delay_max: float | None = None,
-        randomization_factor: float | None = None,
     ):
         """Connect to a runtime server at `base_url`.
 
         `timeout` is the per-request HTTP/WebSocket timeout in seconds; raise
         it for long agent calls (e.g. `RuntimeClient(url, timeout=1800)`).
 
-        `http_sync_ms` is the inline HTTP fast-path budget for short calls,
-        sent as the RFC 7240 `Prefer: respond-async, wait=N` header: a call
-        that finishes within this many milliseconds returns over HTTP (200),
-        otherwise the server replies 202 and the result follows on Socket.IO.
-        Set `http_sync_ms=None` to disable the fast path and send every call
-        over Socket.IO.
+        Every call rides one transport: Socket.IO on `/rpc`. HTTP is used
+        only for the `/health` probe. Reconnection uses socketio's defaults
+        (on, infinite attempts, 1–5s backoff).
 
         `call_deadline` (seconds, None = unbounded) is the cheap catch-all
         upper bound for any single `remote(...)`: whatever the cause — worker
         hang, silent sandbox loss, network black hole — the caller gets a
         `CallTimeout` (and the call is cancelled server-side) instead of
-        hanging. The `reconnection*` knobs override socketio's defaults for
-        long-lived sessions; left as None they use socketio's own defaults.
+        hanging.
         """
         self._base_url = base_url
         self._client = httpx.AsyncClient(base_url=base_url, timeout=timeout)
@@ -157,27 +157,9 @@ class RuntimeClient:
         # Namespaces queued for registration on connect.
         self._namespaces: list[socketio.AsyncClientNamespace] = []
         self._register_core_namespaces()
-        # HTTP fast-path budget in ms (None disables it), sent as the
-        # RFC 7240 `Prefer: respond-async, wait=N` header (converted to
-        # seconds by `_try_http_fast_path`).
-        self._http_sync_budget_ms: int | None = http_sync_ms
         # Upper bound for any single `remote(...)` (seconds). None = no
         # deadline. The cheap catch-all so the caller never hangs.
         self._call_deadline = call_deadline
-        # Socket.IO reconnection knobs. Left out (None) → socketio's own
-        # defaults (reconnection on, infinite attempts, 1–5s backoff);
-        # override at construction for long-lived (tens-of-hours) sessions.
-        self._sio_options: dict[str, Any] = {
-            key: value
-            for key, value in (
-                ("reconnection", reconnection),
-                ("reconnection_attempts", reconnection_attempts),
-                ("reconnection_delay", reconnection_delay),
-                ("reconnection_delay_max", reconnection_delay_max),
-                ("randomization_factor", randomization_factor),
-            )
-            if value is not None
-        }
 
     def _register_core_namespaces(self) -> None:
         """Register agentix-core's built-in `/trace` and `/log` handlers."""
@@ -237,46 +219,6 @@ class RuntimeClient:
                 raise ValueError(f"namespace {path!r} already registered")
         self._namespaces.append(ns)
 
-    async def _try_http_fast_path(
-        self,
-        *,
-        sio: socketio.AsyncClient,
-        payload: dict[str, Any],
-    ) -> tuple[Literal["fallback", "accepted", "result", "error"], Any]:
-        if self._http_sync_budget_ms is None:
-            # Fast path disabled — go straight to the Socket.IO channel.
-            return "fallback", None
-        sid = getattr(sio, "sid", None)
-        if not (isinstance(sid, str) and sid):
-            return "fallback", None
-
-        wait = self._http_sync_budget_ms / 1000  # ms → seconds for `Prefer: wait=`
-        wait_token = str(int(wait)) if wait == int(wait) else str(wait)
-        r = await self._client.post(
-            "/call",
-            content=pack(payload),
-            headers={
-                "content-type": "application/msgpack",
-                "prefer": f"respond-async, wait={wait_token}",
-            },
-        )
-        r.raise_for_status()
-
-        # 202: not done within the budget — the result follows on SIO.
-        if r.status_code == 202:
-            return "accepted", None
-
-        # 200: completed — success or remote exception, per the `ok` flag.
-        reply = unpack(r.content) if r.content else {}
-        if not isinstance(reply, dict):
-            raise RuntimeError("invalid /call reply payload")
-        if reply.get("ok") is True:
-            return "result", _unpickle_value(reply.get("value"))
-        if reply.get("ok") is False:
-            err = RemoteError.model_validate(reply.get("error") or {})
-            return "error", err
-        raise RuntimeError("invalid /call reply fields")
-
     async def remote(
         self,
         fn: Callable[P, R] | Callable[P, Awaitable[R]],
@@ -309,32 +251,23 @@ class RuntimeClient:
             # (worker hang, silent sandbox loss, network black hole), the
             # await below cannot block past the deadline. None = no bound.
             async with asyncio.timeout(self._call_deadline):
-                # Fast path: try HTTP first for short-running calls. If the
-                # call exceeds the sync budget, the server returns `accepted`
-                # and completes via the normal SIO result channel.
-                kind, value = await self._try_http_fast_path(sio=sio, payload=payload)
-                if kind == "fallback":
-                    await sio.emit("call", pack(payload), namespace=RPC_NAMESPACE)
-                elif kind == "result":
-                    terminated = True
-                    return cast(R, value)
-                elif kind == "error":
-                    terminated = True
-                    _raise_remote_error(display_name, cast(RemoteError, value))
+                await sio.emit("call", pack(payload), namespace=RPC_NAMESPACE)
                 while True:
                     kind, data = await q.get()
                     if kind == "result":
                         terminated = True
                         return cast(R, _unpickle_value(data.get("value")))
                     if kind == "error":
-                        err = RemoteError.model_validate(data["error"])
+                        # Defensive: a malformed frame with no `error` payload
+                        # must still resolve to a typed terminal error, not a
+                        # bare KeyError escaping `remote()` / `try_remote()`.
+                        raw_err = data.get("error") or {
+                            "type": "MalformedError",
+                            "message": "runtime sent a call:error with no error payload",
+                        }
+                        err = RemoteError.model_validate(raw_err)
                         terminated = True
                         _raise_remote_error(display_name, err)
-                    if kind == "fatal":
-                        # The connection was terminally lost (reconnection
-                        # disabled) — no result will ever arrive on this queue.
-                        terminated = True
-                        raise data
         except TimeoutError:
             raise CallTimeout(
                 f"remote call '{display_name}' exceeded deadline of {self._call_deadline}s"
@@ -349,6 +282,21 @@ class RuntimeClient:
                         namespace=RPC_NAMESPACE,
                     )
 
+    async def try_remote(
+        self,
+        fn: Callable[P, R] | Callable[P, Awaitable[R]],
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> Result[R]:
+        """Like `remote()`, but returns a `Result[R]` (`Ok | Failed`) instead
+        of raising on a terminal error — for callers that branch on the
+        outcome with `match`. Misuse (a non-importable callable) and
+        cancellation still raise."""
+        try:
+            return Ok(await self.remote(fn, *args, **kwargs))
+        except (RemoteCallError, CallTimeout, RuntimeUnreachable) as exc:
+            return Failed(exc)
+
     # ── Socket.IO connection management ─────────────────────────
 
     async def _ensure_sio(self) -> socketio.AsyncClient:
@@ -357,13 +305,24 @@ class RuntimeClient:
         async with self._sio_lock:
             if self._sio is not None and self._sio.connected:
                 return self._sio
+            if self._sio is not None:
+                # A handle exists but is disconnected (a transport drop mid
+                # reconnect). Tear it down before building a fresh client —
+                # overwriting it without disconnecting leaks its aiohttp session
+                # and background reconnect task, and would leave a second live
+                # `/rpc` socket once the abandoned client reconnects on its own.
+                # In-flight calls are not lost: their `self._pending` entries
+                # persist and the fresh client's `connect` handler re-emits
+                # `resume` to recover their results.
+                with contextlib.suppress(BaseException):
+                    await self._sio.disconnect()
+                self._sio = None
             # `max_msg_size` lifts the websocket's receive cap (engineio's
             # client rides aiohttp, default 4 MB) — large `c.remote`
             # payloads / plugin events otherwise kill the connection.
             # Matches the server's `max_http_buffer_size`.
             sio = socketio.AsyncClient(
                 websocket_extra_options={"max_msg_size": MAX_MESSAGE_BYTES},
-                **self._sio_options,
             )
 
             async def _on_call_result(data):
@@ -390,16 +349,10 @@ class RuntimeClient:
                     )
 
             async def _on_disconnect(*_args):
-                # With reconnection on (the default), tasks survive server-side
-                # and `_on_connect` re-emits `resume` to recover results, so we
-                # just wait. With reconnection explicitly disabled, this
-                # disconnect is terminal — no resume will ever deliver the
-                # pending results, so fail them now instead of hanging until
-                # `call_deadline` (which defaults to unbounded).
-                if self._sio_options.get("reconnection") is False:
-                    self._fail_pending(RuntimeUnreachable(f"runtime server connection lost: {self._base_url}"))
-                else:
-                    logger.debug("sio disconnect; will resume after reconnect")
+                # Reconnection is on, so server-side tasks survive and
+                # `_on_connect` re-emits `resume` to recover results — just
+                # wait. `call_deadline` bounds the wait if it never reconnects.
+                logger.debug("sio disconnect; will resume after reconnect")
 
             async def _on_connect_error(*args):
                 # Previously unobserved: surface (re)connection failures so
@@ -449,14 +402,6 @@ class RuntimeClient:
             return
         with contextlib.suppress(BaseException):
             await sio.emit("ack", pack({"call_id": call_id}), namespace=RPC_NAMESPACE)
-
-    def _fail_pending(self, exc: BaseException) -> None:
-        """Drain every in-flight call's queue with a fatal error so each
-        waiting `remote(...)` stops and raises, instead of blocking forever on
-        a connection that will never deliver a result."""
-        for q in self._pending.values():
-            with contextlib.suppress(BaseException):
-                q.put_nowait(("fatal", exc))
 
 
 __all__ = [

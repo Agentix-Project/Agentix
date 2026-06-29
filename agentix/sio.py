@@ -9,7 +9,7 @@ Three reserved namespace paths are owned by agentix-core:
 
   - `/rpc`    — RPC (call / cancel / call:result / call:error)
   - `/trace`  — Trace/Span lifecycle
-  - `/log`    — stdlib `logging` records
+  - `/log`    — captured stdout/stderr lines (best-effort)
 
 Plugins MUST use their own namespace path (convention: `/<package-name>`),
 typically registered via `agentix.register_namespace(MyNs())`. Two
@@ -56,10 +56,14 @@ RESERVED_NAMESPACES = frozenset({"/rpc", "/trace", "/log"})
 class RemoteSioError(RuntimeError):
     """Raised by `Namespace.request()` when the reply carries an `:error`."""
 
-    def __init__(self, type_: str, message: str) -> None:
+    def __init__(self, type_: str, message: str, status_code: int | None = None) -> None:
         super().__init__(f"{type_}: {message}")
         self.type = type_
         self.message = message
+        # Upstream HTTP status the host handler chose (e.g. AbridgeError 429/400);
+        # None when the error envelope carried no status. Lets the in-sandbox
+        # tunnel reply with the real status instead of collapsing to 502.
+        self.status_code = status_code
 
 
 # ── module-level bridge state ──────────────────────────────────────
@@ -241,10 +245,12 @@ class Namespace:
         fut = self._pending_requests.get(req_id) if isinstance(req_id, str) else None
         if fut is not None and not fut.done():
             err = payload.get("error") or {"type": "Unknown", "message": ""}
+            status_code = err.get("status_code")
             fut.set_exception(
                 RemoteSioError(
                     err.get("type", "Unknown"),
                     err.get("message", ""),
+                    status_code if isinstance(status_code, int) else None,
                 )
             )
 
@@ -311,9 +317,10 @@ _STREAM_RESUME_EVENT = "_resume"
 def _env_buffer(env_var: str, default: int = 10_000) -> int:
     """Positive int from `env_var`, or `default` when unset/invalid.
 
-    Lets the `/log` and `/trace` bridges size their `ReliableStream`
-    buffers (`AGENTIX_LOG_BUFFER` / `AGENTIX_TRACE_BUFFER`) without
-    forking agentix when a high-volume workload needs a deeper buffer.
+    Lets the `/trace` bridge size its `ReliableStream` buffer
+    (`AGENTIX_TRACE_BUFFER`) without forking agentix when a high-volume
+    workload needs a deeper buffer. (`/log` no longer uses `ReliableStream`
+    — it is best-effort line capture, so there is no `AGENTIX_LOG_BUFFER`.)
     """
     raw = os.environ.get(env_var)
     if raw is None:
@@ -413,7 +420,7 @@ class ReliableStream:
             logger.warning(
                 "ReliableStream %s buffer full (max_buffer=%d): dropping oldest "
                 "unacked events; at-least-once delivery degraded (dropped=%d). "
-                "Raise AGENTIX_LOG_BUFFER / AGENTIX_TRACE_BUFFER or ack faster.",
+                "Raise AGENTIX_TRACE_BUFFER or ack faster.",
                 self._ns.namespace,
                 self._buffer.maxlen,
                 dropped_total,

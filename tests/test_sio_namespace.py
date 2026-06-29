@@ -10,14 +10,12 @@ import time
 import pytest
 
 from agentix import AsyncClientNamespace, RuntimeClient
-from agentix.utils.log._config import LOG_CONTEXT_ATTR
 from tests._namespace_target import (
     echo_via_namespace,
     emit_formatted_log,
     emit_log_burst,
     emit_log_line,
     emit_log_with_exception,
-    emit_log_with_extra,
     fire_namespace_event,
 )
 from tests._worker_target import print_stdout
@@ -99,218 +97,105 @@ async def test_slow_namespace_handler_does_not_block_runtime(live_server):
     assert slow_host.started, "slow handler never ran"
 
 
-@pytest.mark.asyncio
-async def test_log_records_arrive_on_host(live_server):
-    """Verify the full /log experience: plain messages, %-format args,
-    extras dicts, and exception tracebacks all reach the host intact.
-    Logger names + levelno round-trip so host filters see the sandbox
-    record as if it had originated locally.
-    """
-    base_url = await live_server()
+# ── /log: raw stdout/stderr capture (Ray-style) ────────────────────────
+#
+# The worker captures its stdout and stderr (stdlib `logging` writes to
+# stderr, so it is captured too) and streams each line best-effort on
+# `/log`. The host replays each line under `agentix.sandbox.{stdout,stderr}`.
 
-    captured: list[logging.LogRecord] = []
 
-    class _Capture(logging.Handler):
+def _capture(logger_name: str) -> tuple[list[str], logging.Logger, logging.Handler]:
+    captured: list[str] = []
+
+    class _Cap(logging.Handler):
         def emit(self, record: logging.LogRecord) -> None:
-            if record.name == "namespace_target":
-                captured.append(record)
+            captured.append(record.getMessage())
 
-    target_logger = logging.getLogger("namespace_target")
-    target_logger.setLevel(logging.INFO)
-    handler = _Capture()
-    target_logger.addHandler(handler)
+    lg = logging.getLogger(logger_name)
+    lg.setLevel(logging.INFO)
+    handler = _Cap()
+    lg.addHandler(handler)
+    return captured, lg, handler
+
+
+async def _await_line(captured: list[str], needle: str, *, timeout: float = 3.0) -> bool:
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        if any(needle in m for m in captured):
+            return True
+        await asyncio.sleep(0.05)
+    return False
+
+
+@pytest.mark.asyncio
+async def test_user_logging_arrives_on_host_via_stderr(live_server):
+    """Stdlib `logging` inside the sandbox writes to stderr, which the
+    runtime captures and replays on the host under `agentix.sandbox.stderr`
+    — including %-formatted messages and exception tracebacks."""
+    base_url = await live_server()
+    captured, lg, h = _capture("agentix.sandbox.stderr")
     try:
         async with RuntimeClient(base_url) as c:
             await c.remote(emit_log_line, "from sandbox", "INFO")
             await c.remote(emit_formatted_log, "user %s acted on %s", "alice", "doc-7")
-            await c.remote(emit_log_with_extra, "with extras", request_id="r-42", attempt=3)
             await c.remote(emit_log_with_exception, "caught one")
-            # Let the /log pipe drain.
-            await asyncio.sleep(0.5)
+            assert await _await_line(captured, "from sandbox")
+            assert await _await_line(captured, "user alice acted on doc-7")
+            # logger.exception() writes the traceback to stderr too.
+            assert await _await_line(captured, "ValueError: kaboom")
     finally:
-        target_logger.removeHandler(handler)
-
-    messages = {r.getMessage(): r for r in captured}
-
-    # Side-channel ordering: records emitted in this order from the
-    # sandbox arrive on the host in the same order. The contract is
-    # NOT that they arrive before the matching `c.remote()` returns,
-    # only that the `/log` stream itself is FIFO.
-    expected_order = [
-        "from sandbox",
-        "user alice acted on doc-7",
-        "with extras",
-        "caught one",
-    ]
-    arrival = [r.getMessage() for r in captured if r.getMessage() in expected_order]
-    assert arrival == expected_order, f"out-of-order log delivery: {arrival}"
-
-    # Plain log line.
-    assert "from sandbox" in messages
-    context = getattr(messages["from sandbox"], LOG_CONTEXT_ATTR, "")
-    assert context.startswith("sandbox-")
-    assert "-worker-" in context
-
-    # %-style formatting: getMessage() already ran in the sandbox.
-    assert "user alice acted on doc-7" in messages
-
-    # extras kwargs survive — they show up as attributes on the record.
-    extras_rec = messages.get("with extras")
-    assert extras_rec is not None
-    assert getattr(extras_rec, "request_id", None) == "r-42"
-    assert getattr(extras_rec, "attempt", None) == 3
-
-    # logger.exception() ships the formatted traceback in exc_text.
-    exc_rec = messages.get("caught one")
-    assert exc_rec is not None
-    assert exc_rec.exc_text and "ValueError: kaboom" in exc_rec.exc_text
-
-
-@pytest.mark.asyncio
-async def test_log_record_carries_worker_context(live_server):
-    """`/log` is a side channel independent of `c.remote(...)` result
-    delivery. The contract is: log records eventually arrive on the
-    host with the worker's context attached. There is no
-    happens-before relationship between a log record from inside `fn`
-    and the return of the corresponding `remote()` call — the two
-    travel on different transports.
-    """
-    base_url = await live_server()
-
-    captured: list[logging.LogRecord] = []
-
-    class _Capture(logging.Handler):
-        def emit(self, record: logging.LogRecord) -> None:
-            if record.name == "namespace_target":
-                captured.append(record)
-
-    target_logger = logging.getLogger("namespace_target")
-    target_logger.setLevel(logging.INFO)
-    handler = _Capture()
-    target_logger.addHandler(handler)
-    try:
-        async with RuntimeClient(base_url) as c:
-            await c.remote(emit_log_line, "from sandbox worker", "INFO")
-            record = await _await_record(captured, "from sandbox worker")
-            assert record is not None
-            context = getattr(record, LOG_CONTEXT_ATTR, "")
-            assert context.startswith("sandbox-")
-            assert "-worker-" in context
-    finally:
-        target_logger.removeHandler(handler)
+        lg.removeHandler(h)
 
 
 @pytest.mark.asyncio
 async def test_remote_print_stdout_arrives_on_host(live_server):
     base_url = await live_server()
-
-    captured: list[logging.LogRecord] = []
-
-    class _Capture(logging.Handler):
-        def emit(self, record: logging.LogRecord) -> None:
-            if record.name == "agentix.sandbox.stdout":
-                captured.append(record)
-
-    target_logger = logging.getLogger("agentix.sandbox.stdout")
-    target_logger.setLevel(logging.INFO)
-    handler = _Capture()
-    target_logger.addHandler(handler)
+    captured, lg, h = _capture("agentix.sandbox.stdout")
     try:
         async with RuntimeClient(base_url) as c:
             result = await c.remote(print_stdout, "hello from print")
             assert result == "printed"
-            record = await _await_record(captured, "hello from print")
-            assert record is not None
-            assert getattr(record, "agentix_stream", None) == "stdout"
-            context = getattr(record, LOG_CONTEXT_ATTR, "")
-            assert context.startswith("sandbox-")
-            assert "-worker-" in context
+            assert await _await_line(captured, "hello from print")
     finally:
-        target_logger.removeHandler(handler)
-
-
-async def _await_record(
-    captured: list[logging.LogRecord],
-    message: str,
-    *,
-    timeout: float = 2.0,
-) -> logging.LogRecord | None:
-    """Drain the `/log` side channel for up to `timeout` seconds,
-    waiting for a record matching `message` to arrive."""
-    deadline = asyncio.get_event_loop().time() + timeout
-    while asyncio.get_event_loop().time() < deadline:
-        match = next((r for r in captured if r.getMessage() == message), None)
-        if match is not None:
-            return match
-        await asyncio.sleep(0.05)
-    return None
+        lg.removeHandler(h)
 
 
 @pytest.mark.asyncio
-async def test_log_stream_preserves_order_and_envelope(live_server):
-    """Records emitted under a burst arrive on the host wrapped in the
-    `ReliableStream` envelope (`_seq`, `data`), with monotonic `_seq`
-    and FIFO delivery order. This is the same envelope that lets the
-    host resume after a disconnect — see the ReliableStream unit
-    tests for the disconnect/replay path itself.
-    """
+async def test_captured_log_stream_preserves_order(live_server):
+    """Captured stderr lines arrive on the host in FIFO order — the pipe and
+    drain are ordered. Best-effort: no acks, no replay."""
     base_url = await live_server()
-
-    captured: list[logging.LogRecord] = []
-
-    class _Capture(logging.Handler):
-        def emit(self, record: logging.LogRecord) -> None:
-            if record.name == "namespace_target":
-                captured.append(record)
-
-    target_logger = logging.getLogger("namespace_target")
-    target_logger.setLevel(logging.INFO)
-    handler = _Capture()
-    target_logger.addHandler(handler)
-
+    captured, lg, h = _capture("agentix.sandbox.stderr")
     burst_count = 50
     try:
         async with RuntimeClient(base_url) as c:
             await c.remote(emit_log_burst, "burst", burst_count)
-
-            # Drain the side channel until every record has landed.
             deadline = asyncio.get_event_loop().time() + 5
             while asyncio.get_event_loop().time() < deadline:
-                if sum(1 for r in captured if r.getMessage().startswith("burst-")) >= burst_count:
+                if sum(1 for m in captured if "burst-" in m) >= burst_count:
                     break
                 await asyncio.sleep(0.05)
     finally:
-        target_logger.removeHandler(handler)
+        lg.removeHandler(h)
 
-    messages = [r.getMessage() for r in captured if r.getMessage().startswith("burst-")]
-    expected = [f"burst-{i:03d}" for i in range(burst_count)]
-    assert messages == expected, (
-        f"log stream lost or reordered events: got {len(messages)} of {burst_count}"
-    )
+    seq = [int(m.split("burst-")[1][:3]) for m in captured if "burst-" in m]
+    assert seq == sorted(seq), f"out-of-order capture: {seq}"
+    assert seq == list(range(burst_count)), f"lost lines: got {len(seq)} of {burst_count}"
 
 
 @pytest.mark.asyncio
 async def test_worker_log_context_can_be_configured_with_env(live_server, monkeypatch):
+    """`AGENTIX_WORKER_LOG_CONTEXT` labels the worker's log lines; the label
+    rides along in the captured text."""
     monkeypatch.setenv("AGENTIX_WORKER_LOG_CONTEXT", "custom-worker-{id}")
     base_url = await live_server()
-
-    captured: list[logging.LogRecord] = []
-
-    class _Capture(logging.Handler):
-        def emit(self, record: logging.LogRecord) -> None:
-            if record.name == "namespace_target":
-                captured.append(record)
-
-    target_logger = logging.getLogger("namespace_target")
-    target_logger.setLevel(logging.INFO)
-    handler = _Capture()
-    target_logger.addHandler(handler)
+    captured, lg, h = _capture("agentix.sandbox.stderr")
     try:
         async with RuntimeClient(base_url) as c:
-            await c.remote(emit_log_line, "custom context", "INFO")
-            record = await _await_record(captured, "custom context")
-            assert record is not None
-            context = getattr(record, LOG_CONTEXT_ATTR, "")
-            assert context.startswith("custom-worker-")
+            await c.remote(emit_log_line, "ctx-check", "INFO")
+            assert await _await_line(captured, "ctx-check")
     finally:
-        target_logger.removeHandler(handler)
+        lg.removeHandler(h)
+
+    line = next(m for m in captured if "ctx-check" in m)
+    assert "custom-worker-" in line

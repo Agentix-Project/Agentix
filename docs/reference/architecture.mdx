@@ -41,7 +41,7 @@ flowchart LR
     Server -->|call:result or call:error| Client
     Client -->|unpickle result| App
 
-    Worker -.->|/log records| Server
+    Worker -.->|/log stdout+stderr lines| Server
     Worker -.->|/trace spans| Server
     Worker <-->|plugin namespace events| Server
     Server -.->|side-channel events| Client
@@ -54,7 +54,7 @@ Agentix core owns three reserved Socket.IO namespaces:
 | Namespace | System | Public API |
 | --- | --- | --- |
 | `/rpc` | RPC | `RuntimeClient.remote(fn, *args, **kwargs)` |
-| `/log` | logging | standard `logging` records forwarded sandbox -> host |
+| `/log` | logging | captured stdout/stderr lines forwarded sandbox -> host (best-effort) |
 | `/trace` | tracing | `agentix.trace.trace(...)`, `agentix.trace.span(...)`, `trace.Processor` |
 
 Plugin-specific protocols use their own namespace, conventionally
@@ -111,7 +111,6 @@ blobs inside `call:result`.
 | Path | Carries | Wire |
 | --- | --- | --- |
 | `GET /health` | health probe | HTTP JSON |
-| `POST /call` | internal short-call fast path | HTTP msgpack |
 | Socket.IO `/rpc` | `c.remote()` RPC | `call` / `call:result` / `call:error` / `cancel` |
 | Socket.IO `/trace`, `/log`, `/<plugin>` | side channels | plugin-defined events (msgpack payloads) |
 | worker private pipe | runtime ↔ worker | length-prefixed msgpack frames |

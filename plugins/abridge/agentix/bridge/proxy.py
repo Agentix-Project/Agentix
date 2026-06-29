@@ -54,6 +54,7 @@ import functools
 import json
 import logging
 import socket
+import sys
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
@@ -376,9 +377,11 @@ def _make_forwarder(
             # matching handler registered under the same name. The wire
             # payload is just the decoded object — no wrapping envelope
             # beyond request correlation and no HTTP metadata.
-            result = await asyncio.wait_for(
-                ns.request(path, body), timeout=request_timeout
-            )
+            # Single timeout source: thread the configured value into
+            # `ns.request` itself. A redundant outer `wait_for` here was a no-op
+            # above `ns.request`'s own (smaller) default, silently capping the
+            # configurable `request_timeout` at that default.
+            result = await ns.request(path, body, timeout=request_timeout)
         except TimeoutError:
             message = "tunnel timed out waiting for host"
             logger.warning("abridge tunnel %s: %s", path, message)
@@ -420,14 +423,12 @@ def _to_http_response(result: object) -> Response:
 
 
 def _status_from_remote_error(exc: RemoteSioError) -> int:
-    """`RemoteSioError(type, message)` carries no status code. We map
-    well-known exception type names to HTTP statuses; everything else
-    becomes 502."""
-    if exc.type == "UpstreamError":
-        # The client raised UpstreamError. The message format may include
-        # the status code, but it's not structured. Default 502.
-        return 502
-    return 502
+    """Use the upstream HTTP status the host handler chose. `AbridgeError`
+    carries `status_code` (429/400/404/...), which the host threads through the
+    wire error envelope and the sandbox preserves on `RemoteSioError`. Fall back
+    to 502 only when the remote error carried no status."""
+    status = getattr(exc, "status_code", None)
+    return status if isinstance(status, int) else 502
 
 
 # ── host-side: Proxy ─────────────────────────────────────────────────────
@@ -652,7 +653,17 @@ class Proxy(AsyncClientNamespace):
         try:
             yield handle
         finally:
-            await self.stop(sandbox)
+            # If the body is already raising, a teardown failure must not mask
+            # it (the finally's exception would demote the real error to
+            # __context__). Log-and-swallow stop() errors in that case; surface
+            # them normally when the body succeeded.
+            body_failed = sys.exc_info()[1] is not None
+            try:
+                await self.stop(sandbox)
+            except Exception:
+                if not body_failed:
+                    raise
+                logger.exception("abridge: session teardown failed after body error (suppressed)")
 
     # ── handy property ────────────────────────────────────────────────
 

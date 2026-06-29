@@ -72,9 +72,9 @@ becomes this wire payload:
 runtime uses it to correlate `call:result` / `call:error` responses and
 to support cancellation.
 
-Remote calls use Socket.IO events on the `/rpc` namespace. The sandbox
-may use the internal HTTP `/call` fast path for short calls, but accepted
-long-running calls and replayed results still complete over `/rpc`.
+Remote calls use Socket.IO events on the `/rpc` namespace — one
+transport for every call, short or long-running. HTTP serves only the
+`/health` probe.
 
 ## Example
 
@@ -119,7 +119,7 @@ ride their own namespaces, separate from `sandbox.remote()`:
 | --- | --- | --- |
 | `/rpc` | host ↔ sandbox | `sandbox.remote()` |
 | `/trace` | sandbox → host | span lifecycle (auto-registered) |
-| `/log` | sandbox → host | stdlib logging records (auto-registered) |
+| `/log` | sandbox → host | captured stdout/stderr lines, best-effort (auto-registered) |
 | `/<plugin>` | both | plugin-defined events via `agentix.sio` |
 
 Register a host-side handler before the first remote call:

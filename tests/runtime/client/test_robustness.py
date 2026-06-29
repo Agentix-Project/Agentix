@@ -61,22 +61,3 @@ async def test_worker_death_surfaces_as_typed_error(live_server):
     # structured process exit status, so callers branch on OOM without string-matching.
     assert isinstance(excinfo.value, WorkerExited)
     assert excinfo.value.returncode == -9
-
-
-@pytest.mark.asyncio
-async def test_fail_pending_drains_queues_with_fatal_error():
-    """On a terminal disconnect the client hands every in-flight call a fatal
-    error so `remote(...)` stops waiting instead of hanging."""
-    import asyncio
-
-    client = RuntimeClient("http://127.0.0.1:1")
-    try:
-        q: asyncio.Queue = asyncio.Queue()
-        client._pending["c1"] = q
-        err = RuntimeUnreachable("connection lost")
-        client._fail_pending(err)
-        kind, data = q.get_nowait()
-        assert kind == "fatal"
-        assert data is err
-    finally:
-        await client._client.aclose()

@@ -38,7 +38,9 @@ RPC_NAMESPACE = "/rpc"
 # Cap on the unacked-result cache. A host that completes calls and never acks
 # (a crashed or buggy client) would otherwise pin every result — each holding a
 # full pickled return value, up to MAX_MESSAGE_BYTES — in memory forever. Past
-# the cap, the oldest unacked entry is evicted.
+# the cap, the oldest unacked entry is evicted. Eviction is not a silent loss:
+# a later `resume` for that call_id gets a definite `call:error` (see
+# `on_resume` / `_unavailable_error`), so the host fails rather than hangs.
 _MAX_PENDING_RESULTS = 4096
 
 
@@ -79,6 +81,19 @@ def _cancelled_error(call_id: str) -> dict[str, Any]:
     }
 
 
+def _unavailable_error(call_id: str) -> dict[str, Any]:
+    return {
+        "call_id": call_id,
+        "error": RemoteError(
+            type="ResultUnavailable",
+            message=(
+                "result is no longer held by the runtime (evicted or unknown call_id); "
+                "retry as a new call"
+            ),
+        ).model_dump(),
+    }
+
+
 def _store_pending_result(
     cache: dict[str, tuple[str, dict[str, Any]]],
     call_id: str,
@@ -101,7 +116,7 @@ def _store_pending_result(
 
 def make_sio(
     worker: RuntimeWorkerClient,
-) -> tuple[socketio.AsyncServer, socketio.ASGIApp]:
+) -> socketio.AsyncServer:
     # `namespaces='*'` accepts connects on any namespace path. Plugin
     # namespaces are registered lazily by the worker (`sio_open` frame
     # in response to `agentix.register_namespace(...)`); the host may
@@ -127,14 +142,13 @@ def make_sio(
         max_http_buffer_size=MAX_MESSAGE_BYTES,
     )
     # ── execution-once invariant ─────────────────────────────────
-    # `_start_call` is the only place a task is created. Every site
-    # that may call it (`on_call`, `submit_http_call`) gates on
-    # `call_id in calls or call_id in pending_results` first, so a
-    # given call_id starts at most one task. Combined with the host
-    # generating a fresh call_id per `c.remote(...)`, this guarantees
-    # the user-facing contract: each `c.remote(fn, ...)` runs `fn` at
-    # most once on the runtime, even across reconnects, replays, and
-    # mixed HTTP/SIO submission paths.
+    # `_start_call` is the only place a task is created, and `on_call`
+    # gates on `call_id in calls or call_id in pending_results` first,
+    # so a given call_id starts at most one task. Combined with the
+    # host generating a fresh call_id per `c.remote(...)`, this
+    # guarantees the user-facing contract: each `c.remote(fn, ...)`
+    # runs `fn` at most once on the runtime, even across reconnects and
+    # duplicate `call` / `resume` submissions.
     calls: dict[str, asyncio.Task] = {}
     # Completed tasks waiting for the host to ack receipt. The host
     # acks via the `ack` SIO event after consuming the result; only
@@ -145,6 +159,12 @@ def make_sio(
     pending_results: dict[str, tuple[str, dict[str, Any]]] = {}
     evictions = 0  # count of cap evictions, for throttled warning
     opened_namespaces: set[str] = set()  # paths the worker has opened
+    # Strong refs to the result-delivery tasks. `asyncio.create_task` only
+    # registers a weak reference with the loop, so without this set a
+    # delivery task could be GC'd before it stores the result in
+    # `pending_results` — turning a successful call into a `Failed` on the
+    # next `resume`. Mirrors the `calls` tracking above.
+    emit_tasks: set[asyncio.Task] = set()
 
     async def _execute_call(payload: dict[str, Any], call_id: str) -> tuple[str, dict[str, Any]]:
         try:
@@ -223,34 +243,12 @@ def make_sio(
         _track_call(call_id, task)
         return task
 
-    async def submit_http_call(payload: dict[str, Any], *, wait_s: float = 1.0) -> dict[str, Any]:
-        call_id = payload.get("call_id")
-        if not isinstance(call_id, str):
-            _event, frame = _missing_call_id()
-            return {"accepted": False, "ok": False, **frame}
-
-        if call_id in calls or call_id in pending_results:
-            # Already in flight or sitting unacked. The host will pick
-            # the result up via SIO (either fresh emit or `resume`).
-            return {"accepted": True, "call_id": call_id}
-
-        task = _start_call(payload, call_id)
-
-        timeout_s = max(wait_s, 0.0)
-        try:
-            event, frame = await asyncio.wait_for(asyncio.shield(task), timeout=timeout_s)
-        except TimeoutError:
-            task.add_done_callback(
-                lambda t, cid=call_id: asyncio.create_task(_emit_task_result(t, cid))
-            )
-            return {"accepted": True, "call_id": call_id}
-
-        if event == "call:result":
-            return {"accepted": False, "ok": True, **frame}
-        return {"accepted": False, "ok": False, **frame}
-
-    # Runtime internal hook used by the HTTP fast-path endpoint.
-    setattr(sio, "submit_http_call", submit_http_call)
+    def _schedule_emit(task: asyncio.Task, call_id: str) -> None:
+        # Retain a strong ref until the delivery task finishes; otherwise the
+        # loop's weak ref lets it be collected before it caches the result.
+        emit_task = asyncio.create_task(_emit_task_result(task, call_id))
+        emit_tasks.add(emit_task)
+        emit_task.add_done_callback(emit_tasks.discard)
 
     async def on_connect(sid: str, environ: dict, auth: Any = None) -> None:
         logger.debug("sio connect %s", sid)
@@ -282,9 +280,7 @@ def make_sio(
             return
 
         task = _start_call(payload, call_id)
-        task.add_done_callback(
-            lambda t, cid=call_id: asyncio.create_task(_emit_task_result(t, cid))
-        )
+        task.add_done_callback(lambda t, cid=call_id: _schedule_emit(t, cid))
 
     async def on_cancel(sid: str, data: Any) -> None:
         payload = _u(data)
@@ -306,8 +302,15 @@ def make_sio(
         )
 
     async def on_resume(sid: str, data: Any) -> None:
-        """Replay cached results for the call_ids the host is still
-        waiting on. Called by the host right after (re)connect."""
+        """Resolve the call_ids the host is still waiting on. Called by the
+        host right after (re)connect. Each id reaches a definite terminal
+        state — never silence:
+
+        - a cached result → replayed;
+        - still running → left alone (its result arrives on completion);
+        - no record (evicted under cap, or unknown) → a `call:error` so the
+          host's `remote()` fails instead of hanging forever.
+        """
         payload = _u(data)
         ids = payload.get("call_ids")
         if not isinstance(ids, list):
@@ -316,10 +319,18 @@ def make_sio(
             if not isinstance(cid, str):
                 continue
             cached = pending_results.get(cid)
-            if cached is None:
+            if cached is not None:
+                event, frame = cached
+                await sio.emit(event, pack(frame), to=sid, namespace=RPC_NAMESPACE)
                 continue
-            event, frame = cached
-            await sio.emit(event, pack(frame), to=sid, namespace=RPC_NAMESPACE)
+            if cid in calls:
+                continue
+            await sio.emit(
+                "call:error",
+                pack(_unavailable_error(cid)),
+                to=sid,
+                namespace=RPC_NAMESPACE,
+            )
 
     async def on_ack(sid: str, data: Any) -> None:
         """Host confirms it has consumed the result. Free the slot."""
@@ -386,5 +397,4 @@ def make_sio(
         opened_namespaces.add(core_ns)
         _register_namespace(core_ns)
 
-    asgi_app = socketio.ASGIApp(sio, socketio_path="/socket.io")
-    return sio, asgi_app
+    return sio

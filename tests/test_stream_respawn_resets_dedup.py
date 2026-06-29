@@ -16,7 +16,6 @@ the restarted stream's early events are delivered, not swallowed.
 from __future__ import annotations
 
 from agentix.runtime.shared.codec import pack
-from agentix.utils.log import _bridge as log_bridge
 from agentix.utils.trace import _bridge as trace_bridge
 
 
@@ -57,20 +56,3 @@ async def test_trace_same_stream_still_dedups(monkeypatch) -> None:
     await ns.trigger_event("span_start", _env("aaaa", 2, {"span_id": "dup"}))  # resume replay
 
     assert [p["span_id"] for _, p in dispatched] == ["a1", "a2", "a3"]  # no "dup"
-
-
-async def test_log_respawn_resets_dedup_cursor(monkeypatch) -> None:
-    replayed: list[dict] = []
-    monkeypatch.setattr(log_bridge, "_replay_record", replayed.append)
-
-    ns = log_bridge.HostLogNamespace()
-    record_event = log_bridge.RECORD_EVENT
-
-    for seq in (1, 2, 3):
-        await ns.trigger_event(record_event, _env("aaaa", seq, {"msg": f"a{seq}"}))
-    assert [r["msg"] for r in replayed] == ["a1", "a2", "a3"]
-
-    await ns.trigger_event(record_event, _env("bbbb", 1, {"msg": "b1"}))
-    assert replayed[-1] == {"msg": "b1"}
-    assert ns._sid == "bbbb"
-    assert ns._last_seq == 1

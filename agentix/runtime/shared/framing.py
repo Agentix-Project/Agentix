@@ -7,7 +7,7 @@ Each frame on a worker's private runtime pipe is:
   +--------+-------------------+
 
 The msgpack blob is a dict — see frame schemas below. `agentix.runtime.shared.codec`
-handles encode/decode, including ext types for ndarray + pydantic models.
+handles encode/decode (plain msgpack, no ext types).
 
 Frame schemas (`{"type": "...", ...}` — extra fields per type):
 
@@ -18,7 +18,6 @@ Frame schemas (`{"type": "...", ...}` — extra fields per type):
 
   ─── worker → runtime ─────────────────────────────────────
     ready        {}                               — sent once after worker startup
-    boot_error   {error}                          — sent once if startup fails
     result       {call_id, value}                 — call succeeded (value is pickle bytes)
     error        {call_id, error}                 — call failed
     sio_open     {namespace}                      — open a side-channel namespace

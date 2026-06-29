@@ -14,8 +14,8 @@ import contextlib
 import logging
 import os
 import sys
-import time
 import traceback
+from pathlib import Path
 from typing import Any
 
 from agentix import sio as _sio
@@ -26,8 +26,7 @@ from agentix.runtime.shared.framing import FrameTooLarge, read_frame, write_fram
 from agentix.runtime.shared.idents import CallId
 from agentix.runtime.shared.models import RemoteError, RemoteRequest
 from agentix.utils import log as _log
-from agentix.utils.log._bridge import emit_worker_record
-from agentix.utils.log._config import LOG_CONTEXT_ATTR, get_log_context
+from agentix.utils.log._bridge import LOG_EVENT, LOG_NAMESPACE
 from agentix.utils.trace._bridge import install_worker_bridge
 
 logger = logging.getLogger("agentix.runtime.server.worker.process")
@@ -53,6 +52,10 @@ class Worker:
         self._outbound_q: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._drainer: asyncio.Task | None = None
         self._stdio_tasks: list[asyncio.Task] = []
+        # Durable, best-effort sandbox-side capture file (Ray-style). Opened
+        # lazily on first line; failures disable it without touching the loop.
+        self._log_file: Any = None
+        self._log_file_off = False
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
@@ -64,18 +67,30 @@ class Worker:
         # desyncing the protocol and hanging every later call.
         #
         # Move the framing onto private fds and point fd 0 at /dev/null, so
-        # inherited stdin is harmless. fd 1 becomes a user-output pipe:
-        # `print()` and child-process stdout are drained separately and
-        # forwarded through the `/log` side channel instead of corrupting
-        # the control frame stream.
+        # inherited stdin is harmless. fd 1 / fd 2 become user-output pipes:
+        # `print()`, child-process output, and stdlib `logging` (which writes
+        # to stderr) are drained separately and forwarded through the `/log`
+        # side channel — Ray-style raw capture — instead of corrupting the
+        # control frame stream.
         frame_in_fd = os.dup(0)
         frame_out_fd = os.dup(1)
+        # Save the real stderr before fd 2 becomes the capture pipe — the
+        # worker's OWN stdlib logging is repointed here so its diagnostics go
+        # to the container/Ray log and are NOT re-captured by the stderr pipe.
+        # Without this, a worker log line emitted while draining /log (e.g. an
+        # "outbound frame write failed" on a broken pipe) loops back through
+        # _emit_log_line -> _drain_outbound -> fails -> logs again.
+        real_stderr_fd = os.dup(2)
         stdout_read_fd, stdout_write_fd = os.pipe()
+        stderr_read_fd, stderr_write_fd = os.pipe()
         devnull = os.open(os.devnull, os.O_RDWR)
         os.dup2(devnull, 0)
         os.dup2(stdout_write_fd, 1)
+        os.dup2(stderr_write_fd, 2)
         os.close(stdout_write_fd)
+        os.close(stderr_write_fd)
         os.close(devnull)
+        _redirect_internal_logging(real_stderr_fd)
         _make_stdout_eager()
 
         reader = asyncio.StreamReader()
@@ -95,11 +110,12 @@ class Worker:
         # `agentix.sio.emit/on/request`; the bridge ferries frames over
         # the pipe to the server, which puts them on the real SIO.
         _sio._install(self._enqueue_frame)
-        # Built-in /trace and /log namespaces — both are agentix-core
-        # extensions registered on top of agentix.sio.
+        # Built-in /trace namespace (agentix-core extension on agentix.sio).
+        # /log is no longer a structured bridge — stdout/stderr are captured
+        # raw below.
         install_worker_bridge()
-        _log.install_worker_bridge()
-        self._stdio_tasks.append(loop.create_task(self._drain_stdout(stdout_read_fd)))
+        self._stdio_tasks.append(loop.create_task(self._drain_stream(stdout_read_fd, "stdout")))
+        self._stdio_tasks.append(loop.create_task(self._drain_stream(stderr_read_fd, "stderr")))
         await self._send({"type": "ready"})
 
         while not self._shutdown.is_set():
@@ -122,15 +138,22 @@ class Worker:
         if self._calls:
             await asyncio.gather(*self._calls.values(), return_exceptions=True)
         if self._stdio_tasks:
-            _close_stdout_pipe()
+            _close_stdio_pipes()
             _, pending = await asyncio.wait(self._stdio_tasks, timeout=1.0)
             for task in pending:
                 task.cancel()
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
-        await self._outbound_q.join()
+        # Bound the drain: a wedged outbound pipe (writer.drain() blocked on a
+        # full OS pipe) would hang join() forever — task_done() never fires for
+        # the stuck frame. Mirror the server-side bounded join.
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self._outbound_q.join(), timeout=2.0)
         if self._drainer is not None:
             self._drainer.cancel()
+        if self._log_file is not None:
+            with contextlib.suppress(Exception):
+                self._log_file.close()
 
     async def _drain_outbound(self) -> None:
         assert self._writer is not None
@@ -174,7 +197,7 @@ class Worker:
     async def _send(self, payload: dict[str, Any]) -> None:
         await self._outbound_q.put(payload)
 
-    async def _drain_stdout(self, fd: int) -> None:
+    async def _drain_stream(self, fd: int, stream: str) -> None:
         loop = asyncio.get_running_loop()
         reader = asyncio.StreamReader()
         await loop.connect_read_pipe(
@@ -183,10 +206,10 @@ class Worker:
         )
         # Read fixed-size chunks and split into lines ourselves. `readline()`
         # raises on a line longer than the StreamReader limit (64 KiB); that
-        # error was swallowed and KILLED this loop, so fd 1 stopped draining
-        # and the next `print()` blocked on a full pipe — deadlocking the
-        # in-flight call. Chunked reads can never overflow, so the pipe is
-        # always drained regardless of line length.
+        # error was swallowed and KILLED this loop, so the fd stopped draining
+        # and the next write blocked on a full pipe — deadlocking the in-flight
+        # call. Chunked reads can never overflow, so the pipe is always drained
+        # regardless of line length.
         buf = bytearray()
         try:
             while True:
@@ -196,20 +219,56 @@ class Worker:
                 buf.extend(chunk)
                 *lines, buf_rest = bytes(buf).split(b"\n")
                 for line in lines:
-                    _emit_stdio_line("stdout", line)
+                    self._emit_log_line(stream, line)
                 buf = bytearray(buf_rest)
                 # A newline-less spew (e.g. a binary blob) must not grow `buf`
                 # without bound — flush it as a partial line.
                 if len(buf) >= 65536:
-                    _emit_stdio_line("stdout", bytes(buf))
+                    self._emit_log_line(stream, bytes(buf))
                     buf.clear()
         except asyncio.CancelledError:
             pass
         except Exception:
-            logger.debug("stdout drain failed", exc_info=True)
+            logger.debug("%s drain failed", stream, exc_info=True)
         finally:
             if buf:
-                _emit_stdio_line("stdout", bytes(buf))
+                self._emit_log_line(stream, bytes(buf))
+
+    def _emit_log_line(self, stream: str, raw: bytes) -> None:
+        """Ferry one captured stdout/stderr line: append to the durable
+        sandbox-side file, then best-effort stream it to the host on `/log`.
+
+        Both steps are silent — this path must never write to stdout/stderr
+        itself (it would be re-captured here, looping), so failures are
+        swallowed rather than logged."""
+        text = raw.decode("utf-8", "replace").rstrip("\r\n")
+        self._write_log_file(stream, text)
+        try:
+            self._outbound_q.put_nowait(
+                {
+                    "type": "sio_emit",
+                    "namespace": LOG_NAMESPACE,
+                    "event": LOG_EVENT,
+                    "data": {"stream": stream, "line": text},
+                }
+            )
+        except Exception:
+            pass
+
+    def _write_log_file(self, stream: str, text: str) -> None:
+        if self._log_file_off:
+            return
+        try:
+            if self._log_file is None:
+                log_dir = Path(os.environ.get("AGENTIX_LOG_DIR", "/tmp/agentix"))
+                log_dir.mkdir(parents=True, exist_ok=True)
+                self._log_file = (log_dir / "sandbox.log").open("a", encoding="utf-8")
+            self._log_file.write(f"[{stream}] {text}\n")
+            self._log_file.flush()
+        except Exception:
+            # Durability is best-effort; if the file can't be written, keep
+            # streaming and stop retrying the file.
+            self._log_file_off = True
 
     def _enqueue_frame(self, frame: dict[str, Any]) -> None:
         """Sync put for the agentix.sio bridge — must never block."""
@@ -276,24 +335,48 @@ class Worker:
         task = self._calls.get(call_id)
         if task is not None:
             task.cancel()
-            asyncio.create_task(
-                self._send(
-                    {
-                        "type": "error",
-                        "call_id": call_id,
-                        "error": RemoteError(
-                            type="Cancelled",
-                            message="remote call cancelled",
-                            cancelled=True,
-                        ).model_dump(),
-                    }
-                )
+            # Enqueue synchronously (the outbound queue is unbounded) instead of
+            # spawning an untracked `create_task`, which the loop only weakly
+            # references and could GC before it runs — dropping the Cancelled
+            # frame.
+            self._enqueue_frame(
+                {
+                    "type": "error",
+                    "call_id": call_id,
+                    "error": RemoteError(
+                        type="Cancelled",
+                        message="remote call cancelled",
+                        cancelled=True,
+                    ).model_dump(),
+                }
             )
 
 
 async def _amain() -> None:
     worker = Worker()
     await worker.run()
+
+
+def _redirect_internal_logging(real_stderr_fd: int) -> None:
+    """Keep the worker's OWN ``agentix.*`` diagnostics off the capture pipe,
+    WITHOUT diverting user logging.
+
+    fd 2 is the capture pipe — its lines are replayed on the host's ``/log`` and
+    appended to ``sandbox.log``. User stdlib logging is meant to ride that pipe
+    (REFACTOR.md: "stdlib logging writes to stderr, so it's captured too"), so
+    the root handler ``configure_logging`` installed is left untouched. But the
+    worker's own ``agentix.*`` infra logs must NOT be re-captured: on a broken
+    outbound pipe that self-amplifies into a hot loop (a write failure logs to
+    stderr → the line is captured → re-enqueued → the write fails again → …).
+    Route only the ``agentix`` logger to the real stderr (saved before fd 2
+    became the pipe) and stop it propagating to the captured root handler."""
+    with contextlib.suppress(Exception):
+        real_stderr = os.fdopen(real_stderr_fd, "w", buffering=1)
+        handler = logging.StreamHandler(real_stderr)
+        handler.setFormatter(logging.Formatter("%(asctime)s [%(name)s] %(levelname)s %(message)s"))
+        agentix_logger = logging.getLogger("agentix")
+        agentix_logger.handlers = [handler]
+        agentix_logger.propagate = False
 
 
 def _make_stdout_eager() -> None:
@@ -304,40 +387,18 @@ def _make_stdout_eager() -> None:
             reconfigure(line_buffering=True, write_through=True)
 
 
-def _close_stdout_pipe() -> None:
-    """Flush fd 1 and detach it from the capture pipe so the drainer reaches EOF."""
-    with contextlib.suppress(Exception):
-        sys.stdout.flush()
-    with contextlib.suppress(Exception):
-        devnull = os.open(os.devnull, os.O_WRONLY)
-        try:
-            os.dup2(devnull, 1)
-        finally:
-            os.close(devnull)
-
-
-def _emit_stdio_line(stream: str, raw: bytes) -> None:
-    text = raw.decode("utf-8", "replace").rstrip("\r\n")
-    emit_worker_record(
-        {
-            "name": f"agentix.sandbox.{stream}",
-            "level": "INFO",
-            "levelno": logging.INFO,
-            "message": text,
-            "created": time.time(),
-            "pathname": "",
-            "lineno": 0,
-            "funcName": "",
-            "module": "stdio",
-            "exc_text": None,
-            "stack_info": None,
-            LOG_CONTEXT_ATTR: get_log_context(),
-            "extras": {
-                "agentix_stream": stream,
-                "worker_id": os.environ.get("AGENTIX_WORKER_ID"),
-            },
-        }
-    )
+def _close_stdio_pipes() -> None:
+    """Flush fd 1 / fd 2 and detach them from the capture pipes so the
+    drainers reach EOF."""
+    for stream, fd in ((sys.stdout, 1), (sys.stderr, 2)):
+        with contextlib.suppress(Exception):
+            stream.flush()
+        with contextlib.suppress(Exception):
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            try:
+                os.dup2(devnull, fd)
+            finally:
+                os.close(devnull)
 
 
 def main() -> None:

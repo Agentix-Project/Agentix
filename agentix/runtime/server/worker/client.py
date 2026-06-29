@@ -210,7 +210,6 @@ class _SubprocessWorker:
         self._outbound: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._drainer: asyncio.Task | None = None
         self._ready = asyncio.Event()
-        self._boot_error: dict[str, Any] | None = None
         self._read_task: asyncio.Task | None = None
         self._closed = asyncio.Event()
 
@@ -267,11 +266,6 @@ class _SubprocessWorker:
             for task in (ready_task, closed_task, proc_task):
                 if not task.done():
                     task.cancel()
-        if self._boot_error is not None:
-            await self.shutdown()
-            raise RuntimeError(
-                f"runtime worker failed to boot: {self._boot_error.get('type')}: {self._boot_error.get('message')}"
-            )
 
     async def _read_loop(self) -> None:
         assert self._proc is not None and self._proc.stdout is not None
@@ -305,9 +299,6 @@ class _SubprocessWorker:
     async def _on_frame(self, frame: dict[str, Any]) -> None:
         kind = frame.get("type")
         if kind == "ready":
-            self._ready.set()
-        elif kind == "boot_error":
-            self._boot_error = frame.get("error") or {"type": "Unknown", "message": ""}
             self._ready.set()
         elif kind == "result":
             cid = frame.get("call_id", "")

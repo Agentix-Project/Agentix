@@ -10,20 +10,20 @@ import pkgutil
 __path__ = pkgutil.extend_path(__path__, __name__)
 
 from agentix.provider.base import (
-    BundleDeployer,
-    DeployedBundle,
     Sandbox,
     SandboxConfig,
     SandboxId,
     SandboxInfo,
     SandboxProvider,
     SandboxResource,
-    providers,
-    register_provider,
 )
 from agentix.runtime.client import (
+    CallCancelled,
     CallTimeout,
+    Failed,
+    Ok,
     RemoteCallError,
+    Result,
     RuntimeClient,
     RuntimeUnreachable,
     WorkerExited,
@@ -38,13 +38,15 @@ __version__ = "0.2.7"
 
 __all__ = [
     "AsyncClientNamespace",
-    "BundleDeployer",
+    "CallCancelled",
     "CallTimeout",
-    "DeployedBundle",
+    "Failed",
     "Namespace",
+    "Ok",
     "RemoteCallable",
     "RemoteCallError",
     "RemoteSioError",
+    "Result",
     "RuntimeClient",
     "RuntimeUnreachable",
     "Sandbox",
@@ -58,9 +60,7 @@ __all__ = [
     "configure_logging",
     "context",
     "log",
-    "providers",
     "register_namespace",
-    "register_provider",
     "request_handler",
     "trace",
 ]

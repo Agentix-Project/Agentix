@@ -1,7 +1,7 @@
 # Agentix RPC Protocol
 
 The runtime wire contract for `RuntimeClient.remote(fn, *args, **kwargs)`.
-Tests in `tests/test_rpc_protocol.py` enforce these rules.
+Tests in `tests/runtime/test_protocol.py` enforce these rules.
 
 ## Callable Reference
 
@@ -35,17 +35,14 @@ await client.remote(run, seed=42)
 | Path | Carries | Wire |
 | --- | --- | --- |
 | `GET /health` | health probe | HTTP JSON |
-| `POST /call` | internal short-call fast path | HTTP msgpack |
-| Socket.IO `/rpc` | `c.remote()` RPC | msgpack-wrapped `call` / `call:result` / `call:error` / `cancel` |
+| Socket.IO `/rpc` | `c.remote()` RPC | msgpack-wrapped `call` / `call:result` / `call:error` / `cancel` / `resume` / `ack` |
 | Socket.IO `/trace`, `/log`, `/<plugin>` | side channels | plugin-defined events (msgpack payloads) |
 | worker private pipe | runtime ↔ worker | length-prefixed msgpack frames |
 
-HTTP covers health plus the internal `/call` fast path for short
-remote calls. Socket.IO `/rpc` remains the RPC event channel when a
-call is submitted over SIO or an accepted HTTP call completes
-asynchronously. The worker pipe is the runtime-to-worker edge inside
-the sandbox. The current implementation uses one worker subprocess per
-runtime.
+Every `c.remote()` rides one transport: Socket.IO `/rpc`. HTTP serves
+only the `/health` probe. The worker pipe is the runtime-to-worker edge
+inside the sandbox. The current implementation uses one worker
+subprocess per runtime.
 
 ## Socket.IO Events (RPC on `/rpc`)
 
@@ -54,10 +51,20 @@ call          {call_id, callable, arguments}
 call:result   {call_id, value}                  # value is pickle.dumps(result)
 call:error    {call_id, error}
 cancel        {call_id}
+resume        {call_ids}                         # host → server on (re)connect
+ack           {call_id}                          # host → server, frees the retained result
 ```
 
 `call_id` correlates request ↔ response. Cancellation produces a
 `call:error` with `error.cancelled=True`.
+
+`resume` and `ack` carry the reliability contract. On every (re)connect the
+host emits `resume` with the `call_ids` it is still awaiting; the server
+replays each one's terminal state as a `call:result` / `call:error` — and for
+an evicted or unknown `call_id`, a definite `call:error`
+(`error.type="ResultUnavailable"`) rather than silence, so a reconnecting host
+never hangs. After consuming a result the host emits `ack`, which lets the
+server drop it from its bounded retain buffer (`pending_results`).
 
 Trace, log, and plugin traffic use their own namespaces on the same
 Socket.IO connection. Sandbox plugins emit through `agentix.sio`; the
@@ -77,7 +84,6 @@ away from user subprocesses).
 | server → worker | `shutdown` | — |
 | server → worker | `sio_inbound` | `namespace`, `event`, `data` |
 | worker → server | `ready` | — |
-| worker → server | `boot_error` | `error` |
 | worker → server | `result` | `call_id`, `value` |
 | worker → server | `error` | `call_id`, `error` |
 | worker → server | `sio_emit` | `namespace`, `event`, `data` |
@@ -95,6 +101,11 @@ away from user subprocesses).
 4. **Worker death closes calls.** If the worker subprocess exits, the
    runtime fails every in-flight call with `WorkerExited` so the
    client never hangs.
+5. **No silent loss.** A `resume` for a `call_id` the runtime no longer
+   holds (its result was evicted under cap, or the id is unknown) gets a
+   `call:error` (`type="ResultUnavailable"`), never silence. An
+   undeliverable result is a failure, not a separate "lost" state — the
+   caller decides whether to retry as a new call.
 
 ## Error Model
 

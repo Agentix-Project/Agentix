@@ -7,9 +7,10 @@ the OpenAI SDK on the agent side would hit when its `base_url` points
 at our tunnel.
 
 The SDK accepts the OpenAI Chat Completions request shape via typed
-kwargs. Agents that send non-standard fields the SDK doesn't accept
-will see an `UpstreamError`; for arbitrary-shape forwarding write your
-own `@on("/v1/chat/completions")` handler with raw httpx.
+kwargs. Upstream failures surface as `AbridgeError` carrying the
+upstream HTTP status (so the agent sees the real 429/400/... instead of
+a blanket 502); for arbitrary-shape forwarding write your own
+`@on("/v1/chat/completions")` handler with raw httpx.
 """
 
 from __future__ import annotations

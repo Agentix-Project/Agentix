@@ -1,48 +1,37 @@
-"""Tests for the worker→host logging bridge payload."""
+"""Tests for the host-side `/log` raw-line replayer."""
 
 from __future__ import annotations
 
 import logging
-from decimal import Decimal
+
+import pytest
 
 from agentix.runtime.shared.codec import pack
-from agentix.utils.log._bridge import _coerce_extra, _record_payload
+from agentix.utils.log._bridge import LOG_EVENT, HostLogNamespace
+
+pytestmark = pytest.mark.asyncio
 
 
-def _record(**extras: object) -> logging.LogRecord:
-    record = logging.LogRecord("test", logging.INFO, "p.py", 10, "hello %s", ("world",), None)
-    for key, value in extras.items():
-        setattr(record, key, value)
-    return record
+async def test_replays_line_into_sandbox_logger(caplog) -> None:
+    ns = HostLogNamespace()
+    with caplog.at_level(logging.INFO, logger="agentix.sandbox.stdout"):
+        await ns.trigger_event(LOG_EVENT, pack({"stream": "stdout", "line": "hello from sandbox"}))
+    assert any(
+        r.name == "agentix.sandbox.stdout" and r.getMessage() == "hello from sandbox"
+        for r in caplog.records
+    )
 
 
-def test_coerce_extra_keeps_native_types() -> None:
-    assert _coerce_extra("s") == "s"
-    assert _coerce_extra(3) == 3
-    assert _coerce_extra(True) is True
-    assert _coerce_extra(None) is None
-    assert _coerce_extra([1, "a"]) == [1, "a"]
-    assert _coerce_extra({"k": 2}) == {"k": 2}
+async def test_stderr_lines_go_to_stderr_logger(caplog) -> None:
+    ns = HostLogNamespace()
+    with caplog.at_level(logging.INFO, logger="agentix.sandbox.stderr"):
+        await ns.trigger_event(LOG_EVENT, pack({"stream": "stderr", "line": "boom"}))
+    assert any(r.name == "agentix.sandbox.stderr" for r in caplog.records)
 
 
-def test_coerce_extra_reprs_unencodable() -> None:
-    class Weird:
-        def __repr__(self) -> str:
-            return "<weird>"
-
-    assert _coerce_extra(Weird()) == "<weird>"
-    assert _coerce_extra(Decimal("1.5")) == "Decimal('1.5')"
-    assert _coerce_extra({"obj": Weird()}) == {"obj": "<weird>"}
-
-
-def test_record_payload_is_always_packable() -> None:
-    class Weird:
-        def __repr__(self) -> str:
-            return "<weird>"
-
-    payload = _record_payload(_record(obj=Weird(), count=3, label="x"))
-    extras = payload["extras"]
-    assert extras == {"obj": "<weird>", "count": 3, "label": "x"}
-    # The whole frame must now msgpack-encode (regression: a non-serializable
-    # extra previously made the drainer drop the record).
-    assert pack(payload)
+async def test_ignores_non_line_and_malformed_events(caplog) -> None:
+    ns = HostLogNamespace()
+    with caplog.at_level(logging.INFO):
+        await ns.trigger_event("connect")
+        await ns.trigger_event(LOG_EVENT, pack({"stream": "stdout"}))  # no line
+    assert not [r for r in caplog.records if r.name.startswith("agentix.sandbox")]

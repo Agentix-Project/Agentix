@@ -14,7 +14,7 @@ import httpx
 import pytest
 import socketio
 
-from agentix import RemoteCallError, RuntimeClient
+from agentix import Failed, Ok, RemoteCallError, RuntimeClient
 from agentix.runtime.shared.codec import pack, unpack
 from agentix.runtime.shared.models import RemoteRequest
 from tests import _worker_target as target
@@ -27,13 +27,14 @@ RPC_NAMESPACE = "/rpc"
 # ── basics ─────────────────────────────────────────────────────────────
 
 
-async def test_http_remote_endpoint_is_not_registered(runtime_module):
+async def test_http_rpc_endpoints_are_not_registered(runtime_module):
+    """Only `/health` is served over HTTP — RPC has no HTTP endpoint;
+    every `c.remote()` rides Socket.IO `/rpc`."""
     server, _, _ = runtime_module
     transport = httpx.ASGITransport(app=server.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
-        r = await http.post("/_remote", content=b"")
-
-    assert r.status_code == 404
+        assert (await http.post("/_remote", content=b"")).status_code == 404
+        assert (await http.post("/call", content=b"")).status_code == 404
 
 
 async def test_socketio_call_serialized_callable(use_inprocess_worker, live_server):
@@ -100,18 +101,36 @@ async def test_client_remote_round_trip(use_inprocess_worker, live_server):
     assert result.msg == "echo:hello"
 
 
-async def test_client_remote_http_fast_path_falls_back_to_sio(use_inprocess_worker, live_server):
+async def test_try_remote_returns_ok(use_inprocess_worker, live_server):
     use_inprocess_worker()
     base_url = await live_server()
     async with RuntimeClient(base_url) as c:
-        # Exceeds the 1s HTTP sync budget, so result should arrive on SIO.
+        result = await c.try_remote(target.add, 2, 3)
+    assert isinstance(result, Ok)
+    assert result.value == 5
+
+
+async def test_try_remote_returns_failed(use_inprocess_worker, live_server):
+    use_inprocess_worker()
+    base_url = await live_server()
+    async with RuntimeClient(base_url) as c:
+        result = await c.try_remote(target.boom)
+    assert isinstance(result, Failed)
+    assert isinstance(result.error, RemoteCallError)
+
+
+async def test_client_remote_long_call_round_trip(use_inprocess_worker, live_server):
+    use_inprocess_worker()
+    base_url = await live_server()
+    async with RuntimeClient(base_url) as c:
+        # A multi-second call round-trips over the single SIO transport.
         assert await c.remote(asyncio.sleep, 1.2) is None
 
 
-async def test_same_call_id_via_mixed_paths_runs_fn_exactly_once(use_inprocess_worker, live_server):
+async def test_same_call_id_runs_fn_exactly_once(use_inprocess_worker, live_server):
     """The runtime must execute `fn` exactly once per `call_id`, even
-    when the same id is submitted through every path we expose:
-    HTTP fast-path, raw SIO `call`, and SIO `resume`.
+    when the same id arrives over every SIO submission path: a duplicate
+    `call` and a `resume`.
     """
     use_inprocess_worker()
     base_url = await live_server()
@@ -131,25 +150,13 @@ async def test_same_call_id_via_mixed_paths_runs_fn_exactly_once(use_inprocess_w
     sio.on("call:result", _on_result, namespace=RPC_NAMESPACE)
     await sio.connect(base_url, namespaces=[RPC_NAMESPACE])
     try:
-        # Three submissions in quick succession on three paths.
-        async with httpx.AsyncClient(base_url=base_url) as http:
-            r = await http.post(
-                "/call",
-                content=pack(req.model_dump()),
-                headers={
-                    "content-type": "application/msgpack",
-                    "prefer": "respond-async, wait=0.05",
-                },
-            )
-            r.raise_for_status()
-
+        # Same call_id submitted three times across the SIO paths.
         await sio.emit("call", payload_bytes, namespace=RPC_NAMESPACE)
         await sio.emit(
             "resume",
             pack({"call_ids": [call_id]}),
             namespace=RPC_NAMESPACE,
         )
-        # And a second SIO `call` for good measure.
         await sio.emit("call", payload_bytes, namespace=RPC_NAMESPACE)
 
         payload = await asyncio.wait_for(results.get(), timeout=5)
@@ -214,13 +221,41 @@ async def test_runtime_replays_unacked_result_after_reconnect(use_inprocess_work
     assert _pickle.loads(payload["value"]) == 1, "fn must run exactly once"
 
 
-async def test_client_remote_http_fallback_does_not_double_execute(use_inprocess_worker, live_server):
+async def test_resume_for_unknown_call_id_fails_definitively(use_inprocess_worker, live_server):
+    """A `resume` for a call_id the runtime no longer holds (evicted
+    under cap, or never seen) must return a definite `call:error` — the
+    contract forbids silence, which would hang the host's `remote()`.
+    """
+    use_inprocess_worker()
+    base_url = await live_server()
+
+    sio = socketio.AsyncClient()
+    errors: asyncio.Queue = asyncio.Queue()
+
+    async def _on_error(data):
+        await errors.put(unpack(data))
+
+    sio.on("call:error", _on_error, namespace=RPC_NAMESPACE)
+    await sio.connect(base_url, namespaces=[RPC_NAMESPACE])
+    try:
+        await sio.emit(
+            "resume",
+            pack({"call_ids": ["never-existed"]}),
+            namespace=RPC_NAMESPACE,
+        )
+        payload = await asyncio.wait_for(errors.get(), timeout=5)
+    finally:
+        await sio.disconnect()
+
+    assert payload["call_id"] == "never-existed"
+    assert payload["error"]["type"] == "ResultUnavailable"
+
+
+async def test_client_remote_runs_fn_exactly_once(use_inprocess_worker, live_server):
     use_inprocess_worker()
     base_url = await live_server()
     async with RuntimeClient(base_url) as c:
         await c.remote(target.reset_exec_counter)
-        # Must execute exactly once even when request returns 202 then
-        # completes via SIO.
         result = await c.remote(target.count_exec_and_sleep, 1.2)
     assert result == 1
 
