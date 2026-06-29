@@ -373,6 +373,35 @@ async def test_session_forward_missing_id_field_is_502(monkeypatch) -> None:
     assert ei.value.status_code == 502
 
 
+def test_session_forward_session_id_before_open_raises() -> None:
+    fwd = SessionForward("http://gw", paths=["/v1/chat/completions"])
+    with pytest.raises(RuntimeError):
+        _ = fwd.session_id
+
+
+async def test_session_forward_delete_session_reaps_and_resets(monkeypatch) -> None:
+    fwd = SessionForward("http://gw", paths=["/v1/chat/completions"])
+    deleted: list = []
+
+    async def fake_post(url, *, json, headers):
+        return httpx.Response(200, content=b'{"session_id": "S"}', headers={"content-type": "application/json"})
+
+    async def fake_delete(url, *, headers):
+        deleted.append(url)
+        return httpx.Response(204)
+
+    assert fwd._client is not None
+    monkeypatch.setattr(fwd._client, "post", fake_post)
+    monkeypatch.setattr(fwd._client, "delete", fake_delete)
+
+    assert await fwd.open() == "S"
+    await fwd.delete_session()
+    assert deleted == ["http://gw/sessions/S"]
+    # after reaping, the id is gone again — a premature read raises.
+    with pytest.raises(RuntimeError):
+        _ = fwd.session_id
+
+
 # ── SessionForward (integration, real sidecar) ────────────────────────
 
 SESSION_SERVER = """

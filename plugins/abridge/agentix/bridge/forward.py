@@ -28,6 +28,7 @@ class-level `@on` tag — so `Forward` exposes them through
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import uuid
 from collections.abc import Mapping
@@ -139,17 +140,25 @@ class SessionForward(Forward):
     (or eagerly via `open()`), remembers the assigned id, and rewrites every
     inbound `path` to the session-scoped URL. So the in-sandbox agent keeps
     calling an unmodified `/v1/chat/completions` and the whole rollout still
-    lands in one session. Read `.session_id` afterward to harvest the trajectory
-    (`GET {create_path}/{session_id}`).
+    lands in one session.
 
         fwd = SessionForward(gateway_url, paths=["/v1/chat/completions"])
         async with Proxy(fwd).session(sandbox) as handle:
-            await sandbox.remote(agent, env=openai_env_for(handle))
+            # the agent just POSTs /v1/chat/completions at handle.url; it never
+            # sees a session id — SessionForward creates + scopes it host-side.
+            await sandbox.remote(agent, base_url=handle.url)
+        sid = fwd.session_id                       # assigned after the run (or `await fwd.open()` up front)
         trajectory = (await httpx.AsyncClient().get(
-            f"{gateway_url}/sessions/{fwd.session_id}")).json()
+            f"{gateway_url}/sessions/{sid}")).json()
+        await fwd.delete_session()                 # optional: reap the server-side session
 
+    `.session_id` is only valid once the session exists — reading it before the
+    first request (or `open()`) raises, so a premature harvest fails loudly rather
+    than hitting a fabricated id. One instance == one gateway session: all of an
+    instance's calls accumulate into the same session, so use a fresh
+    `SessionForward` per rollout (or call `delete_session()` to reap and reset).
     The session is intentionally *not* deleted on `aclose()` — the trajectory is
-    the point, and reusing the forwarder keeps the same session.
+    the point and must survive the proxy teardown for harvesting.
     """
 
     def __init__(
@@ -163,10 +172,28 @@ class SessionForward(Forward):
         headers: Mapping[str, str] | None = None,
     ) -> None:
         super().__init__(target_url, paths=paths, timeout=timeout, headers=headers)
+        # Forward.__init__ stamped a throwaway uuid via the setter below; discard
+        # it — the gateway assigns the real id on open()/first call. Until then a
+        # read of `.session_id` raises instead of returning a meaningless value.
+        self._session_id: str | None = None
         self._create_path = "/" + create_path.strip("/")
         self._session_field = session_id_field
         self._session_ready = False
         self._session_lock = asyncio.Lock()
+
+    @property
+    def session_id(self) -> str:
+        if self._session_id is None:
+            raise RuntimeError(
+                "SessionForward.session_id is unavailable until the gateway session "
+                "is created — call `await fwd.open()` (or make one forwarded request) "
+                "before harvesting."
+            )
+        return self._session_id
+
+    @session_id.setter
+    def session_id(self, value: str) -> None:
+        self._session_id = value
 
     async def open(self) -> str:
         """Create the sidecar session now (idempotent) and return its id.
@@ -176,6 +203,22 @@ class SessionForward(Forward):
         """
         await self._ensure_session()
         return self.session_id
+
+    async def delete_session(self) -> None:
+        """Reap the server-side session (e.g. after the trajectory is harvested).
+
+        No-op if no session was created. Kept separate from `aclose()` / `Proxy.stop`
+        so the default flow preserves the trajectory; after this the next request
+        opens a fresh session. Transport errors are suppressed — best-effort reap.
+        """
+        sid = self._session_id
+        if sid is None:
+            return
+        url = f"{self._target}{self._create_path}/{sid}"
+        with contextlib.suppress(httpx.HTTPError):
+            await self._get_client().delete(url, headers=dict(self._headers))
+        self._session_ready = False
+        self._session_id = None
 
     async def _ensure_session(self) -> None:
         if self._session_ready:
