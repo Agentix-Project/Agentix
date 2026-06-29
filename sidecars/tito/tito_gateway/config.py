@@ -18,6 +18,11 @@ class TITOGatewayConfig:
 
     hf_checkpoint: str
     backend_url: str | None = None
+    # Explicit multi-backend pool (sglang/vLLM replicas). When set, these are
+    # used as-is and single-URL discovery is skipped; `backend_url` is left as
+    # the first entry for callers that read it.
+    backend_urls: tuple[str, ...] = ()
+    routing_policy: str = "sticky"
     chat_template_path: str | None = None
     apply_chat_template_kwargs: dict[str, Any] = field(default_factory=dict)
     tito_model: str = "default"
@@ -37,6 +42,11 @@ class TITOGatewayConfig:
         if invalid:
             raise ValueError(f"unsupported tito append roles: {invalid}")
         object.__setattr__(self, "tito_allowed_append_roles", normalized_roles or ("tool",))
+
+        if self.routing_policy not in ("sticky", "round_robin"):
+            raise ValueError(
+                f"routing_policy must be 'sticky' or 'round_robin'; got {self.routing_policy!r}"
+            )
 
     @classmethod
     def from_cli_values(
