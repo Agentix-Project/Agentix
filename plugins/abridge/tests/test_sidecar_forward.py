@@ -19,6 +19,7 @@ from agentix.bridge import (
     Forward,
     Proxy,
     Request,
+    SessionForward,
     Sidecar,
     SidecarError,
     TunnelHandle,
@@ -282,5 +283,138 @@ async def test_forward_through_live_sidecar(tmp_path) -> None:
             resp = await fwd.abridge_routes()["/v1/messages"](_req("/v1/messages", {"hi": 1}))
             assert resp.body == b'{"echo": true}'
             assert resp.media_type == "application/json"
+        finally:
+            await fwd.aclose()
+
+
+# ── SessionForward (unit, mocked httpx) ───────────────────────────────
+
+
+async def test_session_forward_creates_session_then_rewrites_path(monkeypatch) -> None:
+    fwd = SessionForward("http://gw", paths=["/v1/chat/completions"])
+    calls: list = []
+
+    async def fake_post(url, *, json, headers):
+        calls.append((url, json, headers))
+        if url.endswith("/sessions"):
+            return httpx.Response(200, content=b'{"session_id": "S9"}', headers={"content-type": "application/json"})
+        return httpx.Response(200, content=b'{"ok": true}', headers={"content-type": "application/json"})
+
+    assert fwd._client is not None
+    monkeypatch.setattr(fwd._client, "post", fake_post)
+    resp = await fwd.abridge_routes()["/v1/chat/completions"](
+        _req("/v1/chat/completions", {"model": "qwen3-4b"})
+    )
+
+    assert isinstance(resp, ClientResponse)
+    assert resp.status_code == 200 and resp.body == b'{"ok": true}'
+    assert fwd.session_id == "S9"
+    # First upstream call created the session; second routed into it by path.
+    assert calls[0][0] == "http://gw/sessions"
+    assert calls[1][0] == "http://gw/sessions/S9/v1/chat/completions"
+    assert calls[1][1] == {"model": "qwen3-4b"}
+    assert calls[1][2]["x-session-id"] == "S9"
+
+
+async def test_session_forward_creates_session_once(monkeypatch) -> None:
+    fwd = SessionForward("http://gw", paths=["/v1/chat/completions"])
+    creates = 0
+
+    async def fake_post(url, *, json, headers):
+        nonlocal creates
+        if url.endswith("/sessions"):
+            creates += 1
+            return httpx.Response(200, content=b'{"session_id": "S"}', headers={"content-type": "application/json"})
+        return httpx.Response(200, content=b"{}", headers={"content-type": "application/json"})
+
+    assert fwd._client is not None
+    monkeypatch.setattr(fwd._client, "post", fake_post)
+    handler = fwd.abridge_routes()["/v1/chat/completions"]
+    await handler(_req("/v1/chat/completions", {}))
+    await handler(_req("/v1/chat/completions", {}))
+    assert creates == 1
+
+
+async def test_session_forward_open_precreates_session(monkeypatch) -> None:
+    fwd = SessionForward("http://gw", paths=["/v1/chat/completions"])
+
+    async def fake_post(url, *, json, headers):
+        return httpx.Response(200, content=b'{"session_id": "PRE"}', headers={"content-type": "application/json"})
+
+    assert fwd._client is not None
+    monkeypatch.setattr(fwd._client, "post", fake_post)
+    assert await fwd.open() == "PRE"
+    assert fwd.session_id == "PRE"
+
+
+async def test_session_forward_create_failure_is_502(monkeypatch) -> None:
+    fwd = SessionForward("http://gw", paths=["/v1/chat/completions"])
+
+    async def fake_post(url, *, json, headers):
+        return httpx.Response(500, content=b"boom")
+
+    assert fwd._client is not None
+    monkeypatch.setattr(fwd._client, "post", fake_post)
+    with pytest.raises(AbridgeError) as ei:
+        await fwd.open()
+    assert ei.value.status_code == 502
+
+
+async def test_session_forward_missing_id_field_is_502(monkeypatch) -> None:
+    fwd = SessionForward("http://gw", paths=["/v1/chat/completions"])
+
+    async def fake_post(url, *, json, headers):
+        return httpx.Response(200, content=b'{"nope": 1}', headers={"content-type": "application/json"})
+
+    assert fwd._client is not None
+    monkeypatch.setattr(fwd._client, "post", fake_post)
+    with pytest.raises(AbridgeError) as ei:
+        await fwd.open()
+    assert ei.value.status_code == 502
+
+
+# ── SessionForward (integration, real sidecar) ────────────────────────
+
+SESSION_SERVER = """
+import sys, json
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+SID = "sess-LIVE"
+
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
+
+    def do_POST(self):
+        n = int(self.headers.get("content-length", 0))
+        body = self.rfile.read(n)
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.end_headers()
+        if self.path == "/sessions":
+            self.wfile.write(json.dumps({"session_id": SID}).encode())
+        else:
+            self.wfile.write(json.dumps({"path": self.path, "got": json.loads(body or b"{}")}).encode())
+
+    def log_message(self, *a):
+        pass
+
+HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+"""
+
+
+async def test_session_forward_through_live_sidecar(tmp_path) -> None:
+    script = tmp_path / "sess.py"
+    script.write_text(SESSION_SERVER)
+    async with Sidecar(command=[sys.executable, str(script), "{port}"]) as url:
+        fwd = SessionForward(url, paths=["/v1/chat/completions"])
+        try:
+            resp = await fwd.abridge_routes()["/v1/chat/completions"](
+                _req("/v1/chat/completions", {"model": "m"})
+            )
+            assert resp.status_code == 200
+            assert fwd.session_id == "sess-LIVE"
+            assert b'"path": "/sessions/sess-LIVE/v1/chat/completions"' in resp.body
+            assert b'"model": "m"' in resp.body
         finally:
             await fwd.aclose()

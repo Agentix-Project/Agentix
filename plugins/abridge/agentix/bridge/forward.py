@@ -27,6 +27,7 @@ class-level `@on` tag — so `Forward` exposes them through
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from collections.abc import Mapping
@@ -89,7 +90,7 @@ class Forward:
             "x-request-id": record_id,
             "content-type": "application/json",
         }
-        url = self._target + path
+        url = self._url_for(path)
         try:
             resp = await self._get_client().post(url, json=request.body, headers=headers)
         except httpx.HTTPError as exc:
@@ -102,6 +103,11 @@ class Forward:
             media_type=media_type or "application/json",
             status_code=resp.status_code,
         )
+
+    def _url_for(self, path: str) -> str:
+        """Upstream URL for an inbound `path`. Override to remap — e.g. a
+        session-scoped sidecar prefixes `/sessions/{id}`."""
+        return self._target + path
 
     def _get_client(self) -> httpx.AsyncClient:
         client = self._client
@@ -118,4 +124,93 @@ class Forward:
             await client.aclose()
 
 
-__all__ = ["Forward"]
+class SessionForward(Forward):
+    """Forward to a *session-scoped* sidecar that keys a trajectory by URL path.
+
+    Some sidecars don't accept a bare `/v1/chat/completions` — they require a
+    session created up front and then addressed by path: `POST {create_path}`
+    returns `{"session_id": ...}`, and every later call goes to
+    `{create_path}/{session_id}{path}`. The TITO gateway is the motivating case:
+    its recording route is `/sessions/{id}/v1/chat/completions`, so a plain
+    `Forward` (which posts straight to `{target}{path}`) can't reach it, and the
+    id isn't known until the gateway assigns it.
+
+    `SessionForward` creates the session lazily on the first forwarded request
+    (or eagerly via `open()`), remembers the assigned id, and rewrites every
+    inbound `path` to the session-scoped URL. So the in-sandbox agent keeps
+    calling an unmodified `/v1/chat/completions` and the whole rollout still
+    lands in one session. Read `.session_id` afterward to harvest the trajectory
+    (`GET {create_path}/{session_id}`).
+
+        fwd = SessionForward(gateway_url, paths=["/v1/chat/completions"])
+        async with Proxy(fwd).session(sandbox) as handle:
+            await sandbox.remote(agent, env=openai_env_for(handle))
+        trajectory = (await httpx.AsyncClient().get(
+            f"{gateway_url}/sessions/{fwd.session_id}")).json()
+
+    The session is intentionally *not* deleted on `aclose()` — the trajectory is
+    the point, and reusing the forwarder keeps the same session.
+    """
+
+    def __init__(
+        self,
+        target_url: str,
+        *,
+        paths: list[str],
+        create_path: str = "/sessions",
+        session_id_field: str = "session_id",
+        timeout: float = 600.0,
+        headers: Mapping[str, str] | None = None,
+    ) -> None:
+        super().__init__(target_url, paths=paths, timeout=timeout, headers=headers)
+        self._create_path = "/" + create_path.strip("/")
+        self._session_field = session_id_field
+        self._session_ready = False
+        self._session_lock = asyncio.Lock()
+
+    async def open(self) -> str:
+        """Create the sidecar session now (idempotent) and return its id.
+
+        Lazy creation also happens on the first forwarded request, so `open()`
+        is only needed when the host wants the id before the agent runs.
+        """
+        await self._ensure_session()
+        return self.session_id
+
+    async def _ensure_session(self) -> None:
+        if self._session_ready:
+            return
+        async with self._session_lock:
+            if self._session_ready:
+                return
+            url = self._target + self._create_path
+            headers = {**self._headers, "content-type": "application/json"}
+            try:
+                resp = await self._get_client().post(url, json={}, headers=headers)
+            except httpx.HTTPError as exc:
+                logger.warning("abridge session create %s: %s", url, exc)
+                raise AbridgeError(f"create session at {url}: {exc}", status_code=502) from exc
+            if resp.status_code != 200:
+                raise AbridgeError(
+                    f"create session at {url}: HTTP {resp.status_code}", status_code=502
+                )
+            try:
+                session_id = resp.json()[self._session_field]
+            except (ValueError, KeyError, TypeError) as exc:
+                raise AbridgeError(
+                    f"create session at {url}: response missing {self._session_field!r}",
+                    status_code=502,
+                ) from exc
+            self.session_id = str(session_id)
+            self._session_ready = True
+            logger.info("abridge session created at %s: %s", url, self.session_id)
+
+    def _url_for(self, path: str) -> str:
+        return f"{self._target}{self._create_path}/{self.session_id}{path}"
+
+    async def _forward(self, path: str, request: Request) -> ClientResponse:
+        await self._ensure_session()
+        return await super()._forward(path, request)
+
+
+__all__ = ["Forward", "SessionForward"]

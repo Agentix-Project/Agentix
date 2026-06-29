@@ -33,7 +33,7 @@ blocks; abridge core stays shape-blind.
 
 from __future__ import annotations
 
-from .forward import Forward
+from .forward import Forward, SessionForward
 from .proxy import (
     NAMESPACE,
     AbridgeError,
