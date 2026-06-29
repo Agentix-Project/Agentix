@@ -122,7 +122,8 @@ async def test_forward_upstream_http_error_is_a_response(monkeypatch) -> None:
     assert resp.body == b'{"error":"down"}'
 
 
-async def test_forward_network_error_is_502(monkeypatch) -> None:
+async def test_forward_network_error_is_503(monkeypatch) -> None:
+    """Failure to reach the sidecar is 503 — distinct from a relayed upstream 502."""
     fwd = Forward("http://side.car", paths=["/v1/messages"])
 
     async def fake_post(url, *, json, headers):
@@ -131,7 +132,7 @@ async def test_forward_network_error_is_502(monkeypatch) -> None:
     monkeypatch.setattr(fwd._client, "post", fake_post)
     with pytest.raises(AbridgeError) as ei:
         await fwd.abridge_routes()["/v1/messages"](_req("/v1/messages", {}))
-    assert ei.value.status_code == 502
+    assert ei.value.status_code == 503
 
 
 async def test_forward_http_status_survives_tunnel_and_sio(monkeypatch) -> None:
@@ -447,3 +448,34 @@ async def test_session_forward_through_live_sidecar(tmp_path) -> None:
             assert b'"model": "m"' in resp.body
         finally:
             await fwd.aclose()
+
+
+# ── tunnel boundary + client env helpers ──────────────────────────────
+
+
+async def test_tunnel_rejects_non_object_body(monkeypatch) -> None:
+    """A present-but-non-object JSON body (an array) is a 400 at the tunnel,
+    not a silent coercion to {}."""
+    import agentix as agentix_mod
+    import agentix.bridge.proxy as proxy_mod
+
+    monkeypatch.setattr(agentix_mod, "register_namespace", lambda ns: None)
+    monkeypatch.setattr(proxy_mod, "_namespace_singleton", None)
+
+    handle = await proxy_mod._start_tunnel(paths=["/v1/messages"])
+    try:
+        async with httpx.AsyncClient(base_url=handle.url, timeout=10) as client:
+            r = await client.post("/v1/messages", json=["not", "an", "object"])
+        assert r.status_code == 400
+    finally:
+        await proxy_mod._stop_tunnel(handle=handle)
+
+
+def test_openai_client_environ_bakes_in_v1() -> None:
+    """OpenAIClient.environ mirrors the Anthropic ones and bakes in the /v1 suffix."""
+    from agentix.bridge.clients import OpenAIClient
+
+    c = OpenAIClient(base_url="https://up.stream/v1", api_key="real-key", model="gpt-4o")
+    env = c.environ(TunnelHandle(url="http://127.0.0.1:9", port=9))
+    assert env["OPENAI_BASE_URL"] == "http://127.0.0.1:9/v1"
+    assert env["OPENAI_API_KEY"].startswith("sk-")

@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 from agentix.utils import trace
 
-from ..proxy import AbridgeError, ClientResponse, Request, on
+from ..proxy import AbridgeError, ClientResponse, Request, TunnelHandle, on
 from ._genai_span import populate_openai_span
 
 if TYPE_CHECKING:
@@ -113,6 +113,18 @@ class OpenAIClient:
             response_dict = completion.model_dump(exclude_none=False)
             populate_openai_span(request=request.body, response=response_dict)
             return ClientResponse.json(response_dict)
+
+    def environ(self, handle: TunnelHandle) -> dict[str, str]:
+        """Env-var bundle an in-sandbox OpenAI SDK needs to route through `handle`,
+        mirroring `AnthropicClient.environ`. `OPENAI_BASE_URL` carries the `/v1`
+        suffix the OpenAI SDK expects (it appends only `/chat/completions`), so the
+        load-bearing suffix is baked in here instead of left to the caller.
+        `OPENAI_API_KEY` is a non-secret placeholder whose shape passes the SDK's
+        local format check — the real upstream key lives on the host (this client)."""
+        return {
+            "OPENAI_BASE_URL": handle.url + "/v1",
+            "OPENAI_API_KEY": PLACEHOLDER_API_KEY,
+        }
 
 
 __all__ = ["PLACEHOLDER_API_KEY", "OpenAIClient"]

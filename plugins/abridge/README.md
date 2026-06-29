@@ -49,7 +49,7 @@ from agentix.bridge.clients import AnthropicFromOpenAIClient
 client = AnthropicFromOpenAIClient(
     base_url="https://api.openai.com/v1",   # OpenAI / OpenRouter / vLLM / your gateway
     api_key="sk-...",
-    upstream_model="gpt-4o",                # the agent keeps sending claude-* model ids
+    model="gpt-4o",                         # the agent keeps sending claude-* model ids
 )
 proxy = Proxy(client)
 

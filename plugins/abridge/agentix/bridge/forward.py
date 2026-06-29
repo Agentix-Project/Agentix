@@ -53,7 +53,10 @@ class Forward:
 
     Responses, including 4xx and 5xx responses, remain normal
     `ClientResponse` values so their status and body survive the tunnel.
-    `AbridgeError(502)` is reserved for failures to obtain an HTTP response.
+    `AbridgeError(503)` signals a failure to obtain any HTTP response from the
+    sidecar (connection refused, DNS, timeout) — a distinct code from a real
+    upstream 502 the sidecar relays, so the agent can tell "sidecar down" from
+    "sidecar returned bad gateway".
     """
 
     def __init__(
@@ -96,7 +99,7 @@ class Forward:
             resp = await self._get_client().post(url, json=request.body, headers=headers)
         except httpx.HTTPError as exc:
             logger.warning("abridge forward %s: %s", url, exc)
-            raise AbridgeError(f"forward to {url}: {exc}", status_code=502) from exc
+            raise AbridgeError(f"forward to {url}: {exc}", status_code=503) from exc
 
         media_type = resp.headers.get("content-type", "application/json").split(";")[0].strip()
         return ClientResponse(
@@ -232,7 +235,7 @@ class SessionForward(Forward):
                 resp = await self._get_client().post(url, json={}, headers=headers)
             except httpx.HTTPError as exc:
                 logger.warning("abridge session create %s: %s", url, exc)
-                raise AbridgeError(f"create session at {url}: {exc}", status_code=502) from exc
+                raise AbridgeError(f"create session at {url}: {exc}", status_code=503) from exc
             if resp.status_code != 200:
                 raise AbridgeError(
                     f"create session at {url}: HTTP {resp.status_code}", status_code=502

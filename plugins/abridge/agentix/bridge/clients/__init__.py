@@ -13,12 +13,13 @@ mixin-compose multiple in one user-defined class.
     OpenAI-compatible (translation lives here). Same path set as
     `AnthropicClient`.
 
-The two Anthropic-side classes also expose `environ(handle)` (instance
-method) — the env-var bundle (`ANTHROPIC_BASE_URL` + placeholder
-`ANTHROPIC_API_KEY`) an in-sandbox Anthropic SDK needs to route through
-the tunnel. The OpenAI client doesn't ship an `environ`; agents that
-use the OpenAI SDK typically construct the client with
-`base_url=handle.url + "/v1"` directly.
+All three classes expose `environ(handle)` (instance method) — the env-var
+bundle an in-sandbox SDK needs to route through the tunnel, so the wiring step
+is `env=client.environ(handle)` uniformly. `OpenAIClient` returns
+`{OPENAI_BASE_URL: handle.url + "/v1", OPENAI_API_KEY: placeholder}` — the `/v1`
+suffix the OpenAI SDK expects is baked in so a caller can't drop it; the two
+Anthropic-side classes return `{ANTHROPIC_BASE_URL: handle.url, ANTHROPIC_API_KEY:
+placeholder}` (no `/v1` — the Anthropic SDK appends it itself).
 
 The two `populate_*_span` helpers are exposed at this level so user-
 written clients can stamp the same OTel GenAI attrs the bundled
