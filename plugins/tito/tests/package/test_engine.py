@@ -9,13 +9,12 @@ sentinels, and the session state machine rolls back to the last assistant checkp
 from __future__ import annotations
 
 import pytest
-from tokenizers import Tokenizer, models, pre_tokenizers
-from transformers import PreTrainedTokenizerFast
-
 from agentix.tito.engine.compare import MismatchType, TokenSeqComparator
 from agentix.tito.engine.messages import assert_messages_append_only_with_allowed_role, message_matches
 from agentix.tito.engine.pretokenize import Qwen3TITOTokenizer, get_tito_tokenizer
 from agentix.tito.engine.trajectory import LinearTrajectory, SessionRegistry
+from tokenizers import Tokenizer, models, pre_tokenizers
+from transformers import PreTrainedTokenizerFast
 
 
 @pytest.fixture(scope="module")
@@ -126,12 +125,16 @@ def test_trajectory_rollback_to_assistant_checkpoint(tok):
     a0 = {"role": "assistant", "content": "ok"}
 
     tr.prepare_pretokenized(sys, None, tito_tokenizer=tt)
-    tr.update_pretokenized_state(sys, a0, tt.render_messages(sys + [a0], add_generation_prompt=False, tokenize=True), [], tt.max_trim_tokens)
+    tr.update_pretokenized_state(
+        sys, a0, tt.render_messages(sys + [a0], add_generation_prompt=False, tokenize=True), [], tt.max_trim_tokens
+    )
 
     m1 = sys + [a0, {"role": "tool", "content": "391"}]
     a1 = {"role": "assistant", "content": "done"}
     tr.prepare_pretokenized(m1, None, tito_tokenizer=tt)
-    tr.update_pretokenized_state(m1, a1, tt.render_messages(m1 + [a1], add_generation_prompt=False, tokenize=True), [], tt.max_trim_tokens)
+    tr.update_pretokenized_state(
+        m1, a1, tt.render_messages(m1 + [a1], add_generation_prompt=False, tokenize=True), [], tt.max_trim_tokens
+    )
     assert tr.num_assistant == 2
     assert reg.compute_session_mismatch(tr) == []  # clean chain → no mismatch
 

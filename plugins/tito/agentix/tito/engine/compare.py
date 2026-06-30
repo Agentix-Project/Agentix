@@ -8,12 +8,12 @@ model's own tokens) and is reported as a soft mismatch.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from enum import Enum
+from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 
-class MismatchType(str, Enum):
+class MismatchType(StrEnum):
     # Segment count or special/content pattern differs — structural break.
     SPECIAL_TOKEN_COUNT = "special_token_count"
     # Aligned special-token segment holds a different special token.
@@ -67,7 +67,9 @@ class TokenSeqComparator:
     ) -> None:
         self.tokenizer = tokenizer
         self._assistant_start_str = assistant_start_str
-        self._special_ids = set(special_token_ids) if special_token_ids is not None else self.collect_special_ids(tokenizer)
+        self._special_ids = (
+            set(special_token_ids) if special_token_ids is not None else self.collect_special_ids(tokenizer)
+        )
         self._trim_trailing_ids = set(trim_trailing_ids) if trim_trailing_ids else None
 
     @staticmethod
@@ -140,7 +142,9 @@ class TokenSeqComparator:
             detail=detail,
         )
 
-    def _compare_single_segment(self, idx: int, exp: Segment, act: Segment, *, is_assistant_content: bool) -> Mismatch | None:
+    def _compare_single_segment(
+        self, idx: int, exp: Segment, act: Segment, *, is_assistant_content: bool
+    ) -> Mismatch | None:
         if exp.is_special:
             if exp.token_ids != act.token_ids:
                 return Mismatch(

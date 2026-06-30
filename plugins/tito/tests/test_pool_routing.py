@@ -9,7 +9,6 @@ from __future__ import annotations
 import types
 
 import pytest
-
 from agentix.tito.pool import BackendPool
 from agentix.tito.server import SessionServer, _session_id_from_path
 

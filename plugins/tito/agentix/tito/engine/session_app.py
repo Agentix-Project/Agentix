@@ -23,8 +23,8 @@ from fastapi.responses import JSONResponse
 from starlette.responses import Response
 
 from .errors import SessionError, SessionNotFoundError, TokenizationError, UpstreamResponseError
-from .processing import load_tokenizer
 from .pretokenize import get_tito_tokenizer
+from .processing import load_tokenizer
 from .trajectory import GetSessionResponse, SessionRecord, SessionRegistry
 
 logger = logging.getLogger(__name__)

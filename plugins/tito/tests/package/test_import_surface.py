@@ -3,7 +3,7 @@ import pytest
 
 def test_public_import_surface():
     import agentix.tito
-    from agentix.tito import TITOGateway, TITOGatewayConfig, SessionServer, get_tito_tokenizer
+    from agentix.tito import SessionServer, TITOGateway, TITOGatewayConfig, get_tito_tokenizer
 
     assert agentix.tito.TITOGateway is TITOGateway
     assert agentix.tito.TITOGatewayConfig is TITOGatewayConfig

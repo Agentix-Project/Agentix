@@ -1,7 +1,6 @@
 import pytest
-
-from agentix.tito.config import TITOGatewayConfig
 from agentix.tito import discovery
+from agentix.tito.config import TITOGatewayConfig
 
 
 def test_explicit_backend_url_wins_over_environment_and_probe(monkeypatch):

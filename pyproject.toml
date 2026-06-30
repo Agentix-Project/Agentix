@@ -98,6 +98,9 @@ exclude = ["examples/*"]
 [tool.ruff]
 line-length = 120
 target-version = "py311"
+# Vendored sidecar sources (their own upstream repos with their own CI /
+# formatting) — kept out of our lint scope, same as the pyright exclude.
+extend-exclude = ["sidecars"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP"]

@@ -14,9 +14,9 @@ import math
 import sys
 
 import pytest
+from agentix.provider.uv import UvProvider, UvProviderConfig
 
 from agentix.provider.base import SandboxConfig, SandboxProvider
-from agentix.provider.uv import UvProvider, UvProviderConfig
 
 
 def _reuse_venv() -> str:

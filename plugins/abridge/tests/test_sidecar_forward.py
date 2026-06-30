@@ -456,8 +456,9 @@ async def test_session_forward_through_live_sidecar(tmp_path) -> None:
 async def test_tunnel_rejects_non_object_body(monkeypatch) -> None:
     """A present-but-non-object JSON body (an array) is a 400 at the tunnel,
     not a silent coercion to {}."""
-    import agentix as agentix_mod
     import agentix.bridge.proxy as proxy_mod
+
+    import agentix as agentix_mod
 
     monkeypatch.setattr(agentix_mod, "register_namespace", lambda ns: None)
     monkeypatch.setattr(proxy_mod, "_namespace_singleton", None)

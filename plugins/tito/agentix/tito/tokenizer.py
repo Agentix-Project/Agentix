@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from .engine.pretokenize import get_tito_tokenizer as _engine_get_tito_tokenizer
 
 
-class TITOTokenizerType(str, Enum):
+class TITOTokenizerType(StrEnum):
     """Tokenizer families the native engine supports. Other models are a small
     subclass + a fixed chat template — see agentix.tito.engine.pretokenize."""
 

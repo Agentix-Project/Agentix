@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import copy
 import json
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 from jinja2 import TemplateError
 from pydantic import BaseModel, TypeAdapter
@@ -19,8 +19,8 @@ from pydantic import BaseModel, TypeAdapter
 
 class _Function(BaseModel):
     name: str
-    description: Optional[str] = None
-    parameters: Optional[dict[str, Any]] = None
+    description: str | None = None
+    parameters: dict[str, Any] | None = None
 
 
 class Tool(BaseModel):

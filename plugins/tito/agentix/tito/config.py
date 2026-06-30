@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 
 from .discovery import DEFAULT_BACKEND_PROBE_CANDIDATES
 
-
 _VALID_APPEND_ROLES = frozenset({"tool", "user", "system"})
 
 
@@ -59,7 +58,7 @@ class TITOGatewayConfig:
         router_timeout: float,
         backend_probe_candidates: list[str] | None = None,
         backend_probe_timeout: float = 0.25,
-    ) -> "TITOGatewayConfig":
+    ) -> TITOGatewayConfig:
         return cls(
             hf_checkpoint=hf_checkpoint,
             backend_url=backend_url,

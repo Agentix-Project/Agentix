@@ -8,7 +8,6 @@ from collections.abc import Callable, Iterable, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-
 DEFAULT_BACKEND_ENV_VARS = ("TITO_BACKEND_URL", "OPENAI_BASE_URL", "SGLANG_BASE_URL")
 DEFAULT_BACKEND_PROBE_CANDIDATES = (
     "http://127.0.0.1:8000",

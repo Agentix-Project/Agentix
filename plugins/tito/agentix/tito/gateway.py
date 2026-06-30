@@ -34,7 +34,7 @@ class TITOGateway:
         self._register_health_alias()
 
     @classmethod
-    def from_server(cls, *, hf_checkpoint: str, backend_url: str | None = None, **kwargs) -> "TITOGateway":
+    def from_server(cls, *, hf_checkpoint: str, backend_url: str | None = None, **kwargs) -> TITOGateway:
         return cls(TITOGatewayConfig(hf_checkpoint=hf_checkpoint, backend_url=backend_url, **kwargs))
 
     def _register_health_alias(self) -> None:

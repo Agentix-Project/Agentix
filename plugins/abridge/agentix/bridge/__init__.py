@@ -61,6 +61,7 @@ __all__ = [
     "NAMESPACE",
     "Proxy",
     "Request",
+    "SessionForward",
     "Sidecar",
     "SidecarError",
     "TunnelHandle",

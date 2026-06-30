@@ -1,5 +1,4 @@
 import pytest
-
 from agentix.tito.cli import build_parser, main
 
 
