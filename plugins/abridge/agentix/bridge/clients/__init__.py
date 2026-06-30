@@ -32,6 +32,7 @@ from ._genai_span import populate_anthropic_span, populate_openai_span
 from .anthropic import PLACEHOLDER_API_KEY as ANTHROPIC_PLACEHOLDER_API_KEY
 from .anthropic import AnthropicClient
 from .anthropic_from_openai import AnthropicFromOpenAIClient
+from .anthropic_to_openai import AnthropicToOpenAI
 from .openai import PLACEHOLDER_API_KEY as OPENAI_PLACEHOLDER_API_KEY
 from .openai import OpenAIClient
 
@@ -39,6 +40,7 @@ __all__ = [
     "ANTHROPIC_PLACEHOLDER_API_KEY",
     "AnthropicClient",
     "AnthropicFromOpenAIClient",
+    "AnthropicToOpenAI",
     "OPENAI_PLACEHOLDER_API_KEY",
     "OpenAIClient",
     "populate_anthropic_span",

@@ -479,3 +479,133 @@ def test_openai_client_environ_bakes_in_v1() -> None:
     env = c.environ(TunnelHandle(url="http://127.0.0.1:9", port=9))
     assert env["OPENAI_BASE_URL"] == "http://127.0.0.1:9/v1"
     assert env["OPENAI_API_KEY"].startswith("sk-")
+
+
+# ── composition: Convert (AnthropicToOpenAI) ∘ transport (Forward/SessionForward) ──
+
+_OPENAI_COMPLETION = (
+    b'{"id":"c1","object":"chat.completion","model":"qwen3-4b",'
+    b'"choices":[{"index":0,"finish_reason":"stop",'
+    b'"message":{"role":"assistant","content":"hi there"}}],'
+    b'"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}'
+)
+
+
+def test_forward_handler_accessor() -> None:
+    fwd = Forward("http://x", paths=["/v1/chat/completions"])
+    assert callable(fwd.handler())  # sole path, no arg needed
+    assert callable(fwd.handler("/v1/chat/completions"))
+    with pytest.raises(ValueError):
+        Forward("http://x", paths=["/a", "/b"]).handler()  # ambiguous → must name a path
+
+
+async def test_anthropic_to_openai_translates_over_any_downstream() -> None:
+    """The Convert layer is transport-blind: it translates Anthropic→OpenAI, calls
+    the downstream Handler, and translates the OpenAI completion back to Anthropic."""
+    from agentix.bridge.clients import AnthropicToOpenAI
+
+    captured: dict = {}
+
+    async def fake_downstream(request: Request) -> ClientResponse:
+        captured["body"] = request.body
+        return ClientResponse(body=_OPENAI_COMPLETION, media_type="application/json")
+
+    conv = AnthropicToOpenAI(fake_downstream, model="qwen3-4b")
+    resp = await conv.messages(
+        _req("/v1/messages", {
+            "model": "claude-3-5-sonnet",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "say hi"}],
+        })
+    )
+    assert resp.status_code == 200
+    assert b"hi there" in resp.body
+    assert b'"role": "assistant"' in resp.body          # Anthropic response shape
+    # the downstream saw an OpenAI-shaped, non-streaming body with the model override
+    assert captured["body"]["model"] == "qwen3-4b"
+    assert captured["body"]["stream"] is False
+    assert captured["body"]["messages"][0]["role"] == "user"
+
+
+async def test_anthropic_to_openai_composes_with_session_forward(monkeypatch) -> None:
+    """End-to-end composition: Anthropic agent → AnthropicToOpenAI → SessionForward
+    creates the session and rewrites the path → OpenAI completion → back to Anthropic.
+    The converter never touches a session; the SessionForward never sees Anthropic."""
+    from agentix.bridge.clients import AnthropicToOpenAI
+
+    tito = SessionForward("http://gw", paths=["/v1/chat/completions"])
+    calls: list = []
+
+    async def fake_post(url, *, json, headers):
+        calls.append(url)
+        if url.endswith("/sessions"):
+            return httpx.Response(200, content=b'{"session_id": "S1"}', headers={"content-type": "application/json"})
+        return httpx.Response(200, content=_OPENAI_COMPLETION, headers={"content-type": "application/json"})
+
+    assert tito._client is not None
+    monkeypatch.setattr(tito._client, "post", fake_post)
+
+    conv = AnthropicToOpenAI(tito.handler(), model="qwen3-4b")
+    resp = await conv.messages(
+        _req("/v1/messages", {
+            "model": "claude",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "say hi"}],
+        })
+    )
+    assert resp.status_code == 200
+    assert b"hi there" in resp.body
+    assert tito.session_id == "S1"
+    assert calls[0] == "http://gw/sessions"
+    assert calls[1] == "http://gw/sessions/S1/v1/chat/completions"
+    await tito.aclose()
+
+
+async def test_anthropic_to_openai_replays_remembered_assistant() -> None:
+    """The lossy Anthropic round-trip drops reasoning_content + tool-call `index`, so
+    a reconstructed assistant won't byte-match what a session backend stored. The
+    converter remembers the exact downstream assistant and replays it verbatim on the
+    next turn, keyed by the surviving tool-call ids."""
+    from agentix.bridge.clients import AnthropicToOpenAI
+
+    stored_assistant = {
+        "role": "assistant",
+        "content": "",
+        "reasoning_content": "\n\n",
+        "tool_calls": [{
+            "id": "call_X", "index": 0, "type": "function",
+            "function": {"name": "python", "arguments": "{\"expression\": \"1+1\"}"},
+        }],
+    }
+    sent: list = []
+
+    async def fake_downstream(request: Request) -> ClientResponse:
+        sent.append(request.body.get("messages"))
+        return ClientResponse.json({
+            "choices": [{"index": 0, "finish_reason": "tool_calls", "message": stored_assistant}],
+            "model": "m", "usage": {},
+        })
+
+    conv = AnthropicToOpenAI(fake_downstream, model="m")
+    await conv.messages(_req("/v1/messages", {
+        "model": "c", "max_tokens": 64, "messages": [{"role": "user", "content": "hi"}],
+    }))
+    # turn 1: the agent resends the round-tripped assistant (no index, no reasoning_content)
+    await conv.messages(_req("/v1/messages", {
+        "model": "c", "max_tokens": 64,
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "call_X", "name": "python", "input": {"expression": "1+1"}}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "call_X", "content": "2"}]},
+        ],
+    }))
+
+    asst = [m for m in sent[1] if m.get("role") == "assistant"]
+    assert len(asst) == 1
+    # value-equal to the stored assistant (incl. reasoning_content + index), not the
+    # lossy reconstruction — so the backend's byte-match would pass.
+    assert asst[0] == stored_assistant
+    assert asst[0]["reasoning_content"] == "\n\n"
+    assert asst[0]["tool_calls"][0]["index"] == 0

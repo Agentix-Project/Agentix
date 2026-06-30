@@ -86,6 +86,23 @@ class Forward:
 
         return handler
 
+    def handler(self, path: str | None = None) -> Handler:
+        """The bound forwarder for `path` (or the sole path if there's exactly
+        one) as a plain `Handler`. This is the composition seam: it lets a
+        converter/wrapper use this Forward as a transparent downstream —
+        `AnthropicToOpenAI(SessionForward(gw).handler())` — without knowing it's a
+        Forward, a SessionForward, or anything else."""
+        routes = self.abridge_routes()
+        if path is None:
+            if len(routes) != 1:
+                raise ValueError(
+                    f"handler() needs an explicit path; forwarder has {sorted(routes)}"
+                )
+            (path,) = routes
+        if path not in routes:
+            raise ValueError(f"no route for {path!r}; have {sorted(routes)}")
+        return routes[path]
+
     async def _forward(self, path: str, request: Request) -> ClientResponse:
         record_id = uuid.uuid4().hex
         headers = {
