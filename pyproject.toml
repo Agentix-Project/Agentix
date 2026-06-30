@@ -88,6 +88,7 @@ members = [
     "plugins/agents/*",
     "plugins/datasets/*",
     "plugins/providers/*",
+    "plugins/tito",
 ]
 # `examples/*` are standalone projects, not members — each has its own
 # lock and path-depends on the workspace. Excluding them lets `uv lock`
@@ -122,6 +123,7 @@ include = [
     "plugins/providers/e2b/agentix",
     "plugins/runtime-basic/agentix",
     "plugins/trace-otel/agentix",
+    "plugins/tito/agentix",
 ]
 exclude = ["**/__pycache__", "**/.venv", ".venv", "**/build"]
 # `agentix` is a pkgutil namespace package — the core lives here, the
@@ -142,6 +144,7 @@ extraPaths = [
     "plugins/providers/e2b",
     "plugins/runtime-basic",
     "plugins/trace-otel",
+    "plugins/tito",
 ]
 typeCheckingMode = "basic"
 # venv lives on local disk (the repo is on a slow FUSE mount); `.venv`

@@ -1,7 +1,0 @@
-{
-  "project": "Miles",
-  "repository": "https://github.com/radixark/miles",
-  "documentation": "https://www.radixark.com/miles/docs/user-guide/agentic-chat-template",
-  "source_commit": "9437366e0aa3a25294720f70d18b081067595f85",
-  "acknowledgement": "TITO Gateway is a standalone wrapper and packaging layer around Miles TITO work, not a rewrite of the Miles TITO algorithms."
-}
