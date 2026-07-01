@@ -37,8 +37,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from datasets import load_dataset
-
 import agentix.agents.claude_code as cc
 import agentix.plugins.datasets.swe as swe
 from agentix.bash import run as bash_run
@@ -46,6 +44,7 @@ from agentix.bridge import Proxy
 from agentix.bridge.clients import ANTHROPIC_PLACEHOLDER_API_KEY, AnthropicFromOpenAIClient
 from agentix.provider.docker import DockerProvider
 from agentix.runner import AgentResult, run_rollouts
+from datasets import load_dataset
 
 logger = logging.getLogger("run_swe_rollouts")
 
