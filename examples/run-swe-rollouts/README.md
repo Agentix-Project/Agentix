@@ -7,9 +7,10 @@ per-instance orchestration.
 - **`SweDataset`** — enumerates SWE-bench rows, builds each task image, resets
   `/testbed` to the base commit, and scores a patch with the official harness
   (`agentix.plugins.datasets.swe`).
-- **`ClaudeCodeAgent`** — starts the in-sandbox Anthropic↔OpenAI bridge, runs
-  the `claude` CLI against it, and extracts the diff with `agentix.bash.run`.
-  The real provider call stays on the host.
+- **`ClaudeCodeAgent`** — opens an abridge `Proxy` session on the sandbox,
+  runs the `claude` CLI against the in-sandbox tunnel, and extracts the diff
+  with `agentix.bash.run`. The real provider call stays on the host
+  (`AnthropicFromOpenAIClient` owns the upstream call and the translation).
 - **`GroundTruthAgent`** (`--ground-truth`) — submits each row's gold patch,
   reusing the identical scoring path for harness validation.
 
@@ -33,7 +34,14 @@ uv run python main.py --bundle "$BUNDLE" --limit 5 --concurrency 4
 
 # Ground-truth harness check (no agent, no key needed):
 uv run python main.py --bundle "$BUNDLE" --ground-truth --fail-on-unresolved
+
+# CI-style sharding — run one slice of the split (nightly-CI runs 20 of these):
+uv run python main.py --bundle "$BUNDLE" --ground-truth --num-shards 20 --shard-index 0
 ```
+
+Sharding is round-robin and deterministic; `--limit` applies per shard, and a
+shard with no rows (more shards than rows) exits 0. `--instance-id` selects
+rows explicitly and cannot be combined with `--num-shards`/`--shard-index`.
 
 Per-instance summaries land in `runs/<instance_id>.json`, plus a combined
 `runs/summary.json`.

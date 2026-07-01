@@ -134,5 +134,10 @@ class AnthropicFromOpenAIClient:
             "ANTHROPIC_API_KEY": PLACEHOLDER_API_KEY,
         }
 
+    async def aclose(self) -> None:
+        """Release the upstream SDK's connection pool. `Proxy.stop()` /
+        `Proxy.session()` call this once per lifecycle."""
+        await self._client.close()
+
 
 __all__ = ["AnthropicFromOpenAIClient"]
