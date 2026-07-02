@@ -18,7 +18,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     strategy:
-      fail-fast: true
+      # One shard's unresolved instances must not cancel the other 19 —
+      # the run's purpose is the full-coverage picture.
+      fail-fast: false
       matrix:
         shard_index:
           - 0
