@@ -14,17 +14,26 @@ the host stays out of the data path.
 
 Rollout identity without the host: mint a fresh placeholder API key per
 rollout (the key you already inject into the sandbox) and the server
-derives `x-session-id` from a hash of whatever key each request
-carries — one server groups any number of concurrent rollouts, and the
-minting side can compute the same hash to correlate. Agent keys are
-treated as identity, never forwarded upstream; the real upstream key
-stays on this server. Anything beyond grouping (multi-backend routing,
-token capture) is the full gateway's job — this is deliberately just
-"the tunnel without the tunnel", and the tunnel remains the mode for
-sandboxes with no egress.
+maps whatever key each request carries to `session_id_for(key)` — one
+server groups any number of concurrent rollouts, and the minting side
+calls the same function to correlate. Agent keys are treated as
+identity, never forwarded upstream; the real upstream key stays on
+this server.
+
+Trust model: the server itself is unauthenticated by default and binds
+loopback unless told otherwise — expose it only to the network segment
+you already trust with the engine. Sandboxes run model-generated code;
+when they share a network with the server, pass `verify_key=` (CLI:
+`--require-key-prefix`) so only keys your harness minted are served and
+everything else gets a 401.
+
+Anything beyond grouping (multi-backend routing, token capture) is the
+full gateway's job — this is deliberately just "the tunnel without the
+tunnel", and the tunnel remains the mode for sandboxes with no egress.
 
     OPENAI_API_KEY=EMPTY agentix-bridge-serve \
-        --upstream-base-url http://vllm:8000/v1 --upstream-model qwen3-32b
+        --upstream-base-url http://vllm:8000/v1 --upstream-model qwen3-32b \
+        --host 0.0.0.0 --require-key-prefix rollout-secret-
 """
 
 from __future__ import annotations
@@ -35,7 +44,9 @@ import hashlib
 import logging
 import os
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from dataclasses import dataclass, field
 
 import uvicorn
 from fastapi import FastAPI
@@ -46,21 +57,37 @@ from .proxy import AbridgeError, Client, Handler, Request, _AsyncCloseable, _col
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["build_app", "build_session_app", "main"]
+__all__ = ["build_app", "build_session_app", "main", "session_id_for"]
 
-# `resolve(request) -> Handler`: fixed in `build_app`, per-caller in
+# `resolve(request)` yields the bound `@on` method for the request —
+# fixed in `build_app`, per-caller (with in-flight tracking) in
 # `build_session_app`.
-Resolver = Callable[[FastAPIRequest], Awaitable[Handler]]
+Resolver = Callable[[FastAPIRequest], AbstractAsyncContextManager[Handler]]
+
+
+def session_id_for(caller_key: str) -> str:
+    """The session id the server derives from an agent's API key.
+
+    `sha256(key)` hex truncated to 24 chars; the empty key maps to
+    `"anonymous"`. Public so the side minting per-rollout keys can
+    compute the same id and correlate upstream `x-session-id` values
+    (the raw key is never echoed into logs or upstream headers).
+    """
+    if not caller_key:
+        return "anonymous"
+    return hashlib.sha256(caller_key.encode()).hexdigest()[:24]
 
 
 def build_app(*clients: Client) -> FastAPI:
     """A FastAPI app with one POST route per `@on(path)` handler.
 
-    Same request/response contract as the sandbox tunnel: JSON-object
-    bodies in, the handler's `ClientResponse` out, handler errors as
-    JSON error bodies (`AbridgeError` keeps its status; anything else
-    is a 502). All requests share the clients' sessions — for
-    per-caller sessions use `build_session_app`.
+    Requests and responses keep the tunnel's shapes: JSON-object bodies
+    in, the handler's `ClientResponse` out, in-band JSON error bodies.
+    One deliberate improvement over the tunnel wire: an `AbridgeError`'s
+    status code reaches the agent here, where the tunnel's SIO leg
+    collapses handler errors to 502. Other exceptions are a 502. All
+    requests share the clients' sessions — for per-caller sessions use
+    `build_session_app`.
     """
     handlers: dict[str, Handler] = {}
     for client in clients:
@@ -78,69 +105,165 @@ def build_app(*clients: Client) -> FastAPI:
     return app
 
 
+@dataclass
+class _Session:
+    client: Client
+    handlers: dict[str, Handler]
+    refs: int = 0
+    evicted: bool = False
+
+
+@dataclass
+class _SessionTable:
+    """Caller-keyed client sessions with in-flight-safe LRU eviction.
+
+    Eviction past `max_sessions` removes the least-recent entry from
+    the table immediately (the table stays bounded), but a client is
+    closed only once its in-flight requests drain — a live upstream
+    call is never killed by another caller's arrival.
+    """
+
+    factory: Callable[[str], Client]
+    max_sessions: int
+    verify_key: Callable[[str], bool] | None
+    sessions: OrderedDict[str, _Session] = field(default_factory=OrderedDict)
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    @asynccontextmanager
+    async def handler_for(self, request: FastAPIRequest, path: str) -> AsyncIterator[Handler]:
+        session = await self._acquire(request)
+        try:
+            yield session.handlers[path]
+        finally:
+            await self._release(session)
+
+    async def _acquire(self, request: FastAPIRequest) -> _Session:
+        caller_key = _caller_key(request)
+        if self.verify_key is not None and not self.verify_key(caller_key):
+            raise _UnknownKey
+        session_id = session_id_for(caller_key)
+
+        async with self.lock:
+            session = self.sessions.get(session_id)
+            if session is not None:
+                return self._checkout(session_id, session)
+
+        # Build outside the lock: factory work is synchronous (SSL
+        # context, SDK pool setup) and must not stall other requests.
+        client = await asyncio.to_thread(self.factory, session_id)
+        fresh = _Session(client=client, handlers=_collect_handlers(client))
+
+        loser: Client | None = None
+        async with self.lock:
+            session = self.sessions.get(session_id)
+            if session is not None:
+                loser = fresh.client
+            else:
+                self.sessions[session_id] = fresh
+                session = fresh
+            session = self._checkout(session_id, session)
+            evicted = self._evict_over_cap()
+        if loser is not None:
+            await _close_client(loser)
+        for old in evicted:
+            await _close_client(old)
+        return session
+
+    def _checkout(self, session_id: str, session: _Session) -> _Session:
+        session.refs += 1
+        self.sessions.move_to_end(session_id)
+        return session
+
+    def _evict_over_cap(self) -> list[Client]:
+        """Pop least-recent entries past the cap (lock held); return the
+        clients already idle and safe to close now — busy ones close
+        when their last in-flight request releases."""
+        idle: list[Client] = []
+        while len(self.sessions) > self.max_sessions:
+            _, old = self.sessions.popitem(last=False)
+            old.evicted = True
+            if old.refs == 0:
+                idle.append(old.client)
+        return idle
+
+    async def _release(self, session: _Session) -> None:
+        async with self.lock:
+            session.refs -= 1
+            close_now = session.evicted and session.refs == 0
+        if close_now:
+            await _close_client(session.client)
+
+    async def close_all(self) -> None:
+        async with self.lock:
+            drained = [session.client for session in self.sessions.values()]
+            self.sessions.clear()
+        for client in drained:
+            await _close_client(client)
+
+
 def build_session_app(
     client_factory: Callable[[str], Client],
     *,
     max_sessions: int = 256,
+    verify_key: Callable[[str], bool] | None = None,
 ) -> FastAPI:
     """Like `build_app`, but with one client per caller identity.
 
     Each request's API key (`x-api-key`, else `Authorization: Bearer`)
-    hashes to a session id; `client_factory(session_id)` builds that
-    caller's client on first use. A capped LRU keeps live clients and
-    closes (via `aclose()`, when implemented) the least recent one past
-    `max_sessions` — size it above your rollout concurrency so an
-    in-flight caller is never evicted. Keyless requests share the
-    `"anonymous"` session.
+    maps to `session_id_for(key)`; `client_factory(session_id)` builds
+    that caller's client on first use. The session table is LRU-bounded
+    at `max_sessions` with in-flight-safe eviction (an evicted client
+    closes only after its live requests finish), and every remaining
+    client closes on app shutdown.
+
+    `verify_key`, when given, gates every request: it receives the raw
+    caller key (`""` when the request carries none) and a falsy return
+    is a 401. Without it any reachable caller is served — bind the
+    server accordingly.
     """
     if max_sessions < 1:
         raise ValueError("max_sessions must be >= 1")
 
-    anonymous = client_factory("anonymous")
-    paths = tuple(_collect_handlers(anonymous))
+    probe = client_factory("probe")
+    paths = tuple(_collect_handlers(probe))
     if not paths:
         raise ValueError("client_factory built a client with no @on-decorated handlers")
 
-    # session id → that caller's handler table (client kept alive by its
-    # bound methods; kept alongside for aclose on eviction).
-    sessions: OrderedDict[str, tuple[Client, dict[str, Handler]]] = OrderedDict()
-    sessions["anonymous"] = (anonymous, _collect_handlers(anonymous))
-    lock = asyncio.Lock()
+    table = _SessionTable(factory=client_factory, max_sessions=max_sessions, verify_key=verify_key)
 
-    def _session_resolver(path: str) -> Resolver:
-        async def resolve(request: FastAPIRequest) -> Handler:
-            session_id = _session_id(_caller_key(request))
-            async with lock:
-                entry = sessions.get(session_id)
-                if entry is None:
-                    client = client_factory(session_id)
-                    entry = (client, _collect_handlers(client))
-                    sessions[session_id] = entry
-                sessions.move_to_end(session_id)
-                evicted = []
-                while len(sessions) > max_sessions:
-                    _, (old, _handlers) = sessions.popitem(last=False)
-                    evicted.append(old)
-            for old in evicted:
-                await _close_client(old)
-            return entry[1][path]
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        # The probe existed only to enumerate routes at build time.
+        await _close_client(probe)
+        yield
+        await table.close_all()
 
-        return resolve
-
-    app = FastAPI()
+    app = FastAPI(lifespan=lifespan)
     app.get("/_health")(_health)
     for path in paths:
-        app.post(path)(_make_endpoint(path, _session_resolver(path)))
+        app.post(path)(_make_endpoint(path, _session_resolver(table, path)))
     return app
+
+
+def _session_resolver(table: _SessionTable, path: str) -> Resolver:
+    def resolve(request: FastAPIRequest) -> AbstractAsyncContextManager[Handler]:
+        return table.handler_for(request, path)
+
+    return resolve
 
 
 async def _health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+class _UnknownKey(Exception):
+    """Raised when `verify_key` rejects the caller's key."""
+
+
 def _fixed_resolver(method: Handler) -> Resolver:
-    async def resolve(_request: FastAPIRequest) -> Handler:
-        return method
+    @asynccontextmanager
+    async def resolve(_request: FastAPIRequest) -> AsyncIterator[Handler]:
+        yield method
 
     return resolve
 
@@ -155,28 +278,22 @@ def _caller_key(request: FastAPIRequest) -> str:
     return ""
 
 
-def _session_id(caller_key: str) -> str:
-    if not caller_key:
-        return "anonymous"
-    # The key is identity, not a secret to echo around: hash it so logs
-    # and upstream `x-session-id` headers never carry the raw value.
-    return hashlib.sha256(caller_key.encode()).hexdigest()[:24]
-
-
 async def _close_client(client: Client) -> None:
     if isinstance(client, _AsyncCloseable):
         try:
             await client.aclose()
-        except Exception:  # noqa: BLE001 - eviction must not fail the live request
-            logger.exception("abridge serve: failed to close evicted client")
+        except Exception:  # noqa: BLE001 - cleanup must not fail the live request
+            logger.exception("abridge serve: failed to close client")
 
 
 def _make_endpoint(path: str, resolve: Resolver):
     async def endpoint(request: FastAPIRequest) -> Response:
         body = await _read_json(request)
         try:
-            handler = await resolve(request)
-            response = await handler(Request(path=path, body=body))
+            async with resolve(request) as handler:
+                response = await handler(Request(path=path, body=body))
+        except _UnknownKey:
+            return JSONResponse({"error": {"message": "unknown API key"}}, status_code=401)
         except AbridgeError as exc:
             logger.warning("abridge serve %s: %s (status=%d)", path, exc.message, exc.status_code)
             return JSONResponse({"error": {"message": exc.message}}, status_code=exc.status_code)
@@ -222,6 +339,15 @@ def main(argv: list[str] | None = None) -> None:
         default=os.environ.get("UPSTREAM_MODEL"),
         help="pin every upstream call to this model id (env: UPSTREAM_MODEL)",
     )
+    parser.add_argument(
+        "--require-key-prefix",
+        default=os.environ.get("ABRIDGE_KEY_PREFIX"),
+        help=(
+            "serve only requests whose API key starts with this secret prefix; "
+            "mint rollout keys as <prefix><nonce>. Unset = no auth: any reachable "
+            "caller is served (env: ABRIDGE_KEY_PREFIX)"
+        ),
+    )
     parser.add_argument("--host", default="127.0.0.1", help="bind address; expose beyond loopback deliberately")
     parser.add_argument("--port", type=int, default=8399)
     parser.add_argument("--upstream-timeout", type=float, default=180.0)
@@ -242,7 +368,16 @@ def main(argv: list[str] | None = None) -> None:
             session_id=session_id,
         )
 
-    app = build_session_app(factory, max_sessions=args.max_sessions)
+    verify_key: Callable[[str], bool] | None = None
+    if args.require_key_prefix:
+        prefix = str(args.require_key_prefix)
+
+        def _has_minted_prefix(key: str) -> bool:
+            return key.startswith(prefix)
+
+        verify_key = _has_minted_prefix
+
+    app = build_session_app(factory, max_sessions=args.max_sessions, verify_key=verify_key)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 

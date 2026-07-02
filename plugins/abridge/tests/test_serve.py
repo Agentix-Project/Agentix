@@ -1,16 +1,19 @@
 """Tests for `agentix.bridge.serve` — the tunnel-less direct mode.
 
-The HTTP contract must match the sandbox tunnel (JSON-object bodies,
-`ClientResponse` out, in-band errors), and the session-keyed app must
-map caller keys to stable, distinct, LRU-managed client sessions.
+The HTTP contract must match the sandbox tunnel's shapes (JSON-object
+bodies, `ClientResponse` out, in-band errors), and the session-keyed
+app must map caller keys to stable, distinct sessions whose clients are
+never closed under an in-flight request and always closed by shutdown.
 """
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
+import httpx
 from agentix.bridge import AbridgeError, ClientResponse, Request, on
-from agentix.bridge.serve import _session_id, build_app, build_session_app
+from agentix.bridge.serve import build_app, build_session_app, session_id_for
 from fastapi.testclient import TestClient
 
 
@@ -67,13 +70,13 @@ def test_session_app_maps_keys_to_stable_distinct_sessions() -> None:
     bearer = tc.post("/v1/echo", json={}, headers={"authorization": "Bearer sk-b"}).json()["session"]
     anonymous = tc.post("/v1/echo", json={}).json()["session"]
 
-    assert a1 == a2 == _session_id("sk-a")
-    assert bearer == _session_id("sk-b")
+    assert a1 == a2 == session_id_for("sk-a")
+    assert bearer == session_id_for("sk-b")
     assert bearer != a1
     assert anonymous == "anonymous"
 
 
-def test_session_app_evicts_and_closes_least_recent() -> None:
+def test_session_app_evicts_and_closes_idle_least_recent() -> None:
     built: list[EchoClient] = []
 
     def factory(session_id: str) -> EchoClient:
@@ -85,9 +88,77 @@ def test_session_app_evicts_and_closes_least_recent() -> None:
     tc.post("/v1/echo", json={}, headers={"x-api-key": "sk-a"})
     tc.post("/v1/echo", json={}, headers={"x-api-key": "sk-b"})
 
-    still_open = [client.session_id for client in built if not client.closed]
-    assert still_open == [_session_id("sk-b")]
-    assert [client.session_id for client in built if client.closed] == ["anonymous", _session_id("sk-a")]
+    closed = [client.session_id for client in built if client.closed]
+    assert closed == [session_id_for("sk-a")]
+
+
+def test_shutdown_closes_probe_and_all_session_clients() -> None:
+    built: list[EchoClient] = []
+
+    def factory(session_id: str) -> EchoClient:
+        client = EchoClient(session_id)
+        built.append(client)
+        return client
+
+    with TestClient(build_session_app(factory)) as tc:
+        tc.post("/v1/echo", json={}, headers={"x-api-key": "sk-a"})
+        tc.post("/v1/echo", json={}, headers={"x-api-key": "sk-b"})
+
+    assert [client.session_id for client in built if not client.closed] == []
+
+
+def test_verify_key_gates_requests() -> None:
+    tc = TestClient(build_session_app(EchoClient, verify_key=lambda key: key.startswith("ok-")))
+    assert tc.post("/v1/echo", json={}, headers={"x-api-key": "bad"}).status_code == 401
+    assert tc.post("/v1/echo", json={}).status_code == 401
+    r = tc.post("/v1/echo", json={}, headers={"x-api-key": "ok-1"})
+    assert r.status_code == 200
+    assert r.json()["session"] == session_id_for("ok-1")
+
+
+class BlockingClient(EchoClient):
+    def __init__(self, session_id: str) -> None:
+        super().__init__(session_id)
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    @on("/v1/block")
+    async def block(self, request: Request) -> ClientResponse:
+        self.entered.set()
+        await self.release.wait()
+        return ClientResponse.json({"session": self.session_id})
+
+
+async def test_eviction_defers_close_until_inflight_request_drains() -> None:
+    built: list[BlockingClient] = []
+
+    def factory(session_id: str) -> BlockingClient:
+        client = BlockingClient(session_id)
+        if session_id != session_id_for("sk-slow"):
+            client.release.set()
+        built.append(client)
+        return client
+
+    app = build_session_app(factory, max_sessions=1)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://serve") as hc:
+        slow = asyncio.create_task(hc.post("/v1/block", json={}, headers={"x-api-key": "sk-slow"}))
+        while not any(c.session_id == session_id_for("sk-slow") for c in built):
+            await asyncio.sleep(0.01)
+        slow_client = next(c for c in built if c.session_id == session_id_for("sk-slow"))
+        await asyncio.wait_for(slow_client.entered.wait(), timeout=5)
+
+        # A new caller key evicts the slow session from the table...
+        r = await hc.post("/v1/block", json={}, headers={"x-api-key": "sk-new"})
+        assert r.status_code == 200
+        # ...but must not close its client mid-upstream-call.
+        assert not slow_client.closed
+
+        slow_client.release.set()
+        response = await asyncio.wait_for(slow, timeout=5)
+        assert response.status_code == 200
+        await asyncio.sleep(0.01)
+    assert slow_client.closed
 
 
 def _mock_completion() -> Any:
@@ -130,7 +201,7 @@ def test_agent_keys_become_upstream_session_headers() -> None:
     assert tc.post("/v1/messages", json=body, headers={"x-api-key": "rollout-1"}).status_code == 200
     assert tc.post("/v1/messages", json=body, headers={"x-api-key": "rollout-2"}).status_code == 200
 
-    assert seen[0]["x-session-id"] == _session_id("rollout-1")
-    assert seen[1]["x-session-id"] == _session_id("rollout-2")
+    assert seen[0]["x-session-id"] == session_id_for("rollout-1")
+    assert seen[1]["x-session-id"] == session_id_for("rollout-2")
     assert seen[0]["x-session-id"] != seen[1]["x-session-id"]
     assert all("rollout-1" not in v and "rollout-2" not in v for headers in seen for v in headers.values())
