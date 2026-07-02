@@ -42,14 +42,13 @@ import hashlib
 import json
 import logging
 import os
-import posixpath
 import shutil
 import socket
 import tarfile
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from uuid import uuid4
 
+from agentix.provider._extract import extract_nix_tree
 from agentix.provider.base import Sandbox, SandboxConfig, SandboxId, SandboxInfo, SandboxProvider
 from agentix.runtime import BIND_PORT_ENV, BUNDLE_NIX_ROOT, BUNDLE_RUNTIME_ENTRYPOINT
 
@@ -147,96 +146,10 @@ def _extract_bundle(bundle_tar: Path, target: Path) -> Path:
     """Materialize `bundle.tar` to `<target>/nix/` if not already there.
 
     The tar's top-level layout is `nix/` (the runtime tree) plus a
-    sibling `manifest.json`. We extract only `nix/` because that's what
-    the runtime needs at `/nix`.
+    sibling `manifest.json`. Extraction is the hardened shared path —
+    see `agentix.provider._extract` for the containment guarantees.
     """
-    nix_root = target / "nix"
-    if (nix_root / "runtime" / "bootstrap.sh").exists():
-        return nix_root
-
-    def checked_nix_member_name(name: str) -> str:
-        normalized = posixpath.normpath(name)
-        if normalized in {"", "."} or normalized.startswith("/") or normalized == ".." or normalized.startswith("../"):
-            raise RuntimeError(f"bundle tar produced unsafe member: {name!r}")
-        if normalized != "nix" and not normalized.startswith("nix/"):
-            raise RuntimeError(f"bundle tar produced non-/nix member: {name!r}")
-        return normalized
-
-    def ensure_safe_parent(root: Path, path: Path) -> None:
-        try:
-            relative_parent = path.parent.relative_to(root)
-        except ValueError as exc:
-            raise RuntimeError(f"bundle tar member escaped extraction root: {path}") from exc
-        current = root
-        for part in relative_parent.parts:
-            current = current / part
-            if os.path.lexists(current):
-                if current.is_symlink() or not current.is_dir():
-                    raise RuntimeError(f"bundle tar member parent is not a directory: {current}")
-            else:
-                current.mkdir()
-
-    def remove_existing_path(path: Path) -> None:
-        if path.is_dir() and not path.is_symlink():
-            shutil.rmtree(path)
-        elif os.path.lexists(path):
-            path.unlink()
-
-    def extract_nix_member(tar: tarfile.TarFile, member: tarfile.TarInfo, root: Path) -> None:
-        name = checked_nix_member_name(member.name)
-        member_path = root / name
-        ensure_safe_parent(root, member_path)
-
-        if member.isdir():
-            if os.path.lexists(member_path):
-                if member_path.is_symlink() or not member_path.is_dir():
-                    raise RuntimeError(
-                        f"bundle tar cannot replace non-directory with directory: {name}"
-                    )
-            else:
-                member_path.mkdir()
-            return
-
-        remove_existing_path(member_path)
-        if member.issym():
-            os.symlink(member.linkname, member_path)
-            return
-        if member.islnk():
-            try:
-                link_name = checked_nix_member_name(member.linkname)
-            except RuntimeError as exc:
-                raise RuntimeError(f"bundle tar produced unsafe hard-link target: {member.linkname!r}") from exc
-            link_target = root / link_name
-            if not os.path.lexists(link_target):
-                raise RuntimeError(f"bundle tar hard-link target does not exist: {member.linkname!r}")
-            os.link(link_target, member_path)
-            return
-        if member.isfile():
-            source = tar.extractfile(member)
-            if source is None:
-                raise RuntimeError(f"bundle tar has unreadable file member: {name}")
-            with source, member_path.open("wb") as f:
-                shutil.copyfileobj(source, f)
-            os.chmod(member_path, member.mode & 0o7777)
-            return
-
-        raise RuntimeError(f"bundle tar contains unsupported member type: {name}")
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with TemporaryDirectory(prefix=f".{target.name}.", dir=target.parent) as tmp:
-        tmp_root = Path(tmp)
-        with tarfile.open(bundle_tar, "r:*") as tar:
-            for member in tar:
-                name = member.name
-                if not (name == "nix" or name.startswith("nix/")):
-                    continue
-                extract_nix_member(tar, member, tmp_root)
-        remove_existing_path(target)
-        tmp_root.replace(target)
-
-    if not nix_root.is_dir():
-        raise RuntimeError(f"bundle {bundle_tar} did not contain a `nix/` tree")
-    return nix_root
+    return extract_nix_tree(bundle_tar, target)
 
 
 def _image_cache_key(image: str) -> str:
