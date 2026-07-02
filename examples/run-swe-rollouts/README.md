@@ -43,5 +43,11 @@ Sharding is round-robin and deterministic; `--limit` applies per shard, and a
 shard with no rows (more shards than rows) exits 0. `--instance-id` selects
 rows explicitly and cannot be combined with `--num-shards`/`--shard-index`.
 
+A small curated set of instances whose gold patches fail for upstream
+environment reasons (`KNOWN_UNRESOLVED` in `main.py`, each entry annotated
+with its cause) is skipped during sharded selection — loudly, with a count —
+so the nightly stays green without hiding new regressions. `--instance-id`
+still selects them explicitly for debugging.
+
 Per-instance summaries land in `runs/<instance_id>.json`, plus a combined
 `runs/summary.json`.
