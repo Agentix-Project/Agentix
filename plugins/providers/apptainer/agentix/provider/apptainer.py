@@ -48,6 +48,7 @@ import tarfile
 from pathlib import Path
 from uuid import uuid4
 
+from agentix.provider._extract import extract_nix_tree
 from agentix.provider.base import Sandbox, SandboxConfig, SandboxId, SandboxInfo, SandboxProvider
 from agentix.runtime import BIND_PORT_ENV, BUNDLE_NIX_ROOT, BUNDLE_RUNTIME_ENTRYPOINT
 
@@ -145,22 +146,10 @@ def _extract_bundle(bundle_tar: Path, target: Path) -> Path:
     """Materialize `bundle.tar` to `<target>/nix/` if not already there.
 
     The tar's top-level layout is `nix/` (the runtime tree) plus a
-    sibling `manifest.json`. We extract only `nix/` because that's what
-    the runtime needs at `/nix`.
+    sibling `manifest.json`. Extraction is the hardened shared path —
+    see `agentix.provider._extract` for the containment guarantees.
     """
-    nix_root = target / "nix"
-    if (nix_root / "runtime" / "bootstrap.sh").exists():
-        return nix_root
-    target.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(bundle_tar, "r:*") as tar:
-        for member in tar:
-            name = member.name
-            if not (name == "nix" or name.startswith("nix/")):
-                continue
-            tar.extract(member, target)
-    if not nix_root.is_dir():
-        raise RuntimeError(f"bundle {bundle_tar} did not contain a `nix/` tree")
-    return nix_root
+    return extract_nix_tree(bundle_tar, target)
 
 
 def _image_cache_key(image: str) -> str:

@@ -38,14 +38,10 @@ import asyncio
 import hashlib
 import json
 import logging
-import os
-import posixpath
 import shlex
-import shutil
 import socket
 import tarfile
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 import click
@@ -53,6 +49,7 @@ import httpx
 from pydantic import BaseModel, Field, field_validator
 
 from agentix.cli.deploy import common_options, print_deploy_result
+from agentix.provider._extract import extract_nix_tree
 from agentix.provider.base import (
     DeployedBundle,
     Sandbox,
@@ -251,90 +248,12 @@ def _bundle_cache_root(
     return _bundle_cache_base(config) / f"sha256-{_bundle_digest(manifest, bundle_tar)}"
 
 
-def _checked_nix_member_name(name: str) -> str:
-    normalized = posixpath.normpath(name)
-    if normalized in {"", "."} or normalized.startswith("/") or normalized == ".." or normalized.startswith("../"):
-        raise RuntimeError(f"bundle tar produced unsafe member: {name!r}")
-    if normalized != "nix" and not normalized.startswith("nix/"):
-        raise RuntimeError(f"bundle tar produced non-/nix member: {name!r}")
-    return normalized
-
-
-def _ensure_safe_parent(root: Path, path: Path) -> None:
-    current = root
-    for part in path.parent.relative_to(root).parts:
-        current = current / part
-        if os.path.lexists(current):
-            if current.is_symlink() or not current.is_dir():
-                raise RuntimeError(f"bundle tar member parent is not a directory: {current}")
-        else:
-            current.mkdir()
-
-
-def _remove_existing_path(path: Path) -> None:
-    if path.is_dir() and not path.is_symlink():
-        shutil.rmtree(path)
-    elif os.path.lexists(path):
-        path.unlink()
-
-
-def _extract_nix_member(
-    tar: tarfile.TarFile,
-    member: tarfile.TarInfo,
-    root: Path,
-) -> None:
-    name = _checked_nix_member_name(member.name)
-    target = root / name
-    _ensure_safe_parent(root, target)
-
-    if member.isdir():
-        if os.path.lexists(target):
-            if target.is_symlink() or not target.is_dir():
-                raise RuntimeError(f"bundle tar cannot replace non-directory with directory: {name}")
-        else:
-            target.mkdir()
-        return
-
-    _remove_existing_path(target)
-    if member.issym():
-        os.symlink(member.linkname, target)
-        return
-    if member.islnk():
-        link_target = root / _checked_nix_member_name(member.linkname)
-        os.link(link_target, target)
-        return
-    if member.isfile():
-        source = tar.extractfile(member)
-        if source is None:
-            raise RuntimeError(f"bundle tar has unreadable file member: {name}")
-        with source, target.open("wb") as f:
-            shutil.copyfileobj(source, f)
-        os.chmod(target, member.mode & 0o7777)
-        return
-
-    raise RuntimeError(f"bundle tar contains unsupported member type: {name}")
-
-
 def _extract_bundle_to_cache(
     bundle_tar: Path,
     manifest: dict[str, object],
     cache_root: Path,
 ) -> None:
-    if (cache_root / "nix" / "runtime" / "bootstrap.sh").is_file():
-        return
-    cache_root.parent.mkdir(parents=True, exist_ok=True)
-    with TemporaryDirectory(prefix=f".{cache_root.name}.", dir=cache_root.parent) as tmp:
-        tmp_root = Path(tmp)
-        with tarfile.open(bundle_tar, "r:*") as tar:
-            for member in tar:
-                if member.name == "manifest.json":
-                    continue
-                _extract_nix_member(tar, member, tmp_root)
-        if not (tmp_root / "nix" / "runtime" / "bootstrap.sh").is_file():
-            raise RuntimeError(f"bundle {bundle_tar} does not contain nix/runtime/bootstrap.sh")
-        (tmp_root / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-        _remove_existing_path(cache_root)
-        tmp_root.replace(cache_root)
+    extract_nix_tree(bundle_tar, cache_root, manifest=manifest)
 
 
 def _bundle_nix_path(bundle: str) -> Path:
