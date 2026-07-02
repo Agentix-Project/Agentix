@@ -33,6 +33,7 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -215,6 +216,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--ground-truth", action="store_true")
     parser.add_argument("--fail-on-unresolved", action="store_true")
+    parser.add_argument("--rmi-after", action="store_true")
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--openai-base-url", default=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"))
     parser.add_argument("--openai-api-key", default=os.environ.get("OPENAI_API_KEY", ""))
@@ -279,10 +281,19 @@ async def main(argv: list[str] | None = None) -> int:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Instance images are per-instance and never reused within a run;
+    # on CI runners, keeping ~25 of them exhausts the disk mid-shard.
+    images = {str(row["instance_id"]): dataset.image(row) for row in rows}
+
     def _persist(rollout: Any) -> None:
         (out_dir / f"{rollout.instance_id}.json").write_text(json.dumps(rollout.to_dict(), indent=2))
         verdict = "PASS" if rollout.resolved else (rollout.skipped or rollout.error or "FAIL")
         print(f"[{rollout.instance_id}] {verdict} ({rollout.duration_s:.1f}s)")
+        if args.rmi_after and rollout.instance_id in images:
+            subprocess.run(
+                ["docker", "rmi", "-f", images[rollout.instance_id]],
+                capture_output=True,
+            )
 
     print(f"selected {len(rows)} instance(s) (concurrency={args.concurrency}, ground_truth={args.ground_truth})")
     rollouts = await run_rollouts(
