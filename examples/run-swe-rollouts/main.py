@@ -56,6 +56,25 @@ _DIFF_CMD = (
     "git -c core.fileMode=false diff --cached --no-color --binary"
 )
 
+# Instances whose gold patches score unresolved for reasons outside this
+# harness, confirmed across three attributed nightly runs (28560892001,
+# 28563680820, 28566729496) — upstream environment drift or
+# network-dependent tests, matching the sets reported in
+# SWE-bench/SWE-bench#294 and #484. Sharded selection skips them (and
+# says so); `--instance-id` still selects them explicitly for debugging.
+# A new failure elsewhere still turns the nightly red — this is a
+# curated list, not a pass-rate threshold.
+KNOWN_UNRESOLVED = {
+    "astropy__astropy-7606",  # stable drift (SWE-bench#294)
+    "astropy__astropy-8707",  # stable drift (SWE-bench#294)
+    "astropy__astropy-8872",  # stable drift (SWE-bench#294)
+    "psf__requests-1766",  # DIGEST tests hit httpbin.org (SWE-bench#484)
+    "psf__requests-2317",  # DIGEST tests hit httpbin.org (SWE-bench#484)
+    "psf__requests-1724",  # flaky: network-dependent DIGEST tests
+    "psf__requests-1921",  # flaky: network-dependent DIGEST tests
+    "sympy__sympy-13091",  # flaky: unresolved in 1 of 3 attributed runs
+}
+
 
 def _instance_image(instance: dict[str, Any], *, namespace: str, tag: str, arch: str) -> str:
     from swebench.harness.test_spec.test_spec import make_test_spec
@@ -193,11 +212,24 @@ def _select_rows(args: argparse.Namespace) -> list[dict[str, Any]]:
         return rows
 
     # Round-robin sharding partitions the split deterministically so CI can
-    # spread a full run across parallel jobs; --limit then applies per shard.
-    # Slicing the index range keeps this lazy — only selected rows materialize.
+    # spread a full run across parallel jobs; --limit counts selected
+    # instances per shard (known-unresolved skips don't consume it), and
+    # materialization stops as soon as the limit is met.
     indices = range(args.shard_index, len(dataset), args.num_shards)
     limit = args.limit if args.limit is not None else (len(indices) if args.ground_truth else 1)
-    return [dict(dataset[i]) for i in indices[:limit]]
+    rows: list[dict[str, Any]] = []
+    skipped = 0
+    for i in indices:
+        if len(rows) >= limit:
+            break
+        row = dict(dataset[i])
+        if row["instance_id"] in KNOWN_UNRESOLVED:
+            skipped += 1
+            continue
+        rows.append(row)
+    if skipped:
+        print(f"skipped {skipped} known-unresolved instance(s); see KNOWN_UNRESOLVED in main.py")
+    return rows
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
