@@ -138,19 +138,34 @@ class ClientResponse:
 Handler = Callable[[Request], Awaitable[ClientResponse]]
 
 
-@runtime_checkable
 class Client(Protocol):
-    """Marker protocol for any class with at least one `@on(path)`-decorated
-    method.
+    """Marker protocol for a handler object passed to `Proxy(...)`.
 
-    There's nothing for the protocol to require structurally — `@on` is a
-    method-level attribute, not a class-level signature, so `isinstance`
-    against `Client` doesn't validate handler presence (that's
-    `Proxy.__init__`'s job at construction time). The name exists so
-    `Proxy(*clients: Client)` reads as "pass handler classes here" rather
-    than `*clients: object`. A client may additionally implement async
+    Two kinds qualify, and they compose: a class with at least one
+    `@on(path)`-decorated method, and/or a class implementing
+    `DynamicRoutes.abridge_routes()` (paths chosen at construction, e.g.
+    `Forward`). The protocol requires nothing structurally — `@on` is a
+    method-level attribute, not a class-level signature — so it is deliberately
+    NOT `runtime_checkable`: `isinstance(x, Client)` would be true for anything
+    and is meaningless. Handler presence is validated by `Proxy.__init__` at
+    construction time. The name just makes `Proxy(*clients: Client)` read as
+    "pass handler objects here". A client may additionally implement async
     `aclose()`; `Proxy.stop()` closes such clients once per lifecycle.
     """
+
+
+@runtime_checkable
+class DynamicRoutes(Protocol):
+    """A client that contributes routes chosen at construction time — paths the
+    class-level `@on` tag can't express, e.g. `Forward(target, paths=[...])`.
+
+    `abridge_routes()` returns `{path: handler}`; `Proxy` merges it alongside any
+    `@on` handlers under the same duplicate-path rule. This is the typed, blessed
+    second registration seam (vs. `@on`): a handler returning dynamic routes has a
+    checkable contract instead of an undocumented duck-typed method.
+    """
+
+    def abridge_routes(self) -> dict[str, Handler]: ...
 
 
 @runtime_checkable
@@ -229,13 +244,12 @@ def _collect_handlers(client: Client) -> dict[str, Handler]:
                 )
             handlers[path] = getattr(client, name)
 
-    # Dynamic routes: a client may expose `abridge_routes() -> dict[str,
-    # Handler]` for paths chosen at construction time (e.g. `Forward(target,
-    # paths=[...])`), which the class-level `@on` tag can't express. They
-    # compose with `@on` handlers under the same duplicate-path rule.
-    dynamic = getattr(client, "abridge_routes", None)
-    if callable(dynamic):
-        routes = dynamic()
+    # Dynamic routes: a client implementing `DynamicRoutes` contributes paths
+    # chosen at construction time (e.g. `Forward(target, paths=[...])`), which
+    # the class-level `@on` tag can't express. They compose with `@on` handlers
+    # under the same duplicate-path rule.
+    if isinstance(client, DynamicRoutes):
+        routes: object = client.abridge_routes()
         if not isinstance(routes, dict):
             raise TypeError(
                 f"{type(client).__name__}.abridge_routes() must return a dict[str, handler]"
@@ -370,15 +384,25 @@ def _make_forwarder(
 
     async def forward(request: FastAPIRequest) -> Response:
         body = await _read_json(request)
+        if body is None:
+            # Body was present but not a JSON object (unparseable or a non-object
+            # like an array/string). Fail at the boundary with a precise error
+            # instead of silently coercing to {} and confusing the upstream.
+            return JSONResponse(
+                {"error": {"message": "request body must be a JSON object"}},
+                status_code=400,
+            )
 
         try:
             # SIO event name IS the path; the host's `Proxy` has a
             # matching handler registered under the same name. The wire
             # payload is just the decoded object — no wrapping envelope
             # beyond request correlation and no HTTP metadata.
-            result = await asyncio.wait_for(
-                ns.request(path, body), timeout=request_timeout
-            )
+            # Single timeout source: thread the configured value into
+            # `ns.request` itself. A redundant outer `wait_for` here was a no-op
+            # above `ns.request`'s own (smaller) default, silently capping the
+            # configurable `request_timeout` at that default.
+            result = await ns.request(path, body, timeout=request_timeout)
         except TimeoutError:
             message = "tunnel timed out waiting for host"
             logger.warning("abridge tunnel %s: %s", path, message)
@@ -395,16 +419,20 @@ def _make_forwarder(
     return forward
 
 
-async def _read_json(request: FastAPIRequest) -> dict[str, Any]:
+async def _read_json(request: FastAPIRequest) -> dict[str, Any] | None:
+    """Decode the body as a JSON object. `{}` for a genuinely empty body; `None`
+    when the body is present but not a JSON object (unparseable, or a valid
+    non-object like an array/string). The caller turns `None` into a 400 so the
+    failure surfaces at the boundary instead of as a silently-coerced `{}`."""
     raw = await request.body()
     if not raw:
         return {}
     try:
         parsed = json.loads(raw)
     except ValueError:
-        return {}
+        return None
     if not isinstance(parsed, dict):
-        return {}
+        return None
     return parsed
 
 
@@ -420,14 +448,12 @@ def _to_http_response(result: object) -> Response:
 
 
 def _status_from_remote_error(exc: RemoteSioError) -> int:
-    """`RemoteSioError(type, message)` carries no status code. We map
-    well-known exception type names to HTTP statuses; everything else
-    becomes 502."""
-    if exc.type == "UpstreamError":
-        # The client raised UpstreamError. The message format may include
-        # the status code, but it's not structured. Default 502.
-        return 502
-    return 502
+    """Use the upstream HTTP status the host handler chose. `AbridgeError`
+    carries `status_code` (429/400/404/...), which the host threads through the
+    wire error envelope and the sandbox preserves on `RemoteSioError`. Fall back
+    to 502 only when the remote error carried no status."""
+    status = getattr(exc, "status_code", None)
+    return status if isinstance(status, int) else 502
 
 
 # ── host-side: Proxy ─────────────────────────────────────────────────────
@@ -583,13 +609,29 @@ class Proxy(AsyncClientNamespace):
         Calling `start` again while this proxy is active returns the current
         handle instead of leaking another tunnel. If startup fails, clients
         with `aclose()` are still closed.
+
+        ORDERING: open the proxy before any other `sandbox.remote()` / health
+        call. The `/abridge` namespace must be registered before the runtime
+        client connects, so `proxy.start` / `proxy.session` has to run first; a
+        prior remote call that already connected the client makes this raise.
         """
         if self._handle is not None:
             return self._handle
 
         self._clients_closed = False
         try:
-            sandbox.register_namespace(self)
+            try:
+                sandbox.register_namespace(self)
+            except RuntimeError as exc:
+                # register_namespace only raises RuntimeError once the runtime
+                # client has connected — i.e. a remote()/health() ran first.
+                # Re-raise in this surface's vocabulary instead of the low-level
+                # "before entering the async context" message.
+                raise RuntimeError(
+                    "open the abridge proxy (proxy.session/start) before any other "
+                    "sandbox.remote()/health() call — its /abridge namespace must be "
+                    "registered before the runtime client connects"
+                ) from exc
             handle = await sandbox.remote(_start_tunnel, paths=list(self.paths))
         except BaseException:
             try:
@@ -651,7 +693,18 @@ class Proxy(AsyncClientNamespace):
         handle = await self.start(sandbox)
         try:
             yield handle
-        finally:
+        except BaseException:
+            # The body is already raising: a teardown failure must not mask it
+            # (it would demote the real error to __context__). Log-and-swallow
+            # stop() errors here. Catching the body exception explicitly (vs
+            # probing sys.exc_info()) keeps this path off callers that open the
+            # session inside an unrelated `except` block.
+            try:
+                await self.stop(sandbox)
+            except Exception:
+                logger.exception("abridge: session teardown failed after body error (suppressed)")
+            raise
+        else:
             await self.stop(sandbox)
 
     # ── handy property ────────────────────────────────────────────────
@@ -671,6 +724,7 @@ __all__ = [
     "AbridgeError",
     "Client",
     "ClientResponse",
+    "DynamicRoutes",
     "Handler",
     "NAMESPACE",
     "Proxy",

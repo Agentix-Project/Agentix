@@ -56,10 +56,15 @@ RESERVED_NAMESPACES = frozenset({"/rpc", "/trace", "/log"})
 class RemoteSioError(RuntimeError):
     """Raised by `Namespace.request()` when the reply carries an `:error`."""
 
-    def __init__(self, type_: str, message: str) -> None:
+    def __init__(self, type_: str, message: str, status_code: int | None = None) -> None:
         super().__init__(f"{type_}: {message}")
         self.type = type_
         self.message = message
+        # Upstream HTTP status the host handler chose (e.g. abridge's
+        # AbridgeError 429/400); None when the error envelope carried no
+        # status. Lets a protocol layer reply with the real status instead
+        # of collapsing every remote failure to one blanket code.
+        self.status_code = status_code
 
 
 # ── module-level bridge state ──────────────────────────────────────
@@ -241,10 +246,12 @@ class Namespace:
         fut = self._pending_requests.get(req_id) if isinstance(req_id, str) else None
         if fut is not None and not fut.done():
             err = payload.get("error") or {"type": "Unknown", "message": ""}
+            status_code = err.get("status_code")
             fut.set_exception(
                 RemoteSioError(
                     err.get("type", "Unknown"),
                     err.get("message", ""),
+                    status_code if isinstance(status_code, int) else None,
                 )
             )
 
