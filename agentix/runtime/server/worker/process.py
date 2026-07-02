@@ -128,7 +128,11 @@ class Worker:
                 task.cancel()
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
-        await self._outbound_q.join()
+        # Bound the drain: a wedged outbound pipe (writer.drain() blocked on a
+        # full OS pipe) would hang join() forever — task_done() never fires for
+        # the stuck frame. Mirror the server-side bounded join.
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self._outbound_q.join(), timeout=2.0)
         if self._drainer is not None:
             self._drainer.cancel()
 
@@ -276,18 +280,20 @@ class Worker:
         task = self._calls.get(call_id)
         if task is not None:
             task.cancel()
-            asyncio.create_task(
-                self._send(
-                    {
-                        "type": "error",
-                        "call_id": call_id,
-                        "error": RemoteError(
-                            type="Cancelled",
-                            message="remote call cancelled",
-                            cancelled=True,
-                        ).model_dump(),
-                    }
-                )
+            # Enqueue synchronously (the outbound queue is unbounded) instead of
+            # spawning an untracked `create_task`, which the loop only weakly
+            # references and could GC before it runs — dropping the Cancelled
+            # frame.
+            self._enqueue_frame(
+                {
+                    "type": "error",
+                    "call_id": call_id,
+                    "error": RemoteError(
+                        type="Cancelled",
+                        message="remote call cancelled",
+                        cancelled=True,
+                    ).model_dump(),
+                }
             )
 
 

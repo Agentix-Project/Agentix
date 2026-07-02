@@ -40,7 +40,7 @@ from pydantic import BaseModel, Field, field_validator
 from agentix.provider._plugin import Registry
 
 if TYPE_CHECKING:
-    from agentix.runtime.client import RuntimeClient
+    from agentix.runtime.client import Result, RuntimeClient
     from agentix.runtime.shared.models import HealthResponse
 
 P = ParamSpec("P")
@@ -215,6 +215,16 @@ class Sandbox:
         """Execute `fn(*args, **kwargs)` in this sandbox and return its result."""
         return await self._runtime_client().remote(fn, *args, **kwargs)
 
+    async def try_remote(
+        self,
+        fn: Callable[P, R] | Callable[P, Awaitable[R]],
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> Result[R]:
+        """Execute `fn` and return a `Result[R]` (`Ok | Failed`) instead of
+        raising on a terminal error — see `RuntimeClient.try_remote`."""
+        return await self._runtime_client().try_remote(fn, *args, **kwargs)
+
     async def health(self) -> HealthResponse:
         return await self._runtime_client().health()
 
@@ -264,12 +274,24 @@ class SandboxProvider(Protocol):
                 result = await sandbox.remote(agent.run, task=task)
         """
         sandbox = await self.create(config)
+        # Contract: `create()` only provisions the sandbox; it must NOT
+        # materialize the RuntimeClient (the lazy `_runtime_client()` reads
+        # `call_deadline` at first `remote()`). That is what lets us stamp the
+        # deadline here, post-create. A provider that eagerly connected inside
+        # `create()` would bake in `call_deadline=None` — such a provider must
+        # accept the deadline through `create()` instead.
         sandbox.call_deadline = call_deadline
         try:
             yield sandbox
         finally:
-            await sandbox.aclose()
-            await self.delete(sandbox.sandbox_id)
+            # `delete()` must run even if `aclose()` raises (e.g. an httpx
+            # pool error or CancelledError during shutdown); otherwise the
+            # container and its reserved port leak — the exact failure the
+            # never-leak contract targets.
+            try:
+                await sandbox.aclose()
+            finally:
+                await self.delete(sandbox.sandbox_id)
 
 
 @runtime_checkable
