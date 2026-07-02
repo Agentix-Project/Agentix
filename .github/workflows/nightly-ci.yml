@@ -42,7 +42,7 @@ jobs:
           - 18
           - 19
     env:
-      BUNDLE: eval-cc-swe:nightly
+      BUNDLE_TAR: dist/run-swe-rollouts-nightly-linux-amd64.bundle.tar
       DATASET: parquet
       DATASET_FILE: https://raw.githubusercontent.com/SWE-bench/SWE-bench/50b9f47a7cacd7084ae900b27840a3c7b1c8ca24/data/SWE-bench_Verified/test.parquet
       DATASET_SPLIT: train
@@ -62,19 +62,30 @@ jobs:
           key: swebench-verified-hf-${{ runner.os }}
 
       - name: lock eval example
-        working-directory: examples/eval-cc-swe
+        working-directory: examples/run-swe-rollouts
         run: uv lock
 
       - name: build eval bundle
-        working-directory: examples/eval-cc-swe
-        run: uv run agentix build . --name "$BUNDLE" --platform linux/amd64
+        working-directory: examples/run-swe-rollouts
+        run: uv run agentix build . --name run-swe-rollouts:nightly --platform linux/amd64 --output "$BUNDLE_TAR"
+
+      - name: deploy eval bundle
+        working-directory: examples/run-swe-rollouts
+        run: |
+          set -euo pipefail
+          BUNDLE=$(uv run agentix deploy docker "$BUNDLE_TAR" --platform linux/amd64 --format json | jq -r .bundle)
+          if [ -z "$BUNDLE" ] || [ "$BUNDLE" = "null" ]; then
+            echo "error: agentix deploy did not produce a bundle ref" >&2
+            exit 1
+          fi
+          echo "BUNDLE=$BUNDLE" >> "$GITHUB_ENV"
 
       - name: evaluate ground-truth patches
-        working-directory: examples/eval-cc-swe
+        working-directory: examples/run-swe-rollouts
         env:
           SHARD_INDEX: ${{ matrix.shard_index }}
         run: |
-          uv run python -m runner \
+          uv run python main.py \
             --ground-truth \
             --fail-on-unresolved \
             --bundle "$BUNDLE" \
@@ -90,4 +101,4 @@ jobs:
         if: always()
         with:
           name: swebench-verified-ground-truth-${{ matrix.shard_index }}
-          path: examples/eval-cc-swe/runs/ground-truth-shard-${{ matrix.shard_index }}/
+          path: examples/run-swe-rollouts/runs/ground-truth-shard-${{ matrix.shard_index }}/
