@@ -149,6 +149,11 @@ in `SandboxConfig`, not the backend.
 | `DAYTONA_API_KEY` | `daytona` backend | API authentication |
 | `E2B_API_KEY` / `E2B_TEMPLATE_ID` | `e2b` backend | API authentication and template selection |
 
+The `daytona` and `e2b` backends are placeholders today: they validate
+configuration but their lifecycle methods raise `NotImplementedError`
+pending integration. `docker`/`podman` and `apptainer` are the working
+backends.
+
 Fail fast in `__init__` when required configuration is missing. The
 error should surface before the backend starts creating infrastructure.
 
