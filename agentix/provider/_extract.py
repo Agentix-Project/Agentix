@@ -13,9 +13,14 @@ Guarantees:
   spellings included); a name that merely claims the `nix/` prefix but
   normalizes elsewhere (`nix/../../x`) is rejected, not skipped.
 - no write ever routes through a symlinked parent directory.
-- symlink targets must stay inside the nix tree: absolute targets must
-  point into `/nix` (valid once the tree is mounted there), relative
-  targets must resolve under the extraction root.
+- the extracted tree contains no symlink pointing outside `/nix`:
+  absolute targets must point into `/nix` (valid once the tree is
+  mounted there), relative targets must resolve under the extraction
+  root. Members that fail this are *omitted with a warning* rather than
+  fatal — `agentix build` documents that bundles carry incidental
+  escaping-but-inert links (Nix GC roots into the build container's
+  `/build`, profile links), and only `nix/runtime` symlinks are part of
+  the runtime contract.
 - hard links never follow a symlink out of the extraction root.
 - extraction lands in a temporary sibling directory and is committed
   with one atomic rename only after the tree proves to contain
@@ -26,12 +31,15 @@ Guarantees:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import posixpath
 import shutil
 import tarfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
+
+logger = logging.getLogger("agentix.provider.extract")
 
 __all__ = ["extract_nix_tree"]
 
@@ -49,8 +57,8 @@ def _checked_member_name(name: str) -> str:
     return normalized
 
 
-def _checked_symlink_target(name: str, linkname: str) -> str:
-    """Contain a symlink member's target inside the nix tree.
+def _contained_symlink_target(name: str, linkname: str) -> str | None:
+    """Return `linkname` when it stays inside the nix tree, else None.
 
     Absolute targets must point into `/nix` — that is where the tree is
     mounted at runtime, so `/nix/store/...` links are the normal Nix
@@ -58,15 +66,15 @@ def _checked_symlink_target(name: str, linkname: str) -> str:
     to somewhere under the extracted tree.
     """
     if not linkname:
-        raise RuntimeError(f"bundle tar symlink has an empty target: {name!r}")
+        return None
     if linkname.startswith("/"):
         normalized = posixpath.normpath(linkname)
         if normalized != "/nix" and not normalized.startswith("/nix/"):
-            raise RuntimeError(f"bundle tar symlink escapes /nix: {name!r} -> {linkname!r}")
+            return None
         return linkname
     resolved = posixpath.normpath(posixpath.join(posixpath.dirname(name), linkname))
     if resolved != "nix" and not resolved.startswith("nix/"):
-        raise RuntimeError(f"bundle tar symlink escapes the nix tree: {name!r} -> {linkname!r}")
+        return None
     return linkname
 
 
@@ -120,7 +128,14 @@ def _extract_member(tar: tarfile.TarFile, member: tarfile.TarInfo, root: Path) -
 
     _remove_existing_path(target)
     if member.issym():
-        os.symlink(_checked_symlink_target(name, member.linkname), target)
+        linkname = _contained_symlink_target(name, member.linkname)
+        if linkname is None:
+            # Inert build residue (Nix GC roots into /build, profile
+            # links): nothing at runtime references these, and omitting
+            # them keeps the "no symlink out of /nix" guarantee literal.
+            logger.warning("bundle tar symlink escapes /nix; omitted: %r -> %r", member.name, member.linkname)
+            return
+        os.symlink(linkname, target)
         return
     if member.islnk():
         link_target = _checked_hardlink_target(root, name, member.linkname)
