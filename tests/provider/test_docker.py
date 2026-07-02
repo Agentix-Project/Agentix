@@ -505,3 +505,19 @@ def test_deploy_docker_cmd_json_format(
     data = json.loads(result.output)
     assert data["bundle"] == "/tmp/fake-cache"
     assert data["hints"] == {"inspect contents": "ls /tmp/fake-cache"}
+
+
+def test_transient_docker_error_matches_registry_5xx_but_not_missing_image() -> None:
+    from agentix.provider.docker import _is_transient_docker_error
+
+    # Observed in nightly run 28573228307: a Docker Hub blip mid-pull.
+    assert _is_transient_docker_error(
+        b"docker: Error response from daemon: received unexpected HTTP status: 502 Bad Gateway"
+    )
+    assert _is_transient_docker_error(
+        b"docker: Error response from daemon: received unexpected HTTP status: 503 Service Unavailable"
+    )
+    # A genuinely absent image must fail fast, not burn retries.
+    assert not _is_transient_docker_error(
+        b"docker: Error response from daemon: manifest for swebench/x:latest not found: manifest unknown"
+    )
