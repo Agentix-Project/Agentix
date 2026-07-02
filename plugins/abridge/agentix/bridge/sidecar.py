@@ -210,7 +210,11 @@ class Sidecar:
         finally:
             self._starting = False
 
-        raise SidecarError(f"sidecar exhausted port retries on {self._host}")
+        # Unreachable: the bounded retry loop always returns (success) or
+        # re-raises (the last attempt can't `continue` — that guard requires
+        # `attempt < attempts`). Kept as an assert so it documents the invariant
+        # and satisfies the `-> str` contract without masking a real error.
+        raise AssertionError("unreachable: sidecar start loop must return or raise")
 
     async def __aexit__(self, *exc: object) -> None:
         await self._terminate()
@@ -330,6 +334,9 @@ class Sidecar:
             raise
         finally:
             await self._finish_drainers()
+            # Clear the handle so a re-entered/inspected sidecar doesn't read
+            # the dead process as "still running".
+            self._proc = None
 
 
 __all__ = ["Command", "Sidecar", "SidecarError"]

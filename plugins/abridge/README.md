@@ -49,7 +49,7 @@ from agentix.bridge.clients import AnthropicFromOpenAIClient
 client = AnthropicFromOpenAIClient(
     base_url="https://api.openai.com/v1",   # OpenAI / OpenRouter / vLLM / your gateway
     api_key="sk-...",
-    upstream_model="gpt-4o",                # the agent keeps sending claude-* model ids
+    model="gpt-4o",                         # the agent keeps sending claude-* model ids
 )
 proxy = Proxy(client)
 
@@ -75,12 +75,14 @@ client = OpenAIClient(base_url=..., api_key=..., model="gpt-4o")
 proxy = Proxy(client)
 
 async with proxy.session(sandbox) as handle:
-    await sandbox.remote(agent, base_url=f"{handle.url}/v1", api_key=PLACEHOLDER_API_KEY)
+    await sandbox.remote(agent, env=client.environ(handle))
 ```
 
-`OpenAIClient` doesn't ship an `environ(handle)` helper — most OpenAI
-SDK callers construct the client with explicit `base_url=`/`api_key=`
-arguments rather than reading env vars.
+`client.environ(handle)` returns
+`{"OPENAI_BASE_URL": handle.url + "/v1", "OPENAI_API_KEY": "<placeholder>"}` —
+the `/v1` suffix the OpenAI SDK expects is baked in so a caller can't
+drop it. Agents that construct their SDK client explicitly can still
+pass `base_url=f"{handle.url}/v1", api_key=PLACEHOLDER_API_KEY` instead.
 
 ### Anthropic agent → native Anthropic upstream
 
@@ -252,6 +254,7 @@ agentix/bridge/
     ├── openai.py                  # OpenAIClient (openai SDK) + PLACEHOLDER_API_KEY
     ├── anthropic.py               # AnthropicClient (anthropic SDK) + environ() + PLACEHOLDER_API_KEY
     ├── anthropic_from_openai.py   # AnthropicFromOpenAIClient (openai SDK + translation) + environ()
+    ├── anthropic_to_openai.py     # AnthropicToOpenAI (SDK-free translation over any Handler) + environ()
     ├── _genai_span.py             # populate_openai_span / populate_anthropic_span
     └── _anthropic_transforms.py   # pure Anthropic↔OpenAI converters
 ```

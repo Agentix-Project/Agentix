@@ -25,20 +25,21 @@ Protocol, no base class, no registration. Multiple handlers compose
 via Python multiple inheritance (mixins) or by passing several to
 `Proxy(*handlers)`. Two handlers must not register the same path.
 
-`agentix.bridge.clients` ships the three standard handlers
-(`OpenAIClient`, `AnthropicClient`, `AnthropicFromOpenAIClient`), each
-built on the corresponding provider SDK. Pull from there as building
-blocks; abridge core stays shape-blind.
+`agentix.bridge.clients` ships the standard handlers (`OpenAIClient`,
+`AnthropicClient`, `AnthropicFromOpenAIClient`, and the transport-blind
+`AnthropicToOpenAI`). Pull from there as building blocks; abridge core
+stays shape-blind.
 """
 
 from __future__ import annotations
 
-from .forward import Forward
+from .forward import Forward, SessionForward
 from .proxy import (
     NAMESPACE,
     AbridgeError,
     Client,
     ClientResponse,
+    DynamicRoutes,
     Handler,
     Proxy,
     Request,
@@ -54,11 +55,13 @@ __all__ = [
     "Client",
     "ClientResponse",
     "Command",
+    "DynamicRoutes",
     "Forward",
     "Handler",
     "NAMESPACE",
     "Proxy",
     "Request",
+    "SessionForward",
     "Sidecar",
     "SidecarError",
     "TunnelHandle",
