@@ -31,6 +31,16 @@ TESTBED = "/testbed"
 MODEL_PATCH = "/tmp/agentix_model.patch"
 TEST_PATCH = "/tmp/agentix_test.patch"
 
+# Every unresolved result carries `failure_stage` plus a bounded
+# `log_tail`, so a nightly artifact can be attributed (harness bug vs
+# environment drift vs genuinely failing tests) without re-running the
+# instance. The bound keeps per-instance JSON small at batch scale.
+LOG_TAIL_CHARS = 8000
+
+
+def _tail(log: str) -> str:
+    return log[-LOG_TAIL_CHARS:]
+
 
 def _get_test_command(instance: dict) -> str:
     specs = MAP_REPO_VERSION_TO_SPECS[instance["repo"]][instance["version"]]
@@ -72,18 +82,15 @@ async def score(
     prepared = await prepare_env(workdir=workdir, base_commit=str(instance["base_commit"]))
     if not prepared.ok:
         logger.error("prepare env failed:\n%s", prepared.log)
-        result = _empty_result(patch_applied=False)
-        result["skipped"] = "prepare_env_failed"
-        result["prepare_env_log"] = prepared.log
-        return result
+        return _empty_result(patch_applied=False, stage="prepare_env", log=prepared.log)
 
-    patch_applied = await _apply_model_patch(patch, workdir, env, apply_timeout)
+    patch_applied, apply_log = await _apply_model_patch(patch, workdir, env, apply_timeout)
     if not patch_applied:
-        return _empty_result(patch_applied=False)
+        return _empty_result(patch_applied=False, stage="apply_patch", log=apply_log)
 
-    prepared = await _prepare_tests(instance, workdir, env, eval_timeout)
-    if not prepared:
-        return _empty_result(patch_applied=True)
+    prepared_ok, prepare_log = await _prepare_tests(instance, workdir, env, eval_timeout)
+    if not prepared_ok:
+        return _empty_result(patch_applied=True, stage="prepare_tests", log=prepare_log)
 
     code, output, timed_out = await _run(_get_test_command(instance), workdir, env, eval_timeout, conda=True)
     logger.debug("test output:\n%s", output)
@@ -94,6 +101,10 @@ async def score(
     result["timed_out"] = timed_out
     if timed_out:
         result["resolved"] = False
+    if not result["resolved"]:
+        result["failure_stage"] = "tests"
+        result["exit_code"] = code
+        result["log_tail"] = _tail(output)
     logger.info(
         "scored %s: resolved=%s tests=%d exit=%d",
         instance["instance_id"],
@@ -104,22 +115,24 @@ async def score(
     return result
 
 
-async def _apply_model_patch(patch: str, workdir: str, env: dict[str, str], timeout: float) -> bool:
+async def _apply_model_patch(patch: str, workdir: str, env: dict[str, str], timeout: float) -> tuple[bool, str]:
     if not patch.strip():
         logger.error("empty patch")
-        return False
+        return False, "empty patch"
     Path(MODEL_PATCH).write_text(patch)
+    attempts: list[str] = []
     for command in GIT_APPLY_CMDS:
         code, output, _ = await _run(f"{command} {MODEL_PATCH}", workdir, env, timeout)
         logger.debug("$ %s\n%s", command, output)
         if code == 0:
             logger.info("patch applied with: %s", command)
-            return True
+            return True, ""
+        attempts.append(f"$ {command}\n{output}")
     logger.error("failed to apply patch")
-    return False
+    return False, "\n".join(attempts)
 
 
-async def _prepare_tests(instance: dict, workdir: str, env: dict[str, str], timeout: float) -> bool:
+async def _prepare_tests(instance: dict, workdir: str, env: dict[str, str], timeout: float) -> tuple[bool, str]:
     specs = MAP_REPO_VERSION_TO_SPECS[instance["repo"]][instance["version"]]
     commands = [f"git config --global --add safe.directory {shlex.quote(workdir)}"]
     commands.extend(str(command) for command in specs.get("eval_commands", []))
@@ -139,7 +152,7 @@ async def _prepare_tests(instance: dict, workdir: str, env: dict[str, str], time
         logger.debug("$ %s\n%s", command, output)
         if code != 0:
             logger.error("prepare command failed: %s", command)
-            return False
+            return False, f"$ {command}\n{output}"
 
     await _remove_untracked_paths(workdir, touched, env, timeout)
     Path(TEST_PATCH).write_text(str(instance["test_patch"]))
@@ -148,8 +161,8 @@ async def _prepare_tests(instance: dict, workdir: str, env: dict[str, str], time
         logger.debug("$ %s\n%s", command, output)
         if code != 0:
             logger.error("test patch command failed: %s", command)
-            return False
-    return True
+            return False, f"$ {command}\n{output}"
+    return True, ""
 
 
 async def _cleanup_tests(instance: dict, workdir: str, env: dict[str, str], timeout: float) -> None:
@@ -240,5 +253,12 @@ def _apply_export(command: str, env: dict[str, str]) -> bool:
     return True
 
 
-def _empty_result(*, patch_applied: bool) -> dict:
-    return {"resolved": False, "patch_applied": patch_applied, "timed_out": False, "test_status": {}}
+def _empty_result(*, patch_applied: bool, stage: str, log: str) -> dict:
+    return {
+        "resolved": False,
+        "patch_applied": patch_applied,
+        "timed_out": False,
+        "test_status": {},
+        "failure_stage": stage,
+        "log_tail": _tail(log),
+    }
