@@ -124,17 +124,37 @@ def test_non_nix_member_rejected(tmp_path: Path) -> None:
         extract_nix_tree(bundle, tmp_path / "out")
 
 
-def test_symlink_absolute_escape_rejected(tmp_path: Path) -> None:
+def test_symlink_absolute_escape_omitted(tmp_path: Path) -> None:
     bundle = _write_tar(tmp_path / "bundle.tar", [_symlink("nix/runtime/evil", "/etc/passwd")])
-    with pytest.raises(RuntimeError, match="symlink escapes /nix"):
-        extract_nix_tree(bundle, tmp_path / "out")
-    assert not (tmp_path / "out").exists()
+    nix = extract_nix_tree(bundle, tmp_path / "out")
+    # The rest of the tree extracts; the escaping link is not written.
+    assert (nix / "runtime" / "bootstrap.sh").is_file()
+    assert not os.path.lexists(nix / "runtime" / "evil")
 
 
-def test_symlink_relative_escape_rejected(tmp_path: Path) -> None:
+def test_symlink_relative_escape_omitted(tmp_path: Path) -> None:
     bundle = _write_tar(tmp_path / "bundle.tar", [_symlink("nix/runtime/evil", "../../../etc/passwd")])
-    with pytest.raises(RuntimeError, match="symlink escapes the nix tree"):
-        extract_nix_tree(bundle, tmp_path / "out")
+    nix = extract_nix_tree(bundle, tmp_path / "out")
+    assert not os.path.lexists(nix / "runtime" / "evil")
+
+
+def test_nix_gcroot_build_residue_is_tolerated(tmp_path: Path) -> None:
+    # Real bundles carry GC-root links into the build container's paths
+    # (`agentix build` residue); deploy must extract such bundles, not
+    # fail on them. Regression: nightly run 28558780157.
+    bundle = _write_tar(
+        tmp_path / "bundle.tar",
+        [
+            _dir("nix/var"),
+            _dir("nix/var/nix"),
+            _dir("nix/var/nix/gcroots"),
+            _dir("nix/var/nix/gcroots/auto"),
+            _symlink("nix/var/nix/gcroots/auto/jiljnq98m1hj3ymbhnyn4yb9mgk2ks45", "/build/runtime-result"),
+        ],
+    )
+    nix = extract_nix_tree(bundle, tmp_path / "out")
+    assert (nix / "runtime" / "bootstrap.sh").is_file()
+    assert not os.path.lexists(nix / "var" / "nix" / "gcroots" / "auto" / "jiljnq98m1hj3ymbhnyn4yb9mgk2ks45")
 
 
 def test_hardlink_through_symlink_escape_rejected(tmp_path: Path) -> None:

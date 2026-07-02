@@ -44,9 +44,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # The native amd64 pair runs the full pytest e2e — build,
+          # `agentix deploy docker` (real-bundle extraction), and boot
+          # checks inside a task container. The deploy path once broke
+          # on real bundles while every synthetic unit test passed
+          # (nightly run 28558780157); only a real-artifact round trip
+          # catches that class.
           - runner: ubuntu-24.04
             source_platform: linux/amd64
             target_platform: linux/amd64
+            deploy_e2e: true
           - runner: ubuntu-24.04
             source_platform: linux/amd64
             target_platform: linux/arm64
@@ -68,5 +75,12 @@ jobs:
       # Build the minimal bundle directly for each runner/target pair.
       # Nix runs inside the build container, so the runner needs only Docker.
       - name: build hello-world bundle
+        if: ${{ !matrix.deploy_e2e }}
         working-directory: examples/hello-world
         run: uv run agentix build . --platform "${{ matrix.target_platform }}"
+      - name: sync workspace
+        if: ${{ matrix.deploy_e2e }}
+        run: uv sync --locked --all-packages --all-extras
+      - name: build + deploy + boot e2e
+        if: ${{ matrix.deploy_e2e }}
+        run: uv run pytest tests/e2e -m e2e -v
