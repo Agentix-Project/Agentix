@@ -140,10 +140,15 @@ def test_venv_python_is_nix_provided(bundle: Path) -> None:
 
 def test_remote_target_importable(bundle: Path) -> None:
     """The project module + the framework + a plugin all import, and
-    the remote callable runs — the venv is a real, working closure."""
+    the remote callable runs — the venv is a real, working closure.
+
+    `main.hello()` shells out to `rg` from the runtime PATH; sandboxes
+    get that PATH from bootstrap.sh, which this direct venv invocation
+    bypasses, so compose the runtime bin dir onto PATH the same way.
+    """
     out = _sh(
         bundle,
-        "/nix/runtime/venv/bin/python -c "
+        'PATH="/nix/runtime/bin:$PATH" /nix/runtime/venv/bin/python -c '
         "'import main, agentix, agentix.bash; print(main.hello())'",
     )
     assert "ripgrep" in out
