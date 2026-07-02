@@ -15,6 +15,12 @@ dependencies = [
     "uvicorn>=0.30",
 ]
 
+# Direct mode: serve the Anthropic->OpenAI translation next to an
+# OpenAI-compatible engine so sandboxes with network reach skip the
+# host tunnel entirely (see agentix/bridge/serve.py).
+[project.scripts]
+agentix-bridge-serve = "agentix.bridge.serve:main"
+
 # Bundled clients each depend on the provider's SDK; users who only
 # ship custom `@on` handlers don't need either. Pick what you actually
 # use:

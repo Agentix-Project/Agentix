@@ -198,11 +198,54 @@ completion logs (elapsed-ms, status code). Wire-level errors come from
 `trace.Processor` (e.g. `agentix.plugins.trace-otel`) to export to
 LangSmith / Langfuse / Datadog / any OTel backend.
 
+## Direct mode — skip the tunnel when the sandbox has network reach
+
+The tunnel exists for sandboxes with **no egress at all**: LLM traffic
+piggybacks on the runtime's Socket.IO connection, at the cost of two
+extra hops and the host process fanning in every concurrent rollout's
+calls. When the sandbox *can* reach the model-serving network (an
+in-cluster vLLM/SGLang, a private gateway), serve the same handlers as
+a standalone HTTP service next to the engine and point the agent
+straight at it — the host stays out of the data path:
+
+```bash
+OPENAI_API_KEY=EMPTY agentix-bridge-serve \
+    --upstream-base-url http://vllm:8000/v1 --upstream-model qwen3-32b \
+    --host 0.0.0.0 --require-key-prefix rollout-secret-
+# agent side: ANTHROPIC_BASE_URL=http://<server>:8399
+#             ANTHROPIC_API_KEY=rollout-secret-<per-rollout nonce>
+```
+
+Rollout identity travels in the key: mint a fresh placeholder API key
+per rollout (the key you already inject into the sandbox), and the
+server maps whatever key each request carries to
+`session_id_for(key)` — the `x-session-id` it stamps upstream. One
+server groups any number of concurrent rollouts; the minting side
+calls the same `agentix.bridge.serve.session_id_for` to correlate;
+agent keys are never forwarded, and the real upstream key stays
+server-side.
+
+Trust model: the server binds loopback by default and is
+unauthenticated unless you gate it — sandboxes run model-generated
+code, so when you expose it to them (`--host`), also set
+`--require-key-prefix <secret>` (or pass `verify_key=` to
+`build_session_app`) so only keys your harness minted are served;
+everything else gets a 401.
+
+Programmatic surface in `agentix.bridge.serve`: `build_app(*clients)`
+(shared session) and `build_session_app(factory)` (one client per
+caller key; LRU-bounded with in-flight-safe eviction — an evicted
+client closes only after its live requests finish — and full cleanup
+on shutdown). Multi-backend routing and token capture belong to the
+full gateway (see the roadmap); the tunnel remains the mode for fully
+egress-less sandboxes.
+
 ## Module layout
 
 ```
 agentix/bridge/
 ├── proxy.py                       # Proxy + @on + sandbox tunnel + wire types
+├── serve.py                       # direct mode: @on handlers as a standalone HTTP service
 ├── forward.py                     # JSON POST forwarding to a host-side service
 ├── sidecar.py                     # local process lifecycle + health supervision
 └── clients/                       # bundled handler implementations
