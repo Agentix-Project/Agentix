@@ -135,6 +135,12 @@ async def _apply_model_patch(patch: str, workdir: str, env: dict[str, str], time
 async def _prepare_tests(instance: dict, workdir: str, env: dict[str, str], timeout: float) -> tuple[bool, str]:
     specs = MAP_REPO_VERSION_TO_SPECS[instance["repo"]][instance["version"]]
     commands = [f"git config --global --add safe.directory {shlex.quote(workdir)}"]
+    # Task images bake `pre_install` edits into /testbed's tracked files
+    # at build time (sphinx: `sed 's/pytest/pytest -rA/' tox.ini` so the
+    # log parser sees per-test lines; astropy: a setuptools pin that the
+    # editable reinstall needs). `prepare_env`'s `git reset --hard`
+    # reverts those edits, so re-apply them before install/eval.
+    commands.extend(str(command) for command in specs.get("pre_install", []))
     commands.extend(str(command) for command in specs.get("eval_commands", []))
 
     install = str(specs.get("install") or "").strip()

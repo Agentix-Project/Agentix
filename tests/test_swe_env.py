@@ -183,3 +183,55 @@ async def test_score_apply_failure_is_attributed(monkeypatch) -> None:
     assert result["patch_applied"] is False
     assert result["failure_stage"] == "apply_patch"
     assert result["log_tail"] == "$ git apply\nerror: corrupt"
+
+
+async def test_prepare_tests_reapplies_pre_install_before_install(monkeypatch, tmp_path) -> None:
+    # Task images bake pre_install's tracked-file edits in at build time
+    # and prepare_env's `git reset --hard` reverts them — _prepare_tests
+    # must re-apply them ahead of the (re)install.
+    monkeypatch.setattr(
+        swe_score,
+        "MAP_REPO_VERSION_TO_SPECS",
+        {
+            "demo/demo": {
+                "1.0": {
+                    "pre_install": ["sed -i 's/pytest/pytest -rA/' tox.ini"],
+                    "eval_commands": ["export LANG=C"],
+                    "install": "python -m pip install -e .",
+                    "test_cmd": "pytest -rA",
+                }
+            }
+        },
+    )
+    ran: list[str] = []
+
+    async def record(command, workdir, env, timeout, *, conda=False):
+        ran.append(command)
+        return 0, "", False
+
+    monkeypatch.setattr(swe_score, "_run", record)
+    monkeypatch.setattr(swe_score, "_remove_untracked_paths", _async(None))
+
+    ok, log = await swe_score._prepare_tests(
+        {
+            "repo": "demo/demo",
+            "version": "1.0",
+            "base_commit": "abc",
+            "test_patch": (
+                "diff --git a/tests/t.py b/tests/t.py\n"
+                "--- a/tests/t.py\n"
+                "+++ b/tests/t.py\n"
+                "@@ -1 +1 @@\n"
+                "-a\n"
+                "+b\n"
+            ),
+        },
+        str(tmp_path),
+        {},
+        60.0,
+    )
+
+    assert ok and log == ""
+    sed_at = next(i for i, c in enumerate(ran) if c.startswith("sed "))
+    install_at = next(i for i, c in enumerate(ran) if "pip install" in c)
+    assert sed_at < install_at

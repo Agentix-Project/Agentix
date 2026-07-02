@@ -52,6 +52,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ~25 task images per shard exhaust the runner's default free
+      # space even with per-instance cleanup; drop the preinstalled
+      # toolchains we never use (~20 GB).
+      - name: free runner disk
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
@@ -90,6 +98,7 @@ jobs:
           uv run python main.py \
             --ground-truth \
             --fail-on-unresolved \
+            --rmi-after \
             --bundle "$BUNDLE" \
             --docker-platform linux/amd64 \
             --dataset "$DATASET" \
