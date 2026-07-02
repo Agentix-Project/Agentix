@@ -33,14 +33,17 @@ frameworks to hold together. Five core capabilities:
    callable inside the box and get its typed value back; extend the loop
    by writing another function.
 2. **Eval/run any agent, in any sandbox, with any model** — abridge
-   translates Claude ⇄ OpenAI ⇄ Gemini at the wire, so any off-the-shelf
-   agent runs against any provider, with no agent changes.
+   tunnels the agent's LLM calls to the host and translates
+   Anthropic → OpenAI-compatible at the wire (more directions on the
+   [roadmap](plugins/abridge/ROADMAP.md)), so an off-the-shelf agent runs
+   against whatever provider you have, with no agent changes.
 3. **Train any agent as an RL rollout — no code change** — the agent is an
    opaque trajectory producer; Agentix makes no assumption about how it is
    built.
-4. **Token-in / token-out, captured automatically** — abridge stamps every
-   model call, so each rollout's full token trajectory is collected and
-   grouped per session, ready for the trainer.
+4. **Every model call stamped and traced** — abridge tags each call with
+   session/request ids at the transport layer and records prompt,
+   completion, and token usage as trace spans; trainer-ready
+   token-in/token-out capture is being built on top of this.
 5. **Observability for free** — every model call becomes an OTel span,
    exportable to LangSmith / LangFuse / Docent / any OTLP backend with zero
    agent instrumentation.
@@ -51,7 +54,7 @@ frameworks to hold together. Five core capabilities:
 
 #### Any agent
 
-Claude Code · Codex · Aider · OpenHands · your own  
+Claude Code · mini-SWE-agent · Qwen Code · your own  
 Expose as `async def run(...) -> Result`.
 
 </td>
@@ -59,7 +62,7 @@ Expose as `async def run(...) -> Result`.
 
 #### Any environment
 
-SWE-bench images · custom Docker · Daytona · E2B · your own backend  
+SWE-bench images · custom Docker/Podman · Apptainer · your own backend  
 Pick a sandbox — or bring your own.
 
 </td>
@@ -104,7 +107,7 @@ capture every step — ready for eval dashboards and RL buffers.
 ## Quickstart
 
 ```bash
-pip install agentixx agentix-runtime-basic agentix-provider-docker
+git clone https://github.com/Agentix-Project/Agentix && cd Agentix
 ```
 
 Build a bundle once (takes a few minutes), then every remote call is
@@ -143,7 +146,7 @@ scorer are all just functions you remote-call:
 
 | You have | You expose | You call |
 |---|---|---|
-| An agent (Claude Code, Codex, OpenHands, …) | `async def run(...) -> RunResult` | `await sandbox.remote(run, ...)` |
+| An agent (Claude Code, Qwen Code, …) | `async def run(...) -> RunResult` | `await sandbox.remote(run, ...)` |
 | Shell, files, repo setup | `async def run(command: str) -> BashResult` | `await sandbox.remote(bash_run, ...)` |
 | A benchmark or reward model | `async def score(...) -> Score` | `await sandbox.remote(score, ...)` |
 
@@ -161,14 +164,15 @@ through that narrow hole. Agentix inverts it: the bundle installs your
 real Python, and `sandbox.remote(fn, ...)` calls **any importable
 function** and returns its typed value. A backend decides *where* the box
 runs; Agentix decides *what you can call inside it* — so you layer it on
-top of Docker, E2B, or Daytona.
+top of Docker/Podman or Apptainer today, with managed backends on the
+roadmap.
 
 | | swe-rex · E2B · Daytona · Harbor | Agentix |
 |---|---|---|
 | **Reach into the sandbox** | Fixed RPC surface, or shell / `docker exec` + vendor SDK | `await sandbox.remote(fn, ...)` — any importable function |
 | **Sandbox logs & stdout** | Scrape command output | stdlib `logging` auto-bridged to the host over `/log` |
 | **Observability** | Bring your own | `/trace` spans (OTel-shaped) for every step |
-| **Model under test** | Whatever the agent's SDK speaks | [`abridge`](plugins/abridge/README.md) translates Claude ⇄ OpenAI ⇄ Gemini — any agent on any model |
+| **Model under test** | Whatever the agent's SDK speaks | [`abridge`](plugins/abridge/README.md) translates Anthropic → OpenAI-compatible at the wire — Claude-speaking agents on OpenAI, OpenRouter, vLLM, your gateway |
 
 **vs. rollout-as-a-service**
 ([ProRL-Agent-Server](https://github.com/NVIDIA-NeMo/ProRL-Agent-Server)).
@@ -180,7 +184,7 @@ stays separate from rollout execution — with a lighter surface.
 |---|---|---|
 | **Add a new task** | Implement a handler, register it | Write a function, install it |
 | **Call a rollout** | HTTP request to the service | `await sandbox.remote(fn, ...)` |
-| **Trajectories** | Token-in / token-out over the service API | Captured by [`abridge`](plugins/abridge/README.md) as rollout logs |
+| **Trajectories** | Token-in / token-out over the service API | [`abridge`](plugins/abridge/README.md) stamps session/request ids + per-call trace spans; token-in/token-out capture in development |
 | **Sweet spot** | HPC-scale multi-turn RL fleets | Teams wiring eval + RL data without a platform team |
 
 Both designs are powerful at HPC scale. Agentix targets the much larger
@@ -202,33 +206,40 @@ spans from inside the sandbox replay on the host automatically.
 
 ### 2 · Eval/run any agent, in any sandbox, with any model
 
-Bring an off-the-shelf agent (Claude Code, Codex, OpenHands, your own),
-drop it in any backend (Docker/Podman, Daytona, E2B, Apptainer, or your
-own `SandboxProvider`), and point it at any model.
+Bring an off-the-shelf agent (Claude Code, mini-SWE-agent, Qwen Code, or
+your own), drop it in a backend (Docker/Podman, Apptainer, or your own
+`SandboxProvider`; managed backends like Daytona and E2B are stubbed on
+the roadmap), and point it at your model.
 [`abridge`](plugins/abridge/README.md) tunnels the agent's LLM calls back
-to the host and translates **Claude ⇄ OpenAI ⇄ Gemini** at the wire — so
-an agent that only speaks one provider runs against whatever you've got:
-OpenAI, OpenRouter, a private vLLM/SGLang, your own gateway. The agent ×
-sandbox × model matrix, with zero changes to the agent.
+to the host and translates **Anthropic → OpenAI-compatible** at the wire —
+so a Claude-speaking agent runs against whatever you've got: OpenAI,
+OpenRouter, a private vLLM/SGLang, your own gateway. More translation
+directions (OpenAI → Anthropic, Gemini) are on the
+[abridge roadmap](plugins/abridge/ROADMAP.md). The tunnel carries JSON
+request/response bodies and buffers responses (no incremental streaming
+yet) — see the [abridge README](plugins/abridge/README.md) for the exact
+contract.
 
 ### 3 · Turn that same agent into an RL rollout — no code change
 
 Agentix treats the agent as an **opaque trajectory producer** and makes
 no assumption about how it's built: single-shot or multi-turn,
 deep-thinking loops, hierarchical multi-agent — all opaque internal
-logic. The exact context presented to the model at each completion
-request is captured as a self-contained `(state, action)` sample, with
-**zero instrumentation in the agent**. The same run you evaluate is the
-run you train on.
+logic. Because every completion request crosses the bridge, the exact
+context presented to the model at each call is observable on the per-call
+trace span, with **zero instrumentation in the agent**. The same run you
+evaluate is the run you train on.
 
-### 4 · Token-in / token-out, captured automatically
+### 4 · Every model call stamped and traced
 
 [`abridge`](plugins/abridge/README.md) stamps every model call with a
-session/request id at the transport layer — the agent never sees it — so
-each rollout's full **token-in / token-out** trajectory (prompt,
-completion, logprobs) is collected and grouped per session, ready for the
-trainer. Nothing to wire into the agent: the same run you evaluate is the
-run you train on.
+session id (per rollout) and request id (per call) at the transport
+layer — the agent never sees it — and records prompt, completion, and
+token usage on the call's trace span. That gives an upstream gateway
+everything it needs to group a rollout's calls; trainer-ready
+**token-in / token-out** capture is being built on top of this (see the
+[abridge roadmap](plugins/abridge/ROADMAP.md)). Nothing to wire into the
+agent: the same run you evaluate is the run you train on.
 
 ### 5 · Observability, with zero agent instrumentation
 
@@ -243,13 +254,15 @@ instrument.
 
 ## Ecosystem
 
-One monorepo, separate PyPI packages. The core is `agentixx`; everything
-else is an optional plugin under [`plugins/`](plugins).
+One monorepo, separate packages (`agentixx` and `agentix-runtime-basic`
+are on PyPI today; the rest install from source while publishing catches
+up). The core is `agentixx`; everything else is an optional plugin under
+[`plugins/`](plugins).
 
 | Package | Role |
 |---|---|
 | [`agentix-runtime-basic`](plugins/runtime-basic/README.md) | `agentix.bash`, file ops, sandbox primitives |
-| [`agentix-provider-docker`](plugins/providers/docker) · [`-daytona`](plugins/providers/daytona) · [`-e2b`](plugins/providers/e2b) · [`-apptainer`](plugins/providers/apptainer) | Sandbox backends |
+| [`agentix-provider-docker`](plugins/providers/docker) · [`-apptainer`](plugins/providers/apptainer) | Sandbox backends ([`-daytona`](plugins/providers/daytona) · [`-e2b`](plugins/providers/e2b) are placeholders pending integration) |
 | [`agentix-runner`](plugins/runner/README.md) | `run_rollouts(...)` — batch eval/rollout orchestration |
 | [`agentix-dataset-swe`](plugins/datasets/swebench) | SWE-bench task images + official-harness scoring |
 | [`agentix-agent-claude-code`](plugins/agents/claude-code) · [`-mini-swe-agent`](plugins/agents/mini-swe-agent) · [`-qwen-code`](plugins/agents/qwen-code) | Agent adapters |
