@@ -10,23 +10,34 @@ import agentix
 
 def test_failure_vocabulary_importable_from_agentix() -> None:
     from agentix import (
+        CallCancelled,
         CallTimeout,
+        Failed,
+        Ok,
         RemoteCallError,
+        Result,
         RuntimeUnreachable,
         WorkerExited,
         configure_logging,
     )
 
-    # WorkerExited is a RemoteCallError subclass, so `except RemoteCallError`
-    # still catches a dead-worker call while `except WorkerExited` branches on it.
+    # WorkerExited / CallCancelled are RemoteCallError subclasses, so
+    # `except RemoteCallError` still catches them while the narrower names
+    # allow branching.
     assert issubclass(WorkerExited, RemoteCallError)
+    assert issubclass(CallCancelled, RemoteCallError)
+    assert Ok(1).value == 1 and Failed(ValueError()).error is not None
+    assert Result[int]  # generic union alias is subscriptable
     assert callable(configure_logging)
     for name in (CallTimeout, RuntimeUnreachable):
         assert issubclass(name, Exception)
 
 
 def test_failure_vocabulary_in_dunder_all() -> None:
-    for name in ("CallTimeout", "RuntimeUnreachable", "WorkerExited", "configure_logging"):
+    for name in (
+        "CallCancelled", "CallTimeout", "Failed", "Ok", "Result",
+        "RuntimeUnreachable", "WorkerExited", "configure_logging",
+    ):
         assert name in agentix.__all__
 
 

@@ -14,16 +14,22 @@ Implementation lives in `agentix.runtime.client.client`; this package's
 """
 
 from agentix.runtime.client.client import (
+    CallCancelled,
     CallTimeout,
     RemoteCallError,
     RuntimeClient,
     RuntimeUnreachable,
     WorkerExited,
 )
+from agentix.runtime.client.result import Failed, Ok, Result
 
 __all__ = [
+    "CallCancelled",
     "CallTimeout",
+    "Failed",
+    "Ok",
     "RemoteCallError",
+    "Result",
     "RuntimeClient",
     "RuntimeUnreachable",
     "WorkerExited",

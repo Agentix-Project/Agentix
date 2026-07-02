@@ -133,8 +133,9 @@ async with provider.session(SandboxConfig(image=..., bundle=...)) as sandbox:
 ## Errors and Cancellation
 
 Agentix keeps errors in-band. A failed call emits `call:error` with a
-structured payload; the client raises `RemoteCallError` (or
-`asyncio.CancelledError` when `error.cancelled=True`). `RemoteCallError`'s
+structured payload; the client raises `RemoteCallError` (or its subclass
+`CallCancelled` when `error.cancelled=True` — a terminal server-side state,
+distinct from local task cancellation). `RemoteCallError`'s
 message includes the sandbox-side traceback when one is available, and
 `exc.error.traceback` holds it on the exception for programmatic access.
 

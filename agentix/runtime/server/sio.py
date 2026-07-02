@@ -38,7 +38,9 @@ RPC_NAMESPACE = "/rpc"
 # Cap on the unacked-result cache. A host that completes calls and never acks
 # (a crashed or buggy client) would otherwise pin every result — each holding a
 # full pickled return value, up to MAX_MESSAGE_BYTES — in memory forever. Past
-# the cap, the oldest unacked entry is evicted.
+# the cap, the oldest unacked entry is evicted. Eviction is not silent loss:
+# a later `resume` for an evicted call_id gets a definite
+# `call:error type=ResultUnavailable` instead of hanging the host forever.
 _MAX_PENDING_RESULTS = 4096
 
 
@@ -75,6 +77,19 @@ def _cancelled_error(call_id: str) -> dict[str, Any]:
             type="Cancelled",
             message="remote call cancelled",
             cancelled=True,
+        ).model_dump(),
+    }
+
+
+def _unavailable_error(call_id: str) -> dict[str, Any]:
+    return {
+        "call_id": call_id,
+        "error": RemoteError(
+            type="ResultUnavailable",
+            message=(
+                "result is no longer held by the runtime (evicted or unknown call_id); "
+                "retry as a new call"
+            ),
         ).model_dump(),
     }
 
@@ -145,6 +160,11 @@ def make_sio(
     pending_results: dict[str, tuple[str, dict[str, Any]]] = {}
     evictions = 0  # count of cap evictions, for throttled warning
     opened_namespaces: set[str] = set()  # paths the worker has opened
+    # Keep a strong reference to every in-flight result-emit task. Bare
+    # `asyncio.create_task` in a done-callback is only weakly referenced by
+    # the loop — under GC pressure the task can be collected before it runs,
+    # and the host never receives the completed call's result.
+    emit_tasks: set[asyncio.Task] = set()
 
     async def _execute_call(payload: dict[str, Any], call_id: str) -> tuple[str, dict[str, Any]]:
         try:
@@ -182,10 +202,17 @@ def make_sio(
         error = (resp.error or RemoteError(type="Unknown", message="")).model_dump()
         return "call:error", {"call_id": call_id, "error": error}
 
-    async def _emit_task_result(task: asyncio.Task, call_id: str) -> None:
+    def _cache_task_result(task: asyncio.Task, call_id: str) -> tuple[str, dict[str, Any]] | None:
+        """Synchronously store a finished task's frame into `pending_results`.
+        Returns the stored (event, frame), or None for a cancelled task.
+
+        Runs inside the task's done-callback — the same loop turn that pops
+        the call from `calls` — so `on_resume` can never observe a completing
+        call_id in *neither* map and misreport a live result as
+        ResultUnavailable."""
         nonlocal evictions
         if task.cancelled():
-            return
+            return None
         try:
             event, frame = task.result()
         except Exception as exc:
@@ -196,9 +223,9 @@ def make_sio(
                 "call_id": call_id,
                 "error": RemoteError(type=type(exc).__name__, message=str(exc)).model_dump(),
             }
-        # Store first, emit second. If the host is currently disconnected
-        # the emit is a no-op and the cached entry carries the result
-        # through to the next `resume`.
+        # Store first, emit second (the caller). If the host is currently
+        # disconnected the emit is a no-op and the cached entry carries the
+        # result through to the next `resume`.
         evicted = _store_pending_result(pending_results, call_id, (event, frame))
         if evicted is not None:
             evictions += 1
@@ -211,8 +238,22 @@ def make_sio(
                     _MAX_PENDING_RESULTS,
                     evictions,
                 )
+        return event, frame
+
+    async def _emit_frame(event: str, frame: dict[str, Any]) -> None:
         with contextlib.suppress(BaseException):
             await sio.emit(event, pack(frame), namespace=RPC_NAMESPACE)
+
+    def _schedule_emit(task: asyncio.Task, call_id: str) -> None:
+        """Done-callback: cache the result synchronously, then emit it from a
+        strongly-referenced task (see `emit_tasks`)."""
+        cached = _cache_task_result(task, call_id)
+        if cached is None:
+            return
+        event, frame = cached
+        emit_task = asyncio.create_task(_emit_frame(event, frame))
+        emit_tasks.add(emit_task)
+        emit_task.add_done_callback(emit_tasks.discard)
 
     def _track_call(call_id: str, task: asyncio.Task) -> None:
         calls[call_id] = task
@@ -235,15 +276,23 @@ def make_sio(
             return {"accepted": True, "call_id": call_id}
 
         task = _start_call(payload, call_id)
+        # Attach the cache+emit callback NOW, not in the timeout branch: the
+        # store must be enqueued in the same completion-callback batch as the
+        # `calls` pop, or a resume racing a completion at the wait budget's
+        # edge observes the id in neither map and misfires ResultUnavailable.
+        # The HTTP-answered path self-acks the cached copy below; the extra
+        # broadcast is one frame nobody is waiting on.
+        task.add_done_callback(lambda t, cid=call_id: _schedule_emit(t, cid))
 
         timeout_s = max(wait_s, 0.0)
         try:
             event, frame = await asyncio.wait_for(asyncio.shield(task), timeout=timeout_s)
         except TimeoutError:
-            task.add_done_callback(
-                lambda t, cid=call_id: asyncio.create_task(_emit_task_result(t, cid))
-            )
             return {"accepted": True, "call_id": call_id}
+
+        # Delivered synchronously in the HTTP response — the host will never
+        # ack this copy, so retire it now rather than pinning a cap slot.
+        pending_results.pop(call_id, None)
 
         if event == "call:result":
             return {"accepted": False, "ok": True, **frame}
@@ -282,9 +331,7 @@ def make_sio(
             return
 
         task = _start_call(payload, call_id)
-        task.add_done_callback(
-            lambda t, cid=call_id: asyncio.create_task(_emit_task_result(t, cid))
-        )
+        task.add_done_callback(lambda t, cid=call_id: _schedule_emit(t, cid))
 
     async def on_cancel(sid: str, data: Any) -> None:
         payload = _u(data)
@@ -306,8 +353,15 @@ def make_sio(
         )
 
     async def on_resume(sid: str, data: Any) -> None:
-        """Replay cached results for the call_ids the host is still
-        waiting on. Called by the host right after (re)connect."""
+        """Resolve the call_ids the host is still waiting on. Called by the
+        host right after (re)connect. Each id reaches a definite terminal
+        state — never silence:
+
+        - a cached result → replayed;
+        - still running → left alone (its result arrives on completion);
+        - no record (evicted under cap, or unknown) → a `call:error` so the
+          host's `remote()` fails instead of hanging forever.
+        """
         payload = _u(data)
         ids = payload.get("call_ids")
         if not isinstance(ids, list):
@@ -316,10 +370,18 @@ def make_sio(
             if not isinstance(cid, str):
                 continue
             cached = pending_results.get(cid)
-            if cached is None:
+            if cached is not None:
+                event, frame = cached
+                await sio.emit(event, pack(frame), to=sid, namespace=RPC_NAMESPACE)
                 continue
-            event, frame = cached
-            await sio.emit(event, pack(frame), to=sid, namespace=RPC_NAMESPACE)
+            if cid in calls:
+                continue
+            await sio.emit(
+                "call:error",
+                pack(_unavailable_error(cid)),
+                to=sid,
+                namespace=RPC_NAMESPACE,
+            )
 
     async def on_ack(sid: str, data: Any) -> None:
         """Host confirms it has consumed the result. Free the slot."""

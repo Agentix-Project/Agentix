@@ -1,7 +1,7 @@
 # Agentix RPC Protocol
 
 The runtime wire contract for `RuntimeClient.remote(fn, *args, **kwargs)`.
-Tests in `tests/test_rpc_protocol.py` enforce these rules.
+Tests in `tests/runtime/test_protocol.py` enforce these rules.
 
 ## Callable Reference
 
@@ -36,7 +36,7 @@ await client.remote(run, seed=42)
 | --- | --- | --- |
 | `GET /health` | health probe | HTTP JSON |
 | `POST /call` | internal short-call fast path | HTTP msgpack |
-| Socket.IO `/rpc` | `c.remote()` RPC | msgpack-wrapped `call` / `call:result` / `call:error` / `cancel` |
+| Socket.IO `/rpc` | `c.remote()` RPC | msgpack-wrapped `call` / `call:result` / `call:error` / `cancel` / `resume` / `ack` |
 | Socket.IO `/trace`, `/log`, `/<plugin>` | side channels | plugin-defined events (msgpack payloads) |
 | worker private pipe | runtime ↔ worker | length-prefixed msgpack frames |
 
@@ -54,10 +54,21 @@ call          {call_id, callable, arguments}
 call:result   {call_id, value}                  # value is pickle.dumps(result)
 call:error    {call_id, error}
 cancel        {call_id}
+resume        {call_ids}                        # host → server on (re)connect
+ack           {call_id}                         # host → server, frees the retained result
 ```
 
 `call_id` correlates request ↔ response. Cancellation produces a
 `call:error` with `error.cancelled=True`.
+
+`resume` and `ack` carry the reliability contract. On every (re)connect the
+host emits `resume` with the `call_ids` it is still awaiting; the server
+resolves each one — a retained terminal state is replayed as its
+`call:result` / `call:error`, a still-running call is left alone, and an
+evicted or unknown `call_id` gets a definite `call:error`
+(`error.type="ResultUnavailable"`) rather than silence, so a reconnecting
+host never hangs. After consuming a result the host emits `ack`, which lets
+the server drop it from its bounded retain buffer (`pending_results`).
 
 Trace, log, and plugin traffic use their own namespaces on the same
 Socket.IO connection. Sandbox plugins emit through `agentix.sio`; the
@@ -95,6 +106,10 @@ away from user subprocesses).
 4. **Worker death closes calls.** If the worker subprocess exits, the
    runtime fails every in-flight call with `WorkerExited` so the
    client never hangs.
+5. **No silent loss.** A `resume` for a `call_id` the runtime no longer
+   holds (its result was evicted under cap, or the id is unknown) gets a
+   definite `call:error` (`error.type="ResultUnavailable"`) — never
+   silence.
 
 ## Error Model
 
@@ -111,8 +126,13 @@ away from user subprocesses).
 
 Client mapping:
 
-- `cancelled=True` → `asyncio.CancelledError`
+- `cancelled=True` → `agentix.CallCancelled` (a `RemoteCallError` subclass —
+  a terminal *server-side* state, distinct from local task cancellation)
+- `type="WorkerDied"` → `agentix.WorkerExited`
 - everything else → `agentix.RemoteCallError`
+
+`try_remote()` returns the same terminal states as a `Result[R]`
+(`Ok(value) | Failed(error)`) instead of raising.
 
 ## Lifecycle
 
