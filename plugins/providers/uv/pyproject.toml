@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentix-provider-uv"
+version = "0.1.0"
+description = "uv-materialized local runtime provider for Agentix (no Docker/Nix bundle)"
+requires-python = ">=3.11"
+dependencies = [
+    # Protocol + dataclasses (`SandboxProvider`, `Sandbox`, `SandboxConfig`,
+    # `SandboxInfo`, `SandboxId`) all live in core agentix.
+    "agentixx",
+    # The provider shells out to `uv` to materialize the runtime venv; depend
+    # on it so the backend works without a system-wide uv install.
+    "uv>=0.5",
+]
+
+# `agentixx` is the monorepo workspace root — used editable, never from PyPI.
+[tool.uv.sources]
+agentixx = { workspace = true }
+
+# `uv sync` makes `providers().get("uv")` resolve — the registry walks this
+# entry-point group. There is no `agentix deploy uv`: this backend materializes
+# the runtime from source via uv, so there is no bundle artifact to deploy.
+[project.entry-points."agentix.provider"]
+uv = "agentix.provider.uv:UvProvider"
+
+[tool.hatch.build.targets.wheel]
+# One file at `agentix/provider/uv.py`. The `agentix` and `agentix/provider`
+# dirs carry no __init__.py here — those belong to core agentix; this wheel
+# installs a sibling into the same namespace.
+packages = ["agentix"]
