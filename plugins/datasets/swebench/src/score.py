@@ -134,13 +134,32 @@ async def _apply_model_patch(patch: str, workdir: str, env: dict[str, str], time
 
 async def _prepare_tests(instance: dict, workdir: str, env: dict[str, str], timeout: float) -> tuple[bool, str]:
     specs = MAP_REPO_VERSION_TO_SPECS[instance["repo"]][instance["version"]]
-    commands = [f"git config --global --add safe.directory {shlex.quote(workdir)}"]
+    safe_dir = f"git config --global --add safe.directory {shlex.quote(workdir)}"
+    code, output, _ = await _run(safe_dir, workdir, env, timeout)
+    logger.debug("$ %s\n%s", safe_dir, output)
+    if code != 0:
+        logger.error("prepare command failed: %s", safe_dir)
+        return False, f"$ {safe_dir}\n{output}"
+
     # Task images bake `pre_install` edits into /testbed's tracked files
     # at build time (sphinx: `sed 's/pytest/pytest -rA/' tox.ini` so the
     # log parser sees per-test lines; astropy: a setuptools pin that the
     # editable reinstall needs). `prepare_env`'s `git reset --hard`
-    # reverts those edits, so re-apply them before install/eval.
-    commands.extend(str(command) for command in specs.get("pre_install", []))
+    # reverts those edits, so re-apply them — best-effort per command:
+    # pre_install is a build-time recipe, and steps that assume
+    # build-time context (matplotlib wgets a qhull tarball into a dir
+    # `git clean` removed) fail harmlessly at eval time because their
+    # products already live in the image's conda env. install/tests
+    # below surface anything genuinely missing.
+    for command in (str(c) for c in specs.get("pre_install", [])):
+        if _apply_export(command, env):
+            continue
+        code, output, _ = await _run(command, workdir, env, timeout, conda=not command.startswith("git "))
+        logger.debug("$ %s\n%s", command, output)
+        if code != 0:
+            logger.warning("pre_install command failed (continuing): %s", command)
+
+    commands = []
     commands.extend(str(command) for command in specs.get("eval_commands", []))
 
     install = str(specs.get("install") or "").strip()
