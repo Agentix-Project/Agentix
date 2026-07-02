@@ -1,0 +1,69 @@
+[build-system]
+requires = ["uv_build>=0.7,<0.9"]
+build-backend = "uv_build"
+
+[project]
+name = "agentix-tito"
+version = "0.1.0"
+description = "Agentix TITO plugin — token-in-token-out session-recording gateway."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [
+  { name = "Agentix maintainers" },
+]
+keywords = ["agentix", "tito", "agentic", "chat-template", "gateway", "rollout"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Framework :: FastAPI",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# The gateway tokenizes prompts itself (the native TITO engine — see
+# agentix.tito.engine), so transformers + tokenizers + jinja2 are real runtime
+# deps. They are isolated to THIS plugin — agentix core / abridge never pull
+# them. No sglang dependency: the engine defines the one pydantic `Tool` type it
+# needs itself.
+dependencies = [
+  # As an `agentix.tito` plugin it lives in the agentix namespace, so importing it
+  # runs agentix core's __init__ — hence the agentixx dep (pure plumbing: socketio,
+  # msgpack, fastapi; zero ML/training-framework code).
+  "agentixx",
+  "fastapi>=0.110",
+  "httpx>=0.27",
+  "pydantic>=2",
+  "uvicorn>=0.29",
+  "transformers>=4.44",
+  "tokenizers>=0.19",
+  "jinja2>=3.1",
+  "huggingface-hub>=0.23",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+[project.urls]
+Homepage = "https://github.com/Agentix-Project/Agentix"
+
+[project.scripts]
+agentix-tito = "agentix.tito.cli:main"
+
+[tool.uv.sources]
+agentixx = { workspace = true }
+
+# uv_build, like the other plugins: ship under the `agentix.tito` namespace.
+[tool.uv.build-backend]
+module-name = "agentix.tito"
+module-root = ""
+namespace = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"

@@ -84,6 +84,7 @@ members = [
     "plugins/abridge",
     "plugins/runner",
     "plugins/runtime-basic",
+    "plugins/tito",
     "plugins/trace-otel",
     "plugins/agents/*",
     "plugins/datasets/*",
@@ -122,6 +123,7 @@ include = [
     "plugins/providers/daytona/agentix",
     "plugins/providers/e2b/agentix",
     "plugins/runtime-basic/agentix",
+    "plugins/tito/agentix",
     "plugins/trace-otel/agentix",
 ]
 exclude = ["**/__pycache__", "**/.venv", ".venv", "**/build"]
@@ -143,6 +145,7 @@ extraPaths = [
     "plugins/providers/daytona",
     "plugins/providers/e2b",
     "plugins/runtime-basic",
+    "plugins/tito",
     "plugins/trace-otel",
 ]
 typeCheckingMode = "basic"
