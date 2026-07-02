@@ -18,18 +18,24 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+      - name: check workspace lock
+        run: |
+          uv lock --check
+          uv sync --locked --dry-run --all-packages --all-extras
       # The whole uv workspace — core + every plugin member. Plugin
       # tests (e.g. agentix.nix discovery) need the members installed.
       - name: sync workspace
-        run: uv sync --all-packages --all-extras
+        run: uv sync --locked --all-packages --all-extras
       - name: lint
         run: uv run ruff check .
       - name: types
         run: uv run pyright
       # `addopts = -m "not e2e"` (pyproject) keeps the bundle build out
       # of this job — it runs in `e2e` below.
-      - name: unit tests
-        run: uv run pytest tests/ -v
+      # Keep examples out of this invocation: they are standalone projects
+      # with their own dependencies and locks, not uv workspace members.
+      - name: core + plugin unit tests
+        run: uv run pytest tests/ plugins/ -v -rs
 
   e2e:
     name: build e2e (${{ matrix.source_platform }} to ${{ matrix.target_platform }})

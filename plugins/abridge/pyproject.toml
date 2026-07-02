@@ -6,6 +6,9 @@ requires-python = ">=3.11"
 dependencies = [
     "agentixx",
     "fastapi>=0.115",
+    # `Forward` ferries the agent's request to a sidecar over httpx; the
+    # host `Sidecar` helper polls the sidecar's health endpoint with it.
+    "httpx>=0.27",
     # Plain `uvicorn`, not `uvicorn[standard]`: the tunnel is HTTP POST
     # only (no WebSocket), so we don't need `websockets` (and its
     # deprecation noise), `httptools`, `uvloop`, etc.

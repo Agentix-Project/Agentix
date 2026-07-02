@@ -16,10 +16,12 @@ agent  ──(HTTP POST /<path>)──▶  sandbox tunnel (this module, sandbox 
 agent  ◀──(HTTP response)──  sandbox tunnel writes back verbatim
 ```
 
-abridge's core is shape- and protocol-blind: it's a tunnel that ferries
-HTTP requests by URL path, nothing more. *What* to do with the captured
-request (parse, translate, route, replay, mock) lives in user-supplied
-handler classes via `@on(path)`-decorated methods. The bundled
+abridge's core is schema-agnostic: it accepts whitelisted HTTP POST paths,
+decodes each JSON-object body, and dispatches that object to a host handler.
+It is not an HTTP-transparent proxy — method, query, headers, non-object
+JSON, and original JSON encoding are not carried across the tunnel. *What*
+to do with a decoded request (translate, route, replay, mock) lives in
+user-supplied handler classes via `@on(path)`-decorated methods. The bundled
 `clients/` package ships LLM forwarders (`OpenAIClient`,
 `AnthropicClient`, …), but the same machinery handles any HTTP
 protocol that fits the request/response shape — e.g., MCP forwarding
@@ -86,11 +88,11 @@ class Request:
     """One inbound HTTP call captured by the sandbox tunnel.
 
     `path` is the URL path the agent hit (matches the `@on(...)` value
-    that routed this request); `body` is the raw JSON the agent sent.
-    Nothing else — the tunnel ferries the body verbatim and stamps no
-    headers. Rollout identity (session_id, per-call request_id) lives
-    on the `Client` instance, which adds `x-session-id` /
-    `x-request-id` to the upstream call itself.
+    that routed this request); `body` is the decoded JSON object. Nothing
+    else is retained — the tunnel drops the HTTP method, query, headers,
+    non-object JSON, and source encoding. Rollout identity (session_id,
+    per-call request_id) lives on the `Client` instance, which may add
+    `x-session-id` / `x-request-id` to an upstream call itself.
     """
 
     path: str
@@ -101,13 +103,13 @@ class Request:
 class ClientResponse:
     """What an `@on` handler returns to the bridge.
 
-    `body` is written to the agent's HTTP socket verbatim with
-    `media_type` as the Content-Type and `status_code` as the HTTP
-    status. Two constructors cover the common cases:
+    The buffered `body` is written to the agent's HTTP response with
+    `media_type` as the Content-Type and `status_code` as the HTTP status.
+    Two constructors cover the common cases:
 
       * `ClientResponse.json(dict)` — plain JSON response.
-      * `ClientResponse.sse(bytes, ...)` — pre-rendered SSE blob for
-        streaming agents (e.g. Anthropic SDK with `stream=true`).
+      * `ClientResponse.sse(bytes, ...)` — a complete, pre-rendered SSE
+        blob for SDK compatibility. It is buffered, not chunk-streamed.
     """
 
     body: bytes
@@ -146,8 +148,14 @@ class Client(Protocol):
     against `Client` doesn't validate handler presence (that's
     `Proxy.__init__`'s job at construction time). The name exists so
     `Proxy(*clients: Client)` reads as "pass handler classes here" rather
-    than `*clients: object`.
+    than `*clients: object`. A client may additionally implement async
+    `aclose()`; `Proxy.stop()` closes such clients once per lifecycle.
     """
+
+
+@runtime_checkable
+class _AsyncCloseable(Protocol):
+    def aclose(self) -> Awaitable[None]: ...
 
 
 # Preserves the decorated method's exact signature for IDE / pyright —
@@ -220,6 +228,26 @@ def _collect_handlers(client: Client) -> dict[str, Handler]:
                     f"({type(client).__name__})"
                 )
             handlers[path] = getattr(client, name)
+
+    # Dynamic routes: a client may expose `abridge_routes() -> dict[str,
+    # Handler]` for paths chosen at construction time (e.g. `Forward(target,
+    # paths=[...])`), which the class-level `@on` tag can't express. They
+    # compose with `@on` handlers under the same duplicate-path rule.
+    dynamic = getattr(client, "abridge_routes", None)
+    if callable(dynamic):
+        routes = dynamic()
+        if not isinstance(routes, dict):
+            raise TypeError(
+                f"{type(client).__name__}.abridge_routes() must return a dict[str, handler]"
+            )
+        for path, handler in routes.items():
+            if not isinstance(path, str) or not path.startswith("/"):
+                raise ValueError(f"abridge_routes path must start with '/'; got {path!r}")
+            if path in handlers:
+                raise ValueError(
+                    f"duplicate handler for path {path!r} ({type(client).__name__})"
+                )
+            handlers[path] = handler
     return handlers
 
 
@@ -334,11 +362,10 @@ def _make_forwarder(
     """One FastAPI handler per path. Closes over `path` so the SIO event
     name (= path) is fixed per route.
 
-    The wire payload is just the agent's request body — no envelope, no
-    headers. Identity (session_id / record_id) belongs to the host-side
-    `Client`, which stamps `x-session-id` / `x-request-id` on the
-    upstream HTTP call it issues. The tunnel never sees them — it's a
-    pure byte ferry.
+    The wire payload is the decoded JSON-object body — no HTTP metadata.
+    Identity (session_id / record_id) belongs to the host-side `Client`,
+    which may stamp `x-session-id` / `x-request-id` on an upstream HTTP
+    call. This tunnel does not preserve the original request bytes.
     """
 
     async def forward(request: FastAPIRequest) -> Response:
@@ -347,7 +374,8 @@ def _make_forwarder(
         try:
             # SIO event name IS the path; the host's `Proxy` has a
             # matching handler registered under the same name. The wire
-            # payload is just the body — no wrapping envelope, no headers.
+            # payload is just the decoded object — no wrapping envelope
+            # beyond request correlation and no HTTP metadata.
             result = await asyncio.wait_for(
                 ns.request(path, body), timeout=request_timeout
             )
@@ -429,8 +457,9 @@ class Proxy(AsyncClientNamespace):
 
     `session(sandbox)` is the recommended entry: registers the host
     namespace, starts the in-sandbox tunnel, yields a `TunnelHandle`,
-    and tears it all down on exit. Use `start/stop` when you need
-    explicit lifecycle control. abridge core does no tracing — open
+    then stops the tunnel and closes clients that implement `aclose()`.
+    Use `start/stop` when you need explicit lifecycle control. abridge
+    core does no tracing — open
     your own `trace.span(...)` around the session if you want OTel
     grouping; the bundled clients populate it via `populate_*_span`.
     """
@@ -440,6 +469,8 @@ class Proxy(AsyncClientNamespace):
         if not clients:
             raise ValueError("Proxy requires at least one client with @on-decorated handlers")
         self._handle: TunnelHandle | None = None
+        self._clients = clients
+        self._clients_closed = False
 
         handlers: dict[str, Handler] = {}
         for client in clients:
@@ -547,25 +578,76 @@ class Proxy(AsyncClientNamespace):
     async def start(self, sandbox: Sandbox) -> TunnelHandle:
         """Register this `Proxy` as a host-side namespace, start the
         in-sandbox tunnel with `self.paths` as the whitelist, and return
-        the `TunnelHandle` (loopback URL + port). Idempotent only per
-        lifecycle pair — a `start` without `stop` leaks the tunnel."""
-        sandbox.register_namespace(self)
-        self._handle = await sandbox.remote(_start_tunnel, paths=list(self.paths))
-        return self._handle
+        the `TunnelHandle` (loopback URL + port).
+
+        Calling `start` again while this proxy is active returns the current
+        handle instead of leaking another tunnel. If startup fails, clients
+        with `aclose()` are still closed.
+        """
+        if self._handle is not None:
+            return self._handle
+
+        self._clients_closed = False
+        try:
+            sandbox.register_namespace(self)
+            handle = await sandbox.remote(_start_tunnel, paths=list(self.paths))
+        except BaseException:
+            try:
+                await self._close_clients()
+            except Exception:  # noqa: BLE001 - preserve the startup failure
+                logger.exception("abridge failed to close clients after tunnel startup failed")
+            raise
+
+        self._handle = handle
+        return handle
 
     async def stop(self, sandbox: Sandbox) -> None:
-        if self._handle is None:
+        """Stop the active tunnel and close lifecycle-aware clients.
+
+        Safe to call more than once. Client cleanup also runs when no tunnel
+        was established, which makes an explicit `stop` safe after a failed
+        or partially completed startup.
+        """
+        handle = self._handle
+        self._handle = None
+        if handle is None:
+            await self._close_clients()
             return
+
         try:
-            await sandbox.remote(_stop_tunnel, handle=self._handle)
-        finally:
-            self._handle = None
+            await sandbox.remote(_stop_tunnel, handle=handle)
+        except BaseException:
+            try:
+                await self._close_clients()
+            except Exception:  # noqa: BLE001 - preserve the tunnel stop failure
+                logger.exception("abridge failed to close clients after tunnel stop failed")
+            raise
+        await self._close_clients()
+
+    async def _close_clients(self) -> None:
+        if self._clients_closed:
+            return
+        self._clients_closed = True
+
+        errors: list[Exception] = []
+        for client in self._clients:
+            if not isinstance(client, _AsyncCloseable):
+                continue
+            try:
+                await client.aclose()
+            except Exception as exc:  # noqa: BLE001 - close every owned client
+                errors.append(exc)
+        if errors:
+            raise ExceptionGroup("failed to close abridge clients", errors)
 
     @contextlib.asynccontextmanager
     async def session(self, sandbox: Sandbox) -> AsyncIterator[TunnelHandle]:
-        """`start` + `stop`-on-exit sugar. Open your own `trace.span(...)`
-        around this CM if you want per-rollout grouping in OTel — abridge
-        core leaves tracing entirely to its clients and to caller code."""
+        """`start` + `stop`-on-exit sugar, including client cleanup.
+
+        Open your own `trace.span(...)` around this CM if you want
+        per-rollout grouping in OTel — abridge core leaves tracing entirely
+        to its clients and to caller code.
+        """
         handle = await self.start(sandbox)
         try:
             yield handle

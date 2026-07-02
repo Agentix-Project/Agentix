@@ -8,12 +8,17 @@ hand-written per-instance orchestration.
   `/testbed` to the base commit (`agentix.plugins.datasets.swe.prepare_env`),
   and scores a patch with the official harness
   (`agentix.plugins.datasets.swe.score`).
-- `ClaudeCodeAgent` starts the in-sandbox Anthropic<->OpenAI bridge, runs the
-  `claude` CLI against it, and extracts the diff with `agentix.bash.run`. The
-  real provider call stays on the host (the bridge gateway owns the
-  `openai.AsyncOpenAI` client).
+- `ClaudeCodeAgent` opens an abridge `Proxy` session on the sandbox, runs the
+  `claude` CLI against the in-sandbox tunnel, and extracts the diff with
+  `agentix.bash.run`. The real provider call stays on the host —
+  `AnthropicFromOpenAIClient` owns the upstream OpenAI-compatible call and the
+  Anthropic<->OpenAI translation.
 - `--ground-truth` swaps in `GroundTruthAgent`, which submits each row's gold
   patch — reusing the identical scoring path for harness validation.
+- `--num-shards` / `--shard-index` partition the selected split round-robin so
+  CI can spread a full run across parallel jobs. An empty shard (more shards
+  than rows) exits 0. `--instance-id` is an explicit selection and cannot be
+  combined with sharding.
 
 Run as::
 
@@ -26,19 +31,22 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import sys
 from pathlib import Path
 from typing import Any
 
 import agentix.agents.claude_code as cc
-import agentix.bridge.anthropic
 import agentix.plugins.datasets.swe as swe
 from agentix.bash import run as bash_run
+from agentix.bridge import Proxy
+from agentix.bridge.clients import ANTHROPIC_PLACEHOLDER_API_KEY, AnthropicFromOpenAIClient
 from agentix.provider.docker import DockerProvider
 from agentix.runner import AgentResult, run_rollouts
 from datasets import load_dataset
-from openai import AsyncOpenAI
+
+logger = logging.getLogger("run_swe_rollouts")
 
 WORKDIR = "/testbed"
 _DIFF_CMD = (
@@ -119,28 +127,47 @@ class ClaudeCodeAgent:
 
     async def solve(self, sandbox: Any, instance: dict[str, Any], *, model: str | None) -> AgentResult:
         response_model = model or self._response_model
-        gateway = agentix.bridge.anthropic.OpenAIGateway(
-            client=AsyncOpenAI(base_url=self._openai_base_url, api_key=self._openai_api_key),
-            upstream_model=self._upstream_model,
+        # A fresh client per instance keeps abridge's session grouping
+        # per-rollout; the real upstream key never enters the sandbox.
+        # `Proxy.stop()` closes the client via its `aclose()`.
+        client = AnthropicFromOpenAIClient(
+            base_url=self._openai_base_url,
+            api_key=self._openai_api_key,
+            model=self._upstream_model,
         )
-        sandbox.register_namespace(gateway)
+        proxy = Proxy(client)
 
-        svc = await sandbox.remote(agentix.bridge.anthropic.start_service, response_model=response_model)
-        result = await sandbox.remote(
-            cc.run,
-            instruction=instance["problem_statement"],
-            workdir=WORKDIR,
-            timeout=self._cc_timeout,
-            max_turns=self._max_turns,
-            anthropic_base_url=svc.url,
-            anthropic_model=response_model,
-        )
-        diff = await sandbox.remote(bash_run, command=_DIFF_CMD)
+        # `dataset.setup(...)` already connected this sandbox's RuntimeClient,
+        # and a host-side namespace can only join before the connection is
+        # established — recycle the connection (idempotent; the container and
+        # its state survive) so `/abridge` is part of the next connect.
+        await sandbox.aclose()
+        handle = await proxy.start(sandbox)
         try:
-            await sandbox.remote(agentix.bridge.anthropic.stop_service, handle=svc)
-        except Exception:
-            pass
-        return AgentResult(patch=diff.stdout, exit_code=result.exit_code)
+            result = await sandbox.remote(
+                cc.run,
+                cc.ClaudeCodeInput(
+                    instruction=instance["problem_statement"],
+                    model=response_model,
+                    workdir=WORKDIR,
+                    timeout=self._cc_timeout,
+                    max_turns=self._max_turns,
+                    base_url=handle.url,
+                    api_key=ANTHROPIC_PLACEHOLDER_API_KEY,
+                ),
+            )
+            # Extract the diff before teardown: a stop failure below must not
+            # cost us an already-computed patch.
+            diff = await sandbox.remote(bash_run, command=_DIFF_CMD)
+        finally:
+            try:
+                await proxy.stop(sandbox)
+            except Exception:
+                # Teardown is best-effort — the sandbox is discarded right
+                # after this rollout, and a stop failure must not mask the
+                # agent's real error or the result computed above.
+                logger.exception("[%s] abridge teardown failed", instance.get("instance_id"))
+        return AgentResult(patch=diff.stdout, exit_code=result.returncode)
 
 
 class GroundTruthAgent:
@@ -164,10 +191,12 @@ def _select_rows(args: argparse.Namespace) -> list[dict[str, Any]]:
             raise SystemExit(f"unknown --instance-id value(s): {', '.join(missing)}")
         return rows
 
-    limit = args.limit
-    if limit is None:
-        limit = len(dataset) if args.ground_truth else 1
-    return [dict(dataset[i]) for i in range(min(limit, len(dataset)))]
+    # Round-robin sharding partitions the split deterministically so CI can
+    # spread a full run across parallel jobs; --limit then applies per shard.
+    # Slicing the index range keeps this lazy — only selected rows materialize.
+    indices = range(args.shard_index, len(dataset), args.num_shards)
+    limit = args.limit if args.limit is not None else (len(indices) if args.ground_truth else 1)
+    return [dict(dataset[i]) for i in indices[:limit]]
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -182,6 +211,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--split", default="test")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--instance-id", action="append", default=None)
+    parser.add_argument("--num-shards", type=int, default=1)
+    parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--ground-truth", action="store_true")
     parser.add_argument("--fail-on-unresolved", action="store_true")
     parser.add_argument("--concurrency", type=int, default=1)
@@ -201,12 +232,28 @@ async def main(argv: list[str] | None = None) -> int:
     if args.concurrency < 1:
         print("error: --concurrency must be >= 1", file=sys.stderr)
         return 2
+    if args.num_shards < 1 or not 0 <= args.shard_index < args.num_shards:
+        print("error: need --num-shards >= 1 and 0 <= --shard-index < --num-shards", file=sys.stderr)
+        return 2
+    if args.limit is not None and args.limit < 1:
+        print("error: --limit must be >= 1", file=sys.stderr)
+        return 2
+    if args.instance_id and (args.num_shards != 1 or args.shard_index != 0):
+        print("error: --instance-id cannot be combined with --num-shards/--shard-index", file=sys.stderr)
+        return 2
     if not args.ground_truth and not args.openai_api_key:
         print("error: --openai-api-key (or OPENAI_API_KEY) is required", file=sys.stderr)
         return 2
 
     rows = _select_rows(args)
     if not rows:
+        if args.num_shards > 1:
+            # Legitimate when shards outnumber rows: this job has no slice.
+            out_dir = Path(args.out)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "summary.json").write_text("[]")
+            print(f"shard {args.shard_index}/{args.num_shards} is empty; nothing to do")
+            return 0
         print("error: no instances selected", file=sys.stderr)
         return 2
 

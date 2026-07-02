@@ -111,3 +111,11 @@ async def test_count_tokens_handled_locally_without_upstream(monkeypatch) -> Non
     assert isinstance(result, ClientResponse)
     assert json.loads(result.body) == {"input_tokens": 4}
     create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_aclose_closes_upstream_sdk_client() -> None:
+    adapter = AnthropicFromOpenAIClient(api_key="k")
+    assert not adapter._client.is_closed()
+    await adapter.aclose()
+    assert adapter._client.is_closed()
