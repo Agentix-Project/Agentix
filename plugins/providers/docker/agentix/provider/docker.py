@@ -318,6 +318,10 @@ def _is_transient_docker_error(stderr: bytes) -> bool:
         for needle in (
             "failed to fetch oauth token",
             "unexpected status from post request",
+            # Registry-side 5xx on pull, e.g. "received unexpected HTTP
+            # status: 502 Bad Gateway" — a Docker Hub blip, not a missing
+            # image (those say "not found" / "manifest unknown").
+            "received unexpected http status",
             "tls handshake timeout",
             "connection reset by peer",
             "i/o timeout",
