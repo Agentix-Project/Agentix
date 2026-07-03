@@ -1,0 +1,7 @@
+{"message": {"content": [], "id": "msg_ea5061d1-e15f-4204-864f-1d0cddc75b9c", "model": "claude-opus-4-7", "role": "assistant", "stop_reason": null, "stop_sequence": null, "type": "message", "usage": {"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "input_tokens": 0, "output_tokens": 0}}, "type": "message_start"}
+{"content_block": {"text": "", "type": "text"}, "index": 0, "type": "content_block_start"}
+{"delta": {"thinking": "let me think...", "type": "thinking_delta"}, "index": 0, "type": "content_block_delta"}
+{"delta": {"text": "Done.", "type": "text_delta"}, "index": 0, "type": "content_block_delta"}
+{"index": 0, "type": "content_block_stop"}
+{"delta": {"stop_reason": "end_turn"}, "type": "message_delta", "usage": {"input_tokens": 0, "output_tokens": 0}}
+{"type": "message_stop"}

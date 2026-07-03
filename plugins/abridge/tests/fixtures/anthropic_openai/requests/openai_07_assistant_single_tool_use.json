@@ -1,0 +1,21 @@
+{
+  "max_tokens": 100,
+  "messages": [
+    {
+      "content": null,
+      "role": "assistant",
+      "thinking_blocks": null,
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"city\": \"Paris\"}",
+            "name": "get_weather"
+          },
+          "id": "toolu_1",
+          "type": "function"
+        }
+      ]
+    }
+  ],
+  "model": "gpt-4o-mini"
+}

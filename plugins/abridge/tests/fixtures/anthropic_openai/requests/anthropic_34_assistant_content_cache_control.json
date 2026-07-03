@@ -1,0 +1,26 @@
+{
+  "max_tokens": 100,
+  "messages": [
+    {
+      "content": "ok",
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "text": "remembered answer",
+          "type": "text"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": "again",
+      "role": "user"
+    }
+  ],
+  "model": "gpt-4o-mini"
+}

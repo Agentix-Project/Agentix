@@ -1,0 +1,60 @@
+{
+  "max_tokens": 100,
+  "messages": [
+    {
+      "content": "ok",
+      "role": "user"
+    }
+  ],
+  "model": "gpt-4o-mini",
+  "tools": [
+    {
+      "description": "Find flights",
+      "input_schema": {
+        "properties": {
+          "departure_date": {
+            "format": "date",
+            "type": "string"
+          },
+          "destination": {
+            "type": "string"
+          },
+          "origin": {
+            "type": "string"
+          },
+          "passengers": {
+            "items": {
+              "properties": {
+                "age": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "class": {
+                  "enum": [
+                    "economy",
+                    "business",
+                    "first"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "age",
+                "class"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "origin",
+          "destination",
+          "departure_date"
+        ],
+        "type": "object"
+      },
+      "name": "search_flights"
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "max_tokens": 100,
+  "messages": [
+    {
+      "content": "a",
+      "role": "tool",
+      "tool_call_id": "t1"
+    },
+    {
+      "content": "b",
+      "role": "tool",
+      "tool_call_id": "t2"
+    },
+    {
+      "content": "c",
+      "role": "tool",
+      "tool_call_id": "t3"
+    }
+  ],
+  "model": "gpt-4o-mini"
+}

@@ -1,0 +1,14 @@
+{
+  "max_tokens": 100,
+  "messages": [
+    {
+      "content": "Be concise.",
+      "role": "system"
+    },
+    {
+      "content": "hi",
+      "role": "user"
+    }
+  ],
+  "model": "gpt-4o-mini"
+}

@@ -1,0 +1,29 @@
+{
+  "max_tokens": 100,
+  "messages": [
+    {
+      "content": null,
+      "role": "assistant",
+      "thinking_blocks": null,
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"a\": 1}",
+            "name": "f1"
+          },
+          "id": "tu_a",
+          "type": "function"
+        },
+        {
+          "function": {
+            "arguments": "{\"b\": 2}",
+            "name": "f2"
+          },
+          "id": "tu_b",
+          "type": "function"
+        }
+      ]
+    }
+  ],
+  "model": "gpt-4o-mini"
+}

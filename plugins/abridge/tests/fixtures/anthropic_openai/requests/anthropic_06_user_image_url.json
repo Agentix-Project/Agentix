@@ -1,0 +1,18 @@
+{
+  "max_tokens": 100,
+  "messages": [
+    {
+      "content": [
+        {
+          "source": {
+            "type": "url",
+            "url": "https://example.com/x.png"
+          },
+          "type": "image"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "gpt-4o-mini"
+}
