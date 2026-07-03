@@ -69,9 +69,22 @@ def test_message_matches_collapses_falsy_sentinels():
     assert message_matches({"role": "a", "content": ""}, {"role": "a", "content": None})
     assert message_matches({"role": "a", "tool_calls": []}, {"role": "a", "tool_calls": None})
     assert message_matches({"role": "u", "content": "x"}, {"role": "u", "content": "x", "extra": 1})
-    # reasoning_content "\n\n" is non-falsy → not collapsed (the bug we hit)
-    assert not message_matches({"role": "a", "reasoning_content": "\n\n"}, {"role": "a", "reasoning_content": None})
+    # reasoning "\n\n" vs "\n" is non-falsy whitespace → not collapsed (the bug we hit)
+    assert not message_matches({"role": "a", "reasoning_content": "\n\n"}, {"role": "a", "reasoning_content": "\n"})
     assert not message_matches({"role": "u", "content": "x"}, {"role": "t", "content": "x"})
+
+
+def test_message_matches_reasoning_tolerates_absence_and_key_dialect():
+    """Reasoning is model-generated and routinely dropped on echo
+    (openai-python keeps only the standard fields), and lives under
+    `reasoning_content` (sglang/DeepSeek) or `reasoning` (vLLM) — absence on
+    either side matches; two present-but-different values do not."""
+    stored = {"role": "assistant", "content": "x", "reasoning": "why"}
+    assert message_matches(stored, {"role": "assistant", "content": "x"})
+    assert message_matches(stored, {"role": "assistant", "content": "x", "reasoning": "why"})
+    assert message_matches(stored, {"role": "assistant", "content": "x", "reasoning_content": "why"})
+    assert not message_matches(stored, {"role": "assistant", "content": "x", "reasoning_content": "other"})
+    assert message_matches({"role": "assistant", "content": "x", "reasoning_content": "why"}, stored)
 
 
 def test_append_only_enforced():

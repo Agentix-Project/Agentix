@@ -1,18 +1,18 @@
 """Backend pool — route OpenAI-compatible requests across N base URLs.
 
-The TITO Gateway accepts one *or more* OpenAI-compatible backend URLs
-(sglang replicas — the token-recording chat flow needs sglang's ``meta_info``
-extension; the raw proxy routes work with any OpenAI-compatible server) and
-forwards each request to one of them. This is the routing layer, independent
-of TITO tokenization, so it is unit-tested on its own with no model in the
-loop.
+The TITO Gateway accepts one *or more* OpenAI-compatible backend URLs —
+replicas of ONE backend kind (the token-recording chat flow speaks a
+kind-specific token dialect, see ``engine.upstream``; the raw proxy routes
+work with any OpenAI-compatible server) — and forwards each request to one of
+them. This is the routing layer, independent of TITO tokenization, so it is
+unit-tested on its own with no model in the loop.
 
 Policy:
   - ``sticky`` (default): each ``session_id`` is pinned to one backend,
     chosen round-robin among healthy backends on first sight and then
     remembered. A multi-turn rollout reuses one replica's prefix KV-cache,
-    which is the right default for TITO. (TITO sends explicit ``input_ids``,
-    so any replica *can* serve any turn — stickiness is a cache-locality
+    which is the right default for TITO. (TITO sends explicit prompt token
+    ids, so any replica *can* serve any turn — stickiness is a cache-locality
     optimization, not a correctness requirement.)
   - ``round_robin``: spread every request across healthy backends.
 

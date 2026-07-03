@@ -28,6 +28,7 @@ class TokenizationError(SessionError):
 
 
 class UpstreamResponseError(SessionError):
-    """The upstream sglang response is invalid or unexpected (missing meta_info, etc.)."""
+    """The upstream backend response is invalid or unexpected (missing
+    meta_info / token_ids, malformed logprobs, etc.)."""
 
     status_code: int = 502

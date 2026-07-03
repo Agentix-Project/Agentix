@@ -35,6 +35,12 @@ def _add_serve_arguments(parser: argparse.ArgumentParser) -> None:
         help="OpenAI-compatible backend URL to proxy to; repeat for a multi-replica pool.",
     )
     parser.add_argument(
+        "--backend-kind",
+        choices=["sglang", "vllm"],
+        default="sglang",
+        help="Token-exact dialect the backend speaks: sglang (input_ids + meta_info) or vllm (>= 0.24.0).",
+    )
+    parser.add_argument(
         "--routing-policy",
         choices=["sticky", "round_robin"],
         default="sticky",
@@ -83,6 +89,7 @@ def _serve(args: argparse.Namespace) -> int:
         hf_checkpoint=args.hf_checkpoint,
         backend_url=urls[0] if len(urls) == 1 else None,
         backend_urls=urls if len(urls) > 1 else None,
+        backend_kind=args.backend_kind,
         routing_policy=args.routing_policy,
         trust_remote_code=args.trust_remote_code,
         chat_template_path=args.chat_template_path,

@@ -135,3 +135,39 @@ def test_from_cli_values_maps_fields():
 def test_invalid_append_role_fails():
     with pytest.raises(ValueError, match="unsupported tito append roles"):
         TITOGatewayConfig(hf_checkpoint="model", tito_allowed_append_roles=("assistant",))
+
+
+def test_backend_kind_defaults_to_sglang_and_rejects_unknown():
+    assert TITOGatewayConfig(hf_checkpoint="model").backend_kind == "sglang"
+    assert TITOGatewayConfig(hf_checkpoint="model", backend_kind="vllm").backend_kind == "vllm"
+    with pytest.raises(ValueError, match="backend_kind"):
+        TITOGatewayConfig(hf_checkpoint="model", backend_kind="tgi")
+
+
+def test_backend_kind_reaches_session_args():
+    config = TITOGatewayConfig.from_cli_values(
+        hf_checkpoint="model",
+        backend_url="http://backend",
+        backend_kind="vllm",
+        chat_template_path=None,
+        tito_model="default",
+        tito_allowed_append_roles=["tool"],
+        session_server_ip="127.0.0.1",
+        session_server_port=30000,
+        router_timeout=30,
+    )
+    assert config.backend_kind == "vllm"
+    assert config.as_session_args().backend_kind == "vllm"
+
+
+def test_vllm_base_url_env_is_recognized_after_sglang(monkeypatch):
+    env = {"VLLM_BASE_URL": "http://vllm.example:8000"}
+    assert (
+        discovery.discover_backend_url(env=env, probe_candidates=())
+        == "http://vllm.example:8000"
+    )
+    env["SGLANG_BASE_URL"] = "http://sglang.example:8000"
+    assert (
+        discovery.discover_backend_url(env=env, probe_candidates=())
+        == "http://sglang.example:8000"
+    )
