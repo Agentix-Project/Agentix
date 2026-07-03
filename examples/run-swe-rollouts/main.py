@@ -140,6 +140,7 @@ class ClaudeCodeAgent:
         response_model: str,
         cc_timeout: float,
         max_turns: int | None,
+        upstream_params: dict[str, Any] | None = None,
     ) -> None:
         self._openai_base_url = openai_base_url
         self._openai_api_key = openai_api_key
@@ -147,6 +148,7 @@ class ClaudeCodeAgent:
         self._response_model = response_model
         self._cc_timeout = cc_timeout
         self._max_turns = max_turns
+        self._upstream_params = upstream_params
 
     async def solve(self, sandbox: Any, instance: dict[str, Any], *, model: str | None) -> AgentResult:
         response_model = model or self._response_model
@@ -157,6 +159,7 @@ class ClaudeCodeAgent:
             base_url=self._openai_base_url,
             api_key=self._openai_api_key,
             model=self._upstream_model,
+            upstream_params=self._upstream_params,
         )
         proxy = Proxy(client)
 
@@ -265,6 +268,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--openai-base-url", default=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"))
     parser.add_argument("--openai-api-key", default=os.environ.get("OPENAI_API_KEY", ""))
     parser.add_argument("--upstream-model", default=os.environ.get("UPSTREAM_MODEL", "gpt-4o-mini"))
+    parser.add_argument(
+        "--upstream-params",
+        default=os.environ.get("UPSTREAM_PARAMS"),
+        help=(
+            "JSON object merged into every upstream call, overriding what the "
+            'agent sent — e.g. \'{"reasoning_effort": "medium", "temperature": 1.0, "top_p": 0.95}\''
+        ),
+    )
     parser.add_argument("--response-model", default=os.environ.get("RESPONSE_MODEL", "claude-3-5-sonnet-latest"))
     parser.add_argument("--max-turns", type=int, default=None)
     parser.add_argument("--cc-timeout", type=float, default=1800)
@@ -290,6 +301,16 @@ async def main(argv: list[str] | None = None) -> int:
     if not args.ground_truth and not args.openai_api_key:
         print("error: --openai-api-key (or OPENAI_API_KEY) is required", file=sys.stderr)
         return 2
+    upstream_params: dict[str, Any] | None = None
+    if args.upstream_params:
+        try:
+            upstream_params = json.loads(args.upstream_params)
+        except json.JSONDecodeError as exc:
+            print(f"error: --upstream-params is not valid JSON: {exc}", file=sys.stderr)
+            return 2
+        if not isinstance(upstream_params, dict):
+            print("error: --upstream-params must be a JSON object", file=sys.stderr)
+            return 2
 
     rows = _select_rows(args)
     if not rows:
@@ -320,6 +341,7 @@ async def main(argv: list[str] | None = None) -> int:
             response_model=args.response_model,
             cc_timeout=args.cc_timeout,
             max_turns=args.max_turns,
+            upstream_params=upstream_params,
         )
 
     out_dir = Path(args.out)

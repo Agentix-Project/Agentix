@@ -32,6 +32,11 @@ BUNDLE=$(uv run agentix deploy docker dist/run-swe-rollouts.bundle.tar --platfor
 OPENAI_BASE_URL=https://example.com/v1 OPENAI_API_KEY=sk-... UPSTREAM_MODEL=your-model \
 uv run python main.py --bundle "$BUNDLE" --limit 5 --concurrency 4
 
+# Force sampling / reasoning params onto every upstream call (overrides
+# whatever the agent sent; also reads the UPSTREAM_PARAMS env var):
+uv run python main.py --bundle "$BUNDLE" --limit 5 \
+    --upstream-params '{"reasoning_effort": "medium", "temperature": 1.0, "top_p": 0.95}'
+
 # Ground-truth harness check (no agent, no key needed):
 uv run python main.py --bundle "$BUNDLE" --ground-truth --fail-on-unresolved
 
