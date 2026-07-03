@@ -34,17 +34,17 @@ Scope: this guards the host-side decode of sandbox return values only
 arguments and context stays plain pickle — that is the trusted host→sandbox
 direction.
 
-First-party types (`agentix.*`) are trusted by default: the framework and its
-plugins build the bundle and run the sandbox, so their own return types
-(`TunnelHandle`, `BashResult`, agent results, …) are part of the trusted
-computing base. The boundary defends against a *workload's* return value, and a
-workload's own types are not `agentix.*` — they stay opt-in.
+Only the exact first-party value types listed in `SAFE_TYPES` are trusted by
+default. The framework and its plugins build the bundle and run the sandbox,
+so these reviewed return types (`TunnelHandle`, `BashResult`, agent results,
+…) are part of the trusted computing base. Other first-party globals and a
+workload's own types stay opt-in.
 
 Extending / relaxing:
 
-  * `allow_module(prefix)` / `allow_callable(module, name)` add return types the
-    default set does not cover (e.g. a project's own dataclasses / pydantic
-    models). Prefer these over the full bypass.
+  * `allow_type(Class)` adds one exact runtime class the default set does not
+    cover (e.g. a project's own dataclass / pydantic model). Prefer this over
+    the full bypass.
   * `AGENTIX_PICKLE_TRUST=1` restores plain `pickle.loads` for deployments where
     the entire sandbox — including any workload it runs — is trusted.
 """
@@ -61,38 +61,54 @@ _ALLOWED_TYPES: dict[GlobalName, type[Any]] = {}
 
 # Inert reconstruction helpers: functions that only rebuild a value from
 # following (also-gated) arguments. Each is reviewed to have no external effect.
-SAFE_CALLABLES: set[tuple[str, str]] = {
-    ("copyreg", "_reconstructor"),
-    ("copyreg", "__newobj__"),
-    ("copyreg", "__newobj_ex__"),
-    ("numpy._core.multiarray", "_reconstruct"),  # numpy >= 2.0
-    ("numpy.core.multiarray", "_reconstruct"),  # numpy < 2.0
-}
+_SAFE_CALLABLES: frozenset[GlobalName] = frozenset(
+    {
+        ("copyreg", "_reconstructor"),
+        ("copyreg", "__newobj__"),
+        ("copyreg", "__newobj_ex__"),
+        ("numpy._core.multiarray", "_reconstruct"),  # numpy >= 2.0
+        ("numpy.core.multiarray", "_reconstruct"),  # numpy < 2.0
+    }
+)
 
 # Value types whose construction has no external side effect. Reviewed one by
-# one; modules here are stdlib/data packages that are inert to import.
-SAFE_TYPES: set[tuple[str, str]] = {
-    ("datetime", "date"),
-    ("datetime", "time"),
-    ("datetime", "datetime"),
-    ("datetime", "timedelta"),
-    ("datetime", "timezone"),
-    ("decimal", "Decimal"),
-    ("fractions", "Fraction"),
-    ("uuid", "UUID"),
-    ("collections", "OrderedDict"),
-    ("collections", "defaultdict"),
-    ("collections", "Counter"),
-    ("collections", "deque"),
-    ("pathlib", "PurePath"),
-    ("pathlib", "PurePosixPath"),
-    ("pathlib", "PureWindowsPath"),
-    ("pathlib", "Path"),
-    ("pathlib", "PosixPath"),
-    ("pathlib", "WindowsPath"),
-    ("numpy", "ndarray"),
-    ("numpy", "dtype"),
-}
+# one; modules here are stdlib/data packages or exact first-party value modules.
+SAFE_TYPES: frozenset[GlobalName] = frozenset(
+    {
+        ("datetime", "date"),
+        ("datetime", "time"),
+        ("datetime", "datetime"),
+        ("datetime", "timedelta"),
+        ("datetime", "timezone"),
+        ("decimal", "Decimal"),
+        ("fractions", "Fraction"),
+        ("uuid", "UUID"),
+        ("collections", "OrderedDict"),
+        ("collections", "defaultdict"),
+        ("collections", "Counter"),
+        ("collections", "deque"),
+        ("pathlib", "PurePath"),
+        ("pathlib", "PurePosixPath"),
+        ("pathlib", "PureWindowsPath"),
+        ("pathlib", "Path"),
+        ("pathlib", "PosixPath"),
+        ("pathlib", "WindowsPath"),
+        ("pathlib._local", "PurePath"),
+        ("pathlib._local", "PurePosixPath"),
+        ("pathlib._local", "PureWindowsPath"),
+        ("pathlib._local", "Path"),
+        ("pathlib._local", "PosixPath"),
+        ("pathlib._local", "WindowsPath"),
+        ("numpy", "ndarray"),
+        ("numpy", "dtype"),
+        ("agentix.bridge.proxy", "TunnelHandle"),
+        ("agentix.bash", "BashResult"),
+        ("agentix.files", "UploadResult"),
+        ("agentix.agents.claude_code.agent", "ClaudeCodeResult"),
+        ("agentix.agents.qwen_code", "Result"),
+        ("agentix.plugins.datasets.swe.env", "PrepareEnvResult"),
+    }
+)
 
 # Builtin value types admitted by identity (see `_SAFE_BUILTIN_TYPES`) plus every
 # builtin exception subclass. Builtins are always imported, so resolving one has
@@ -106,37 +122,13 @@ _SAFE_BUILTIN_TYPES: frozenset[type] = frozenset(
     }
 )
 
-# First-party namespace, trusted by default. The #116 boundary defends against
-# an *untrusted workload's* return value; the framework and its plugins are part
-# of the trusted computing base that builds the bundle and runs the sandbox, and
-# their return types (`TunnelHandle`, `BashResult`, agent results, …) are inert
-# dataclasses/models. Trusting `agentix.*` keeps the framework's own paths
-# working; a workload's own return types stay opt-in, and gadget callables
-# (subprocess/os/eval/attribute-access helpers) are never first-party so remain
-# refused.
-_FIRST_PARTY_PREFIXES: tuple[str, ...] = ("agentix",)
-
-# Module prefixes the caller has explicitly opted to trust for return types the
-# default set does not cover.
-_ALLOWED_MODULE_PREFIXES: set[str] = set()
-
 
 class RestrictedUnpickleError(pickle.UnpicklingError):
     """A global in the stream was not on the host allowlist and was refused."""
 
 
-def allow_module(prefix: str) -> None:
-    """Trust every global whose module equals or starts with `prefix` (dotted).
-    Use for a package whose return types the default allowlist does not cover."""
-    _ALLOWED_MODULE_PREFIXES.add(prefix)
-
-
-def allow_callable(module: str, name: str) -> None:
-    """Trust one specific `module.name` type/helper by exact identity."""
-    SAFE_CALLABLES.add((module, name))
-
-
 def allow_type(cls: type[Any]) -> None:
+    """Trust one exact runtime class for sandbox return reconstruction."""
     if not isinstance(cls, type):
         raise TypeError("allow_type() requires a class")
     _ALLOWED_TYPES[(cls.__module__, cls.__qualname__)] = cls
@@ -146,34 +138,25 @@ def _trust_enabled() -> bool:
     return os.environ.get("AGENTIX_PICKLE_TRUST", "").strip().lower() in ("1", "true", "yes")
 
 
-def _module_allowed(module: str) -> bool:
-    prefixes = (*_FIRST_PARTY_PREFIXES, *_ALLOWED_MODULE_PREFIXES)
-    return any(module == p or module.startswith(p + ".") for p in prefixes)
-
-
-def _is_safe_type(module: str, name: str) -> bool:
-    """`(module, name)` is an allowlisted value type, tolerating a private
-    implementation submodule of an allowlisted public module — e.g. Python 3.13
-    pickles `pathlib.PurePosixPath` as `pathlib._local.PurePosixPath`. Only
-    underscore-prefixed submodules of the public root are accepted, so a public
-    sibling module (`pathlib.evil`) is not."""
-    if (module, name) in SAFE_TYPES:
-        return True
-    head, _, rest = module.partition(".")
-    if rest and all(part.startswith("_") for part in rest.split(".")):
-        return (head, name) in SAFE_TYPES
-    return False
-
-
 class RestrictedUnpickler(pickle.Unpickler):
     """`pickle.Unpickler` whose `find_class` enforces the allowlist above."""
 
     def find_class(self, module: str, name: str) -> Any:
-        allowed_type = _ALLOWED_TYPES.get((module, name))
+        global_name = (module, name)
+        allowed_type = _ALLOWED_TYPES.get(global_name)
         if allowed_type is not None:
             return allowed_type
 
-        if (module, name) in SAFE_CALLABLES or _is_safe_type(module, name) or _module_allowed(module):
+        if global_name in SAFE_TYPES:
+            obj = super().find_class(module, name)
+            if not isinstance(obj, type):
+                raise RestrictedUnpickleError(
+                    f"refusing to reconstruct {module}.{name}: the allowlisted value "
+                    f"global did not resolve to a type"
+                )
+            return obj
+
+        if global_name in _SAFE_CALLABLES:
             return super().find_class(module, name)
 
         if module == "builtins":
@@ -191,9 +174,9 @@ class RestrictedUnpickler(pickle.Unpickler):
         # arbitrary module would itself run its top-level code on the host).
         raise RestrictedUnpickleError(
             f"refusing to reconstruct {module}.{name}: it is not on the host allowlist for "
-            f"sandbox return values. If this is a return type you trust, call "
-            f"agentix.runtime.shared.safepickle.allow_module({module!r}) (or allow_callable) "
-            f"before the call; or set AGENTIX_PICKLE_TRUST=1 to trust the sandbox fully."
+            f"sandbox return values. If this is a return type you trust, import its class "
+            f"and call agentix.runtime.shared.safepickle.allow_type(Class) before the call; "
+            f"or set AGENTIX_PICKLE_TRUST=1 to trust the sandbox fully."
         )
 
 
@@ -209,10 +192,7 @@ def restricted_loads(data: bytes) -> Any:
 __all__ = [
     "RestrictedUnpickleError",
     "RestrictedUnpickler",
-    "SAFE_CALLABLES",
     "SAFE_TYPES",
-    "allow_callable",
-    "allow_module",
     "allow_type",
     "restricted_loads",
 ]

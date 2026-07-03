@@ -44,23 +44,14 @@ def _policy_recorder(value: str) -> str:
 
 @pytest.fixture(autouse=True)
 def _restore_allowlist():
-    """`allow_module` / `allow_callable` mutate module-global state — snapshot
-    and restore it so tests do not leak opt-ins into each other."""
-    prefixes = set(safepickle._ALLOWED_MODULE_PREFIXES)
-    callables = set(safepickle.SAFE_CALLABLES)
-    allowed_types = getattr(safepickle, "_ALLOWED_TYPES", None)
-    types = dict(allowed_types) if allowed_types is not None else None
+    """Restore exact type opt-ins so tests do not leak policy state."""
+    allowed_types = dict(safepickle._ALLOWED_TYPES)
     policy_calls = list(_POLICY_CALLS)
     try:
         yield
     finally:
-        safepickle._ALLOWED_MODULE_PREFIXES.clear()
-        safepickle._ALLOWED_MODULE_PREFIXES.update(prefixes)
-        safepickle.SAFE_CALLABLES.clear()
-        safepickle.SAFE_CALLABLES.update(callables)
-        if allowed_types is not None and types is not None:
-            allowed_types.clear()
-            allowed_types.update(types)
+        safepickle._ALLOWED_TYPES.clear()
+        safepickle._ALLOWED_TYPES.update(allowed_types)
         _POLICY_CALLS.clear()
         _POLICY_CALLS.extend(policy_calls)
 
@@ -125,7 +116,6 @@ def test_policy_functions_are_refused(name: str) -> None:
 
 def test_one_load_cannot_modify_policy_then_invoke_new_global() -> None:
     _POLICY_CALLS.clear()
-    before_callables = set(safepickle.SAFE_CALLABLES)
     before_types = dict(safepickle._ALLOWED_TYPES)
     payload = (
         b"\x80\x04"
@@ -137,7 +127,6 @@ def test_one_load_cannot_modify_policy_then_invoke_new_global() -> None:
     with pytest.raises(RestrictedUnpickleError):
         restricted_loads(payload)
     assert _POLICY_CALLS == []
-    assert safepickle.SAFE_CALLABLES == before_callables
     assert safepickle._ALLOWED_TYPES == before_types
 
 

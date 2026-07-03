@@ -17,12 +17,13 @@ from pathlib import Path
 import pytest
 
 from agentix.runtime.shared import safepickle
+from tests._worker_target import EchoResult
 
 # The host restricts reconstruction of sandbox return values to an allowlist
 # (#116). Tests return custom types from `tests._worker_target` (e.g. the
-# `EchoResult` pydantic model); opt that module in, exactly as a real project
-# opts in its own return types.
-safepickle.allow_module("tests._worker_target")
+# `EchoResult` pydantic model); opt that exact class in, exactly as a real
+# project opts in its own return types.
+safepickle.allow_type(EchoResult)
 
 
 @pytest.fixture
