@@ -131,6 +131,9 @@ def setup_session_routes(app: FastAPI, backend: Backend, args: Any) -> None:
             raise MessageValidationError(f"request body is not valid JSON: {e}") from e
         if not isinstance(request_body, dict):
             raise MessageValidationError("request body must be a JSON object")
+        # Adapter preconditions raise HERE, before the lock: phase 1 can
+        # commit a rollback, and a rejected request must leave no side effects.
+        adapter.validate_request(request_body)
 
         # Phase 1: prepare the pretokenized prompt ids (lock held briefly).
         async with session.lock:

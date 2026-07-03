@@ -12,7 +12,10 @@ from typing import Any
 
 # Keys a chat template actually reads. Extra client-injected keys
 # (provider_specific_fields, etc.) don't affect tokenization, so we ignore them.
-TEMPLATE_RELEVANT_KEYS = ("role", "content", "reasoning_content", "tool_calls")
+# Reasoning is compared separately: it lives under `reasoning_content`
+# (sglang/DeepSeek dialect) or `reasoning` (vLLM dialect).
+TEMPLATE_RELEVANT_KEYS = ("role", "content", "tool_calls")
+REASONING_KEYS = ("reasoning_content", "reasoning")
 
 DEFAULT_APPEND_ROLES: list[str] = ["tool"]
 
@@ -26,11 +29,25 @@ def normalize_value(value: Any) -> Any:
     return value
 
 
+def _reasoning_value(message: dict[str, Any]) -> Any:
+    for key in REASONING_KEYS:
+        value = normalize_value(message.get(key))
+        if value is not None:
+            return value
+    return None
+
+
 def message_matches(stored: dict[str, Any], new: dict[str, Any]) -> bool:
     for key in TEMPLATE_RELEVANT_KEYS:
         if normalize_value(stored.get(key)) != normalize_value(new.get(key)):
             return False
-    return True
+    # Reasoning is model-generated and routinely dropped on echo (openai-python
+    # keeps only the standard message fields), so absence on either side is
+    # "unknown", not a divergence — only two present-but-different values
+    # constitute a retry that must roll back.
+    stored_reasoning = _reasoning_value(stored)
+    new_reasoning = _reasoning_value(new)
+    return stored_reasoning is None or new_reasoning is None or stored_reasoning == new_reasoning
 
 
 def assert_messages_append_only_with_allowed_role(
@@ -55,7 +72,7 @@ def assert_messages_append_only_with_allowed_role(
         if not message_matches(stored_msg, new_messages[i]):
             diffs = {
                 key: {"stored": repr(stored_msg.get(key))[:200], "new": repr(new_messages[i].get(key))[:200]}
-                for key in TEMPLATE_RELEVANT_KEYS
+                for key in TEMPLATE_RELEVANT_KEYS + REASONING_KEYS
                 if stored_msg.get(key) != new_messages[i].get(key)
             }
             raise ValueError(

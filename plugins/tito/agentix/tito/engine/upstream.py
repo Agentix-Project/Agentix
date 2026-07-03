@@ -58,6 +58,12 @@ class ChatTurn:
 class UpstreamAdapter(Protocol):
     kind: str
 
+    def validate_request(self, request_body: dict) -> None:
+        """Raise for request-shape preconditions. Called BEFORE the session
+        lock: a rejected request must be a pure 4xx with no committed rollback
+        side effects."""
+        ...
+
     async def chat_turn(
         self, backend: Backend, request: Request, request_body: dict, prompt_token_ids: list[int]
     ) -> ChatTurn: ...
@@ -103,6 +109,9 @@ class SglangUpstream:
     extensions carry the exact tokens both ways."""
 
     kind = "sglang"
+
+    def validate_request(self, request_body: dict) -> None:
+        """No request-shape preconditions beyond the common body checks."""
 
     async def chat_turn(
         self, backend: Backend, request: Request, request_body: dict, prompt_token_ids: list[int]
@@ -168,26 +177,38 @@ def _rewrite_tool_call_finish_reasons(response: dict) -> bool:
     return changed
 
 
+def _require_model(request_body: dict) -> str:
+    model = request_body.get("model")
+    if not isinstance(model, str) or not model:
+        raise MessageValidationError(
+            "the vllm backend requires 'model' in the chat request (derender rejects a missing model)"
+        )
+    return model
+
+
 class VllmUpstream:
     """render -> generate -> derender against vLLM >= 0.24.0 (the first
     release with the derender endpoints)."""
 
     kind = "vllm"
 
+    def validate_request(self, request_body: dict) -> None:
+        _require_model(request_body)
+
     async def chat_turn(
         self, backend: Backend, request: Request, request_body: dict, prompt_token_ids: list[int]
     ) -> ChatTurn:
-        model = request_body.get("model")
-        if not isinstance(model, str) or not model:
-            raise MessageValidationError(
-                "the vllm backend requires 'model' in the chat request (derender rejects a missing model)"
-            )
+        model = _require_model(request_body)
         # Hardcoded so an agent override can't break token accumulation.
         # logprobs ride along as the per-token cross-check + recorded rollout
         # logprobs; render maps sampling_params.logprobs from top_logprobs, so
         # pin it to 0 (sampled token only) unless the agent asked for more.
+        # An explicit top_logprobs:null must be coerced too — openai-python
+        # serializes an explicitly-passed None, and null would make render
+        # resolve sampling logprobs to null (no logprobs block from generate).
         request_body["logprobs"] = True
-        request_body.setdefault("top_logprobs", 0)
+        if request_body.get("top_logprobs") is None:
+            request_body["top_logprobs"] = 0
         # derender only accepts a complete (non-streamed) GenerateResponse.
         request_body["stream"] = False
         request_body.pop("stream_options", None)
@@ -231,6 +252,12 @@ class VllmUpstream:
             return ChatTurn(proxy_result=derender_result)
         response = _parse_response_object(derender_result["response_body"])
         assistant_message = _extract_assistant_message(_first_choice(response))
+        if assistant_message.get("reasoning") is not None and assistant_message.get("reasoning_content") is None:
+            # The engine's templates and the mismatch audit read the
+            # sglang/DeepSeek `reasoning_content` key; mirror it on the stored
+            # trajectory copy only — the wire response keeps vLLM's
+            # `reasoning` verbatim.
+            assistant_message = {**assistant_message, "reasoning_content": assistant_message["reasoning"]}
         if _rewrite_tool_call_finish_reasons(response):
             derender_result = {**derender_result, "response_body": _encode(response)}
 

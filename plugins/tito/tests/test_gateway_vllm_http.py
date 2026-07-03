@@ -91,13 +91,18 @@ class _VllmReplica:
         return getattr(self, f"_{name}")(body)
 
     def _render(self, body: dict) -> httpx.Response:
+        sampling_params = dict(self.sampling_params)
+        # Faithful to v0.24.0: sampling logprobs come from top_logprobs only
+        # when the chat request's logprobs flag is truthy — an explicit
+        # top_logprobs:null therefore yields sampling logprobs:null.
+        sampling_params["logprobs"] = body.get("top_logprobs") if body.get("logprobs") else None
         # Deliberately leak `stream: true` + stream_options the way a real
         # render would if the chat request streamed (vLLM copies the flag) —
         # the gateway must overwrite both before calling generate.
         return httpx.Response(200, json={
             "request_id": "chatcmpl-render-1",
             "token_ids": list(self.rendered_ids),
-            "sampling_params": dict(self.sampling_params),
+            "sampling_params": sampling_params,
             "model": body.get("model"),
             "stream": True,
             "stream_options": {"include_usage": True},
@@ -107,6 +112,12 @@ class _VllmReplica:
         if self.generate_raw is not None:
             return httpx.Response(200, json=self.generate_raw)
         ids = list(self.completion_ids)
+        # Faithful to v0.24.0: no logprobs block when sampling logprobs is null.
+        logprobs = None
+        if body.get("sampling_params", {}).get("logprobs") is not None:
+            logprobs = {"content": [
+                {"token": f"token_id:{t}", "logprob": -0.1, "bytes": None, "top_logprobs": []} for t in ids
+            ]}
         return httpx.Response(200, json={
             # v0.24.0 shape: no usage/model/created, random request_id.
             "request_id": "9f0e6d1c",
@@ -114,9 +125,7 @@ class _VllmReplica:
                 "index": 0,
                 "finish_reason": self.finish_reason,
                 "token_ids": ids,
-                "logprobs": {"content": [
-                    {"token": f"token_id:{t}", "logprob": -0.1, "bytes": None, "top_logprobs": []} for t in ids
-                ]},
+                "logprobs": logprobs,
             }],
             "prompt_logprobs": None,
         })
@@ -252,6 +261,32 @@ async def test_vllm_forces_token_recording_fields(gateway):
 
 
 @pytest.mark.asyncio
+async def test_vllm_explicit_null_top_logprobs_is_normalized(gateway):
+    """openai-python and hand-rolled harnesses serialize an explicit None as
+    top_logprobs:null; setdefault-style forcing would keep the null, render
+    would map sampling logprobs to null, generate would omit the logprobs
+    block, and every turn would 502. The gateway must coerce null to 0."""
+    client, replica = gateway
+    sid = (await client.post("/sessions")).json()["session_id"]
+    r = await client.post(
+        f"/sessions/{sid}/v1/chat/completions", json={**_CHAT, "top_logprobs": None}
+    )
+    assert r.status_code == 200
+    assert replica.calls["render"][0]["top_logprobs"] == 0
+
+
+@pytest.mark.asyncio
+async def test_vllm_agent_requested_top_logprobs_is_preserved(gateway):
+    client, replica = gateway
+    sid = (await client.post("/sessions")).json()["session_id"]
+    r = await client.post(
+        f"/sessions/{sid}/v1/chat/completions", json={**_CHAT, "top_logprobs": 5}
+    )
+    assert r.status_code == 200
+    assert replica.calls["render"][0]["top_logprobs"] == 5
+
+
+@pytest.mark.asyncio
 async def test_vllm_derender_request_carries_context(gateway):
     """Derender needs the model (parser lookup), the exact prompt token count
     (usage), the verbatim generate response, and the original chat request
@@ -267,11 +302,16 @@ async def test_vllm_derender_request_carries_context(gateway):
     assert derender_body["generate_response"]["choices"][0]["token_ids"] == [7, 8]
 
 
+_TOOLS = [{"type": "function", "function": {"name": "compute", "parameters": {"type": "object"}}}]
+
+
 @pytest.mark.asyncio
 async def test_vllm_tool_call_turn_rewrites_finish_reason(gateway):
     """derender passes finish_reason through verbatim ("stop"), unlike vLLM's
     own chat endpoint — the gateway rewrites it to "tool_calls" so agent loops
-    that branch on finish_reason behave identically on both backends."""
+    that branch on finish_reason behave identically on both backends. The
+    derender request must round-trip the agent's tools: real vLLM only parses
+    tool calls when chat_request carries the tool schemas."""
     client, replica = gateway
     replica.message = {
         "role": "assistant",
@@ -282,8 +322,9 @@ async def test_vllm_tool_call_turn_rewrites_finish_reason(gateway):
         }],
     }
     sid = (await client.post("/sessions")).json()["session_id"]
-    r = await client.post(f"/sessions/{sid}/v1/chat/completions", json=_CHAT)
+    r = await client.post(f"/sessions/{sid}/v1/chat/completions", json={**_CHAT, "tools": _TOOLS})
     assert r.status_code == 200
+    assert replica.calls["derender"][0]["chat_request"]["tools"] == _TOOLS
     choice = r.json()["choices"][0]
     assert choice["message"]["tool_calls"][0]["id"] == "call_1"
     assert choice["finish_reason"] == "tool_calls"
@@ -328,6 +369,74 @@ async def test_vllm_missing_model_is_400(gateway):
     )
     assert r.status_code == 400
     assert replica.calls["render"] == []
+
+
+@pytest.mark.asyncio
+async def test_vllm_missing_model_400_commits_no_rollback(gateway):
+    """A request that fails validation must be a pure 4xx with NO committed
+    side effects — if the missing-model check fires only after phase 1, a
+    diverging retry without `model` silently truncates the trajectory and
+    bricks the original branch."""
+    client, replica = gateway
+    sid = (await client.post("/sessions")).json()["session_id"]
+    await client.post(f"/sessions/{sid}/v1/chat/completions", json=_CHAT)
+    followup = [
+        *_CHAT["messages"],
+        {"role": "assistant", "content": "ok done"},
+        {"role": "tool", "content": "done"},
+    ]
+    await client.post(f"/sessions/{sid}/v1/chat/completions", json={"model": "m", "messages": followup})
+    before = (await client.get(f"/sessions/{sid}")).json()
+    assert len(before["records"]) == 2
+
+    diverging_retry = [*followup[:-1], {"role": "tool", "content": "ok"}]  # triggers a rollback plan
+    r = await client.post(f"/sessions/{sid}/v1/chat/completions", json={"messages": diverging_retry})
+    assert r.status_code == 400
+
+    after = (await client.get(f"/sessions/{sid}")).json()
+    assert len(after["records"]) == 2
+    assert after["metadata"]["accumulated_token_ids"] == before["metadata"]["accumulated_token_ids"]
+
+
+@pytest.mark.asyncio
+async def test_vllm_reasoning_echo_under_either_key_matches(gateway):
+    """derender stores reasoning under vLLM's `reasoning` key; harnesses echo
+    the assistant turn either verbatim, without any reasoning field
+    (openai-python drops unknown fields), or normalized to the
+    sglang/DeepSeek `reasoning_content` key. All three echoes must extend the
+    session, not 400 into a failed rollback."""
+    client, replica = gateway
+    replica.message = {"role": "assistant", "content": "ok done", "reasoning": "You are ok"}
+    for echo_message in (
+        {"role": "assistant", "content": "ok done", "reasoning": "You are ok"},
+        {"role": "assistant", "content": "ok done"},
+        {"role": "assistant", "content": "ok done", "reasoning_content": "You are ok"},
+    ):
+        sid = (await client.post("/sessions")).json()["session_id"]
+        await client.post(f"/sessions/{sid}/v1/chat/completions", json=_CHAT)
+        followup = [*_CHAT["messages"], echo_message, {"role": "tool", "content": "done"}]
+        r = await client.post(f"/sessions/{sid}/v1/chat/completions", json={"model": "m", "messages": followup})
+        assert r.status_code == 200, echo_message
+        assert len((await client.get(f"/sessions/{sid}")).json()["records"]) == 2, echo_message
+
+
+@pytest.mark.asyncio
+async def test_vllm_reasoning_is_mirrored_for_the_template_dialect(server):
+    """The engine's templates and matching speak `reasoning_content`
+    (qwen3_fixed.jinja reads it; the audit's from-scratch render needs it) —
+    the stored trajectory message must carry the derendered reasoning under
+    that key too, while the wire response keeps vLLM's `reasoning` verbatim."""
+    srv, replica = server
+    client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=srv.app), base_url="http://gw", timeout=5.0
+    )
+    replica.message = {"role": "assistant", "content": "ok done", "reasoning": "You are ok"}
+    sid = (await client.post("/sessions")).json()["session_id"]
+    r = await client.post(f"/sessions/{sid}/v1/chat/completions", json=_CHAT)
+    assert r.json()["choices"][0]["message"]["reasoning"] == "You are ok"
+    assert "reasoning_content" not in r.json()["choices"][0]["message"]
+    stored = srv.app.state.tito_registry.get_session(sid).messages[-1]
+    assert stored["reasoning_content"] == "You are ok"
 
 
 @pytest.mark.asyncio

@@ -46,8 +46,9 @@ The token dialect is selected by `--backend-kind` (`TITOGatewayConfig.backend_ki
   `/inference/v1/generate` on the session's exact prompt IDs →
   `/v1/chat/completions/derender` (raw token output → chat completion via the
   server's tool/reasoning parsers). Launch the vLLM server with the parser
-  flags that match your model (e.g. `--tool-call-parser hermes
-  --reasoning-parser qwen3`), or tool calls come back as plain text content.
+  flags that match your model (e.g. `--enable-auto-tool-choice
+  --tool-call-parser hermes --reasoning-parser qwen3`), or tool calls come
+  back as plain text content.
   The request body must include `model` (derender requires it).
 
 ## Install
