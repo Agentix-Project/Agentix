@@ -1,0 +1,19 @@
+{
+  "max_tokens": 100,
+  "messages": [
+    {
+      "content": "hi",
+      "role": "user"
+    },
+    {
+      "content": "hello!",
+      "role": "assistant",
+      "thinking_blocks": null
+    },
+    {
+      "content": "ok",
+      "role": "user"
+    }
+  ],
+  "model": "gpt-4o-mini"
+}

@@ -1,0 +1,21 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "content": "hi",
+        "role": "assistant"
+      }
+    }
+  ],
+  "id": "chatcmpl-1",
+  "model": "gpt-4o-mini",
+  "usage": {
+    "completion_tokens": 2,
+    "prompt_tokens": 100,
+    "prompt_tokens_details": {
+      "cached_tokens": 32
+    }
+  }
+}

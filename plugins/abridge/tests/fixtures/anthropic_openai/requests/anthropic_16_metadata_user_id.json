@@ -1,0 +1,13 @@
+{
+  "max_tokens": 100,
+  "messages": [
+    {
+      "content": "hi",
+      "role": "user"
+    }
+  ],
+  "metadata": {
+    "user_id": "u-123"
+  },
+  "model": "gpt-4o-mini"
+}

@@ -1,0 +1,28 @@
+{
+  "max_tokens": 100,
+  "messages": [
+    {
+      "content": "Hard math problem",
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "signature": "sig_xyz",
+          "thinking": "Let me work this out step by step...",
+          "type": "thinking"
+        },
+        {
+          "text": "The answer is 42.",
+          "type": "text"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": "Why?",
+      "role": "user"
+    }
+  ],
+  "model": "gpt-4o-mini"
+}

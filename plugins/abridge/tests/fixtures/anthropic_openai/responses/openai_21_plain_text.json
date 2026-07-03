@@ -1,0 +1,18 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "content": "hello world",
+        "role": "assistant"
+      }
+    }
+  ],
+  "id": "chatcmpl-abc",
+  "model": "gpt-4o-mini",
+  "usage": {
+    "completion_tokens": 4,
+    "prompt_tokens": 10
+  }
+}

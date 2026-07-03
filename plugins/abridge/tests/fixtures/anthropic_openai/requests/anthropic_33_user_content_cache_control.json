@@ -1,0 +1,22 @@
+{
+  "max_tokens": 100,
+  "messages": [
+    {
+      "content": [
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "text": "Very long cached context",
+          "type": "text"
+        },
+        {
+          "text": "Question: summarize.",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "gpt-4o-mini"
+}

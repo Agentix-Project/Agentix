@@ -1,0 +1,5 @@
+{
+  "max_tokens": 100,
+  "messages": [],
+  "model": "gpt-4o-mini"
+}
