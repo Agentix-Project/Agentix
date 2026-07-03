@@ -34,6 +34,7 @@ from agentix.runtime.client import (
 )
 from agentix.runtime.client._sio_facade import AsyncClientNamespace, request_handler
 from agentix.runtime.shared.callables import RemoteCallable
+from agentix.runtime.shared.safepickle import RestrictedUnpickleError
 from agentix.sio import Namespace, RemoteSioError, register_namespace
 from agentix.utils import context, log, trace
 from agentix.utils.log import configure_logging
@@ -52,6 +53,7 @@ __all__ = [
     "RemoteCallable",
     "RemoteCallError",
     "RemoteSioError",
+    "RestrictedUnpickleError",
     "Result",
     "RuntimeClient",
     "RuntimeUnreachable",

@@ -24,6 +24,27 @@ code behind an importable top-level function instead.
 Args and kwargs travel separately as `arguments = pickle.dumps((args, kwargs))`.
 Return values travel as `value = pickle.dumps(result)`.
 
+The **host** decodes a return value through a restricted unpickler
+(`agentix.runtime.shared.safepickle`), not plain `pickle.loads`: a sandbox may
+run less-trusted workloads whose returned object directs reconstruction, and
+plain unpickling reconstructs objects by invoking whatever callables the stream
+names. The restricted loader decodes through a strict **allowlist** — only a
+reviewed set of value types (stdlib data, builtin containers and exceptions,
+numpy arrays, …) and inert reconstruction helpers are permitted, and anything
+else is refused *without importing it*. Six first-party return types are on
+the default allowlist, each registered individually by exact module and class
+name — `TunnelHandle`, `BashResult`, `UploadResult`, `ClaudeCodeResult`, the
+qwen_code `Result`, and `PrepareEnvResult` — so the framework's own return
+values cross the boundary with no setup. Every other global — including the
+rest of `agentix.*` and a *workload's* own return types (a project's
+dataclasses / pydantic models) — is refused by default; opt a class in with
+`safepickle.allow_type(Class)`, which trusts exactly one class (there is no
+module- or prefix-level trust), or set `AGENTIX_PICKLE_TRUST=1` to trust the
+sandbox fully. A refusal raises
+`agentix.RestrictedUnpickleError`. (The sandbox-side decode of host-sent
+`arguments` / `context` stays plain — that is the trusted host→sandbox
+direction.)
+
 ```python
 from my_project.tasks import run
 

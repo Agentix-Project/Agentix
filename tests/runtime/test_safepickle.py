@@ -1,0 +1,378 @@
+"""The host restricts what it will reconstruct from a sandbox return value (#116).
+
+`pickle.loads` reconstructs objects by invoking whatever callables a stream
+names, so decoding a sandbox-influenced value is a trust boundary. `restricted_loads`
+decodes through a strict allowlist: only reviewed value types and inert
+reconstruction helpers are permitted; everything else is refused without
+importing it. These tests verify both halves — permitted values round-trip, and
+reconstruction of non-allowlisted callables/types is refused.
+"""
+
+from __future__ import annotations
+
+import collections
+import copyreg
+import datetime
+import decimal
+import fractions
+import pathlib
+import pickle
+import sys
+import uuid
+from dataclasses import dataclass
+from typing import Any
+
+import pytest
+from agentix.agents.claude_code.agent import ClaudeCodeResult
+from agentix.agents.qwen_code import Result as QwenResult
+from agentix.bash import BashResult
+from agentix.bridge.proxy import TunnelHandle
+from agentix.files import UploadResult
+from agentix.plugins.datasets.swe.env import PrepareEnvResult
+from pydantic import BaseModel
+
+from agentix.runtime.shared import safepickle
+from agentix.runtime.shared.safepickle import (
+    RestrictedUnpickleError,
+    restricted_loads,
+)
+
+
+def _global_reference(module: str, name: str) -> bytes:
+    assert "\n" not in module and "\n" not in name
+    return f"c{module}\n{name}\n.".encode("ascii")
+
+
+_POLICY_CALLS: list[str] = []
+
+
+def _policy_recorder(value: str) -> str:
+    _POLICY_CALLS.append(value)
+    return value
+
+
+@pytest.fixture(autouse=True)
+def _restore_allowlist():
+    """Restore exact type opt-ins so tests do not leak policy state."""
+    allowed_types = dict(safepickle._ALLOWED_TYPES)
+    policy_calls = list(_POLICY_CALLS)
+    try:
+        yield
+    finally:
+        safepickle._ALLOWED_TYPES.clear()
+        safepickle._ALLOWED_TYPES.update(allowed_types)
+        _POLICY_CALLS.clear()
+        _POLICY_CALLS.extend(policy_calls)
+
+
+@pytest.mark.parametrize(
+    ("module", "name"),
+    [
+        pytest.param("subprocess", "check_output", id="subprocess-check-output"),
+        pytest.param("subprocess", "Popen", id="subprocess-popen"),
+        pytest.param("builtins", "eval", id="builtins-eval"),
+        pytest.param("os", "system", id="os-system"),
+    ],
+)
+def test_non_allowlisted_callable_is_refused_without_invocation(module: str, name: str) -> None:
+    blob = _global_reference(module, name)
+
+    # GLOBAL + STOP resolves the object but never invokes it. Keep the
+    # regression harmless even if the restricted decoder accidentally admits
+    # the same reference in the future.
+    assert callable(pickle.loads(blob))
+
+    with pytest.raises(RestrictedUnpickleError):
+        restricted_loads(blob)
+
+
+def test_unregistered_first_party_function_is_refused() -> None:
+    with pytest.raises(RestrictedUnpickleError):
+        restricted_loads(_global_reference("agentix.runtime.shared.safepickle", "_trust_enabled"))
+
+
+@pytest.mark.parametrize("name", ["allow_module", "allow_callable", "allow_type"])
+def test_policy_functions_are_refused(name: str) -> None:
+    with pytest.raises(RestrictedUnpickleError):
+        restricted_loads(_global_reference("agentix.runtime.shared.safepickle", name))
+
+
+def test_one_load_cannot_modify_policy_then_invoke_new_global() -> None:
+    _POLICY_CALLS.clear()
+    before_types = dict(safepickle._ALLOWED_TYPES)
+    payload = (
+        b"\x80\x04"
+        b"cagentix.runtime.shared.safepickle\nallow_callable\n"
+        b"(Vtests.runtime.test_safepickle\nV_policy_recorder\ntR0"
+        b"ctests.runtime.test_safepickle\n_policy_recorder\n"
+        b"(Vmarker\ntR."
+    )
+    with pytest.raises(RestrictedUnpickleError):
+        restricted_loads(payload)
+    assert _POLICY_CALLS == []
+    assert safepickle._ALLOWED_TYPES == before_types
+
+
+def test_refusal_does_not_import_the_named_module() -> None:
+    """A refusal is decided from the module name — the restricted decoder must
+    not import a non-allowlisted module (importing runs its top-level code on
+    the host)."""
+    import sys
+
+    modname = "xml.dom.minidom"  # importable, stdlib, not on the allowlist
+    sys.modules.pop(modname, None)
+    crafted = b"\x80\x04c" + modname.encode() + b"\nDocument\n."
+    with pytest.raises(RestrictedUnpickleError):
+        restricted_loads(crafted)
+    assert modname not in sys.modules, "restricted decode must not import a non-allowlisted module"
+
+
+@pytest.mark.parametrize(
+    "crafted",
+    [
+        # Attribute-access helpers — the technique that would let a stream walk
+        # from an admitted object to an arbitrary callable. Neither the pure-
+        # python nor the C-accelerator module may be on the allowlist.
+        b"\x80\x04coperator\nattrgetter\n.",
+        b"\x80\x04c_operator\nattrgetter\n.",
+        b"\x80\x04c_operator\nitemgetter\n.",
+        b"\x80\x04c_operator\nmethodcaller\n.",
+        b"\x80\x04cbuiltins\ngetattr\n.",
+    ],
+)
+def test_attribute_access_helpers_are_refused(crafted) -> None:
+    with pytest.raises(RestrictedUnpickleError):
+        restricted_loads(crafted)
+
+
+@pytest.mark.parametrize(
+    ("encoded_extension", "extension_code"),
+    [
+        pytest.param(b"\x82\xff", 0xFF, id="EXT1"),
+        pytest.param(b"\x83\xff\xff", 0xFFFF, id="EXT2"),
+        pytest.param(b"\x84\xff\xff\xff\x7f", 0x7FFFFFFF, id="EXT4"),
+    ],
+)
+def test_warm_extension_cache_cannot_bypass_exact_global_policy(encoded_extension: bytes, extension_code: int) -> None:
+    module = _policy_recorder.__module__
+    name = _policy_recorder.__qualname__
+    extension_cache: dict[int, object] = getattr(copyreg, "_extension_cache")
+    cache_missing = object()
+    previous_cached = extension_cache.pop(extension_code, cache_missing)
+    registered = False
+    try:
+        copyreg.add_extension(module, name, extension_code)
+        registered = True
+        payload = b"\x80\x04" + encoded_extension + b"\x8c\x16extension-cache-marker\x85R."
+
+        _POLICY_CALLS.clear()
+        assert pickle.loads(payload) == "extension-cache-marker"
+        assert _POLICY_CALLS == ["extension-cache-marker"]
+        assert extension_cache[extension_code] is _policy_recorder
+
+        _POLICY_CALLS.clear()
+        with pytest.raises(
+            RestrictedUnpickleError,
+            match="extension opcodes cannot be safely validated against the exact allowlist",
+        ):
+            restricted_loads(payload)
+        assert _POLICY_CALLS == []
+    finally:
+        if registered:
+            copyreg.remove_extension(module, name, extension_code)
+        extension_cache.pop(extension_code, None)
+        if previous_cached is not cache_missing:
+            extension_cache[extension_code] = previous_cached
+
+
+# ── permitted values round-trip ─────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        42,
+        "hi",
+        3.5,
+        True,
+        None,
+        b"bytes",
+        bytearray(b"ba"),
+        complex(1, 2),
+        range(0, 10, 2),
+        slice(1, 9, 2),
+        [1, 2, 3],
+        {"a": 1},
+        (1, 2),
+        {1, 2},
+        frozenset([1]),
+        {"nested": [1, {"b": (2, 3)}]},
+        datetime.datetime(2026, 1, 1, 12, 30),
+        datetime.date(2026, 1, 1),
+        datetime.timedelta(days=2),
+        datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC),
+        decimal.Decimal("1.5"),
+        fractions.Fraction(3, 4),
+        uuid.UUID("12345678123456781234567812345678"),
+        collections.OrderedDict(a=1, b=2),
+        collections.Counter("aabbc"),
+        collections.deque([1, 2, 3]),
+        collections.defaultdict(int, {"a": 1}),
+        pathlib.PurePosixPath("/tmp/x"),
+    ],
+)
+def test_permitted_values_round_trip(value) -> None:
+    assert restricted_loads(pickle.dumps(value)) == value
+
+
+@pytest.mark.parametrize("exc", [ValueError("boom"), KeyError("k"), RuntimeError("r")])
+def test_builtin_exceptions_round_trip(exc) -> None:
+    out = restricted_loads(pickle.dumps(exc))
+    assert type(out) is type(exc)
+    assert out.args == exc.args
+
+
+def test_numpy_array_round_trips() -> None:
+    np = pytest.importorskip("numpy")
+    arr = np.arange(6).reshape(2, 3)
+    out = restricted_loads(pickle.dumps(arr))
+    assert np.array_equal(out, arr)
+
+
+def test_numpy_object_array_gates_nested_globals() -> None:
+    """An object-dtype array pickles its elements in the same stream, so a
+    non-allowlisted callable referenced by an element is still refused."""
+
+    class _ReducesToPolicyRecorder:
+        def __reduce__(self):
+            return (_policy_recorder, ("numpy-object-array-marker",))
+
+    np = pytest.importorskip("numpy")
+    arr = np.array([_ReducesToPolicyRecorder()], dtype=object)
+    blob = pickle.dumps(arr)
+
+    policy_calls_before = list(_POLICY_CALLS)
+    with pytest.raises(RestrictedUnpickleError):
+        restricted_loads(blob)
+    assert _POLICY_CALLS == policy_calls_before
+
+
+def test_none_returns_none() -> None:
+    assert restricted_loads(pickle.dumps(None)) is None
+
+
+# ── custom return types: refused by default, permitted by opt-in ─────────────
+
+
+class _ProjectResult(BaseModel):
+    patch: str
+    score: int
+
+
+@dataclass
+class _ProjectPoint:
+    x: int
+    y: int
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(TunnelHandle(url="http://127.0.0.1:9", port=9), id="TunnelHandle"),
+        pytest.param(BashResult(exit_code=0, stdout="o", stderr=""), id="BashResult"),
+        pytest.param(UploadResult(path="/workspace/a", size=1), id="UploadResult"),
+        pytest.param(
+            ClaudeCodeResult(returncode=0, stdout=b"o", stderr=b""),
+            id="ClaudeCodeResult",
+        ),
+        pytest.param(QwenResult(exit_code=0, stdout="o", stderr=""), id="QwenResult"),
+        pytest.param(PrepareEnvResult(ok=True, head="abc", log=""), id="PrepareEnvResult"),
+    ],
+)
+def test_first_party_return_types_round_trip_by_default(value: object) -> None:
+    """The six individually registered first-party return types need no opt-in."""
+    assert restricted_loads(pickle.dumps(value)) == value
+
+
+def test_custom_type_refused_by_default() -> None:
+    # This module is not first-party (`agentix.*`) and not on the opt-in list.
+    with pytest.raises(RestrictedUnpickleError):
+        restricted_loads(pickle.dumps(_ProjectResult(patch="d", score=1)))
+
+
+def test_allow_type_opt_in_is_exact() -> None:
+    point = _ProjectPoint(1, 2)
+    with pytest.raises(RestrictedUnpickleError):
+        restricted_loads(pickle.dumps(point))
+
+    allow_type = getattr(safepickle, "allow_type", None)
+    assert allow_type is not None
+    allow_type(_ProjectPoint)
+    assert restricted_loads(pickle.dumps(point)) == point
+
+    with pytest.raises(RestrictedUnpickleError):
+        restricted_loads(pickle.dumps(_ProjectResult(patch="d", score=1)))
+
+
+def test_safe_type_identity_must_resolve_to_a_type(monkeypatch) -> None:
+    policy_calls_before = list(_POLICY_CALLS)
+    monkeypatch.setattr(datetime, "date", _policy_recorder)
+
+    with pytest.raises(
+        RestrictedUnpickleError,
+        match="allowlisted value global did not resolve to a type",
+    ):
+        restricted_loads(_global_reference("datetime", "date"))
+    assert _POLICY_CALLS == policy_calls_before
+
+
+def test_allow_type_uses_registered_class_after_module_rebind(monkeypatch) -> None:
+    registered_class = _ProjectPoint
+    value = registered_class(1, 2)
+    safepickle.allow_type(registered_class)
+    blob = pickle.dumps(value)
+
+    module = sys.modules[registered_class.__module__]
+    monkeypatch.setattr(module, registered_class.__qualname__, object)
+
+    out = restricted_loads(blob)
+    assert type(out) is registered_class
+    assert out == value
+
+
+def test_allow_type_requires_a_class() -> None:
+    not_a_class: Any = object()
+    with pytest.raises(TypeError, match="requires a class"):
+        safepickle.allow_type(not_a_class)
+
+
+@pytest.mark.parametrize("name", ["allow_module", "allow_callable"])
+def test_broad_policy_helpers_are_not_exposed(name: str) -> None:
+    assert not hasattr(safepickle, name)
+
+
+def test_trust_env_disables_restriction(monkeypatch) -> None:
+    """The escape hatch fully trusts the sandbox. Verified with a benign
+    reducer (json.dumps) that the restricted path refuses but is harmless."""
+    monkeypatch.setenv("AGENTIX_PICKLE_TRUST", "1")
+
+    class _ReducesToJsonDumps:
+        def __reduce__(self):
+            import json
+
+            return (json.dumps, ([1, 2, 3],))
+
+    assert restricted_loads(pickle.dumps(_ReducesToJsonDumps())) == "[1, 2, 3]"
+
+
+def test_refusal_message_points_to_opt_in() -> None:
+    with pytest.raises(RestrictedUnpickleError) as ei:
+        restricted_loads(pickle.dumps(_ProjectPoint(1, 2)))
+    expected = (
+        "refusing to reconstruct tests.runtime.test_safepickle._ProjectPoint: it is not "
+        "on the host allowlist for sandbox return values. If this is a return type you "
+        "trust, import its class and call "
+        "agentix.runtime.shared.safepickle.allow_type(Class) before the call; or set "
+        "AGENTIX_PICKLE_TRUST=1 to trust the sandbox fully."
+    )
+    assert str(ei.value) == expected

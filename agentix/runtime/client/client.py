@@ -37,6 +37,7 @@ from agentix.runtime.shared import MAX_MESSAGE_BYTES
 from agentix.runtime.shared.callables import RemoteCallable, display_name_for
 from agentix.runtime.shared.codec import pack, unpack
 from agentix.runtime.shared.models import HealthResponse, RemoteError
+from agentix.runtime.shared.safepickle import restricted_loads
 from agentix.utils import context
 
 logger = logging.getLogger("agentix.runtime.client")
@@ -119,7 +120,10 @@ def _decode_payload(raw: Any) -> dict[str, Any]:
 
 
 def _unpickle_value(raw: Any) -> Any:
-    return pickle.loads(raw) if raw is not None else None
+    # Sandbox→host trust boundary (#116): the return value is decoded with the
+    # restricted unpickler so a malicious `__reduce__` can't execute code on the
+    # host. `AGENTIX_PICKLE_TRUST=1` opts back into plain pickle.
+    return restricted_loads(raw) if raw is not None else None
 
 
 class RuntimeClient:
