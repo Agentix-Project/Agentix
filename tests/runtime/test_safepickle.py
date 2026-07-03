@@ -25,7 +25,6 @@ from pydantic import BaseModel
 from agentix.runtime.shared import safepickle
 from agentix.runtime.shared.safepickle import (
     RestrictedUnpickleError,
-    allow_module,
     restricted_loads,
 )
 
@@ -36,6 +35,8 @@ def _restore_allowlist():
     and restore it so tests do not leak opt-ins into each other."""
     prefixes = set(safepickle._ALLOWED_MODULE_PREFIXES)
     callables = set(safepickle.SAFE_CALLABLES)
+    allowed_types = getattr(safepickle, "_ALLOWED_TYPES", None)
+    types = dict(allowed_types) if allowed_types is not None else None
     try:
         yield
     finally:
@@ -43,6 +44,9 @@ def _restore_allowlist():
         safepickle._ALLOWED_MODULE_PREFIXES.update(prefixes)
         safepickle.SAFE_CALLABLES.clear()
         safepickle.SAFE_CALLABLES.update(callables)
+        if allowed_types is not None and types is not None:
+            allowed_types.clear()
+            allowed_types.update(types)
 
 
 # ── objects that direct reconstruction at non-allowlisted callables ──────────
@@ -213,12 +217,18 @@ def test_custom_type_refused_by_default() -> None:
         restricted_loads(pickle.dumps(_ProjectResult(patch="d", score=1)))
 
 
-def test_allow_module_permits_custom_types() -> None:
-    allow_module("tests.runtime.test_safepickle")
-    model = _ProjectResult(patch="d", score=3)
+def test_allow_type_opt_in_is_exact() -> None:
     point = _ProjectPoint(1, 2)
-    assert restricted_loads(pickle.dumps(model)) == model
+    with pytest.raises(RestrictedUnpickleError):
+        restricted_loads(pickle.dumps(point))
+
+    allow_type = getattr(safepickle, "allow_type", None)
+    assert allow_type is not None
+    allow_type(_ProjectPoint)
     assert restricted_loads(pickle.dumps(point)) == point
+
+    with pytest.raises(RestrictedUnpickleError):
+        restricted_loads(pickle.dumps(_ProjectResult(patch="d", score=1)))
 
 
 def test_trust_env_disables_restriction(monkeypatch) -> None:

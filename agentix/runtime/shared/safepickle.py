@@ -56,6 +56,9 @@ import os
 import pickle
 from typing import Any
 
+GlobalName = tuple[str, str]
+_ALLOWED_TYPES: dict[GlobalName, type[Any]] = {}
+
 # Inert reconstruction helpers: functions that only rebuild a value from
 # following (also-gated) arguments. Each is reviewed to have no external effect.
 SAFE_CALLABLES: set[tuple[str, str]] = {
@@ -133,6 +136,12 @@ def allow_callable(module: str, name: str) -> None:
     SAFE_CALLABLES.add((module, name))
 
 
+def allow_type(cls: type[Any]) -> None:
+    if not isinstance(cls, type):
+        raise TypeError("allow_type() requires a class")
+    _ALLOWED_TYPES[(cls.__module__, cls.__qualname__)] = cls
+
+
 def _trust_enabled() -> bool:
     return os.environ.get("AGENTIX_PICKLE_TRUST", "").strip().lower() in ("1", "true", "yes")
 
@@ -160,6 +169,10 @@ class RestrictedUnpickler(pickle.Unpickler):
     """`pickle.Unpickler` whose `find_class` enforces the allowlist above."""
 
     def find_class(self, module: str, name: str) -> Any:
+        allowed_type = _ALLOWED_TYPES.get((module, name))
+        if allowed_type is not None:
+            return allowed_type
+
         if (module, name) in SAFE_CALLABLES or _is_safe_type(module, name) or _module_allowed(module):
             return super().find_class(module, name)
 
@@ -200,5 +213,6 @@ __all__ = [
     "SAFE_TYPES",
     "allow_callable",
     "allow_module",
+    "allow_type",
     "restricted_loads",
 ]
