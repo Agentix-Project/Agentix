@@ -46,7 +46,7 @@ from typing import Any
 import agentix.agents.claude_code as cc
 import agentix.plugins.datasets.swe as swe
 from agentix.bash import run as bash_run
-from agentix.bridge import Proxy
+from agentix.bridge import Proxy, Recorder
 from agentix.bridge.clients import ANTHROPIC_PLACEHOLDER_API_KEY, AnthropicFromOpenAIClient
 from agentix.provider.docker import DockerProvider, DockerProviderConfig
 from agentix.runner import AgentResult, run_rollouts
@@ -141,6 +141,7 @@ class ClaudeCodeAgent:
         cc_timeout: float,
         max_turns: int | None,
         upstream_params: dict[str, Any] | None = None,
+        record_dir: Path | None = None,
     ) -> None:
         self._openai_base_url = openai_base_url
         self._openai_api_key = openai_api_key
@@ -149,18 +150,24 @@ class ClaudeCodeAgent:
         self._cc_timeout = cc_timeout
         self._max_turns = max_turns
         self._upstream_params = upstream_params
+        self._record_dir = record_dir
 
     async def solve(self, sandbox: Any, instance: dict[str, Any], *, model: str | None) -> AgentResult:
         response_model = model or self._response_model
         # A fresh client per instance keeps abridge's session grouping
         # per-rollout; the real upstream key never enters the sandbox.
         # `Proxy.stop()` closes the client via its `aclose()`.
-        client = AnthropicFromOpenAIClient(
+        client: Any = AnthropicFromOpenAIClient(
             base_url=self._openai_base_url,
             api_key=self._openai_api_key,
             model=self._upstream_model,
             upstream_params=self._upstream_params,
         )
+        if self._record_dir is not None:
+            # Record every (request, response) this rollout's tunnel serves —
+            # one JSONL per instance. `Proxy.stop()` closes the recorder,
+            # which closes the wrapped client.
+            client = Recorder(client, self._record_dir / f"{instance['instance_id']}.jsonl")
         proxy = Proxy(client)
 
         # `dataset.setup(...)` already connected this sandbox's RuntimeClient,
@@ -278,6 +285,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--response-model", default=os.environ.get("RESPONSE_MODEL", "claude-3-5-sonnet-latest"))
     parser.add_argument("--max-turns", type=int, default=None)
+    parser.add_argument(
+        "--record-dir",
+        default=None,
+        help="record each rollout's tunnel traffic to <dir>/<instance_id>.jsonl",
+    )
     parser.add_argument("--cc-timeout", type=float, default=1800)
     parser.add_argument("--eval-timeout", type=float, default=1800)
     parser.add_argument("--out", default="runs")
@@ -342,6 +354,7 @@ async def main(argv: list[str] | None = None) -> int:
             cc_timeout=args.cc_timeout,
             max_turns=args.max_turns,
             upstream_params=upstream_params,
+            record_dir=Path(args.record_dir) if args.record_dir else None,
         )
 
     out_dir = Path(args.out)

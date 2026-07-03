@@ -37,6 +37,10 @@ uv run python main.py --bundle "$BUNDLE" --limit 5 --concurrency 4
 uv run python main.py --bundle "$BUNDLE" --limit 5 \
     --upstream-params '{"reasoning_effort": "medium", "temperature": 1.0, "top_p": 0.95}'
 
+# Record each rollout's tunnel traffic (one JSONL per instance — every
+# request/response the agent's LLM calls produced, in wire order):
+uv run python main.py --bundle "$BUNDLE" --limit 5 --record-dir runs/traffic
+
 # Ground-truth harness check (no agent, no key needed):
 uv run python main.py --bundle "$BUNDLE" --ground-truth --fail-on-unresolved
 
