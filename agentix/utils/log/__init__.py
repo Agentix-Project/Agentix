@@ -19,8 +19,9 @@ stderr (fd 1 / fd 2 — `print()`, child-process output, C-extension writes)
 and sends each line through the same `/log` stream as
 `agentix.sandbox.stdout` / `agentix.sandbox.stderr`; every record and
 captured line is also appended to a size-bounded on-disk copy at
-`$AGENTIX_LOG_DIR/sandbox.log` (default `/tmp/agentix`) inside the
-sandbox, so output survives a lost connection for post-mortem reads.
+`$AGENTIX_LOG_DIR/sandbox-<worker-id>.log` (default `/tmp/agentix`)
+inside the sandbox, so output survives a lost connection for
+post-mortem reads.
 
 ## Delivery contract
 

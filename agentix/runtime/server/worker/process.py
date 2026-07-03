@@ -54,6 +54,7 @@ class Worker:
         self._outbound_q: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._drainer: asyncio.Task | None = None
         self._stdio_tasks: list[asyncio.Task] = []
+        self._outbound_write_failed = False
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
@@ -74,8 +75,12 @@ class Worker:
         frame_out_fd = os.dup(1)
         # Save the real stderr before fd 2 becomes a capture pipe — stdlib
         # logging's console output is repointed there (see
-        # `_redirect_internal_logging`).
-        real_stderr_fd = os.dup(2)
+        # `_redirect_internal_logging`), and `main()` restores fd 2 from it
+        # on the way out so interpreter-level output (crash tracebacks,
+        # finalization errors) lands in the container log instead of a
+        # reader-less pipe.
+        global _real_stderr_fd
+        real_stderr_fd = _real_stderr_fd = os.dup(2)
         stdout_read_fd, stdout_write_fd = os.pipe()
         stderr_read_fd, stderr_write_fd = os.pipe()
         devnull = os.open(os.devnull, os.O_RDWR)
@@ -156,7 +161,15 @@ class Worker:
                 try:
                     await write_frame(self._writer, frame)
                 except Exception:
-                    logger.exception("outbound frame write failed")
+                    # Log the FIRST failure at exception level only: each
+                    # logged traceback becomes a /log frame on this same
+                    # queue, so per-failure logging self-sustains against a
+                    # broken pipe and floods the durable file until shutdown.
+                    if not self._outbound_write_failed:
+                        self._outbound_write_failed = True
+                        logger.exception("outbound frame write failed")
+                    else:
+                        logger.debug("outbound frame write failed", exc_info=True)
                     self._recover_failed_frame(frame)
                 finally:
                     self._outbound_q.task_done()
@@ -191,6 +204,11 @@ class Worker:
         await self._outbound_q.put(payload)
 
     async def _drain_stream(self, fd: int, stream: str) -> None:
+        # The drainer shares the event loop: a remote `async def` that BLOCKS
+        # the loop (subprocess.run, ...) while its child spews ≥64 KiB into
+        # this fd wedges both sides — the same standing constraint the fd 1
+        # capture has always had. Async callables must not block the loop;
+        # sync callables run in threads and are fine.
         loop = asyncio.get_running_loop()
         reader = asyncio.StreamReader()
         await loop.connect_read_pipe(
@@ -343,10 +361,25 @@ class _SandboxLogFileHandler(RotatingFileHandler):
 
 
 _sandbox_log_handler: logging.Handler | None = None
+_real_stderr_fd: int | None = None
+
+
+def _restore_real_stderr() -> None:
+    """Point fd 2 back at the real stderr saved in `run()`.
+
+    Called on the way out of `main()`: after the loop closes, nothing drains
+    the capture pipe, so interpreter output written to fd 2 — the crash
+    traceback of an exception escaping `asyncio.run`, 'Exception ignored'
+    finalization messages — would either block, break the pipe, or be
+    discarded with the buffer. Restoring fd 2 sends it to the container log,
+    as on master."""
+    if _real_stderr_fd is not None:
+        with contextlib.suppress(Exception):
+            os.dup2(_real_stderr_fd, 2)
 
 
 def _attach_sandbox_log_file() -> None:
-    """Durable in-sandbox log at `$AGENTIX_LOG_DIR/sandbox.log` (#139).
+    """Durable in-sandbox log at `$AGENTIX_LOG_DIR/sandbox-<worker>.log` (#139).
 
     The `/log` stream buffer is bounded — output that outlives a long
     disconnect (or the host itself) is otherwise unrecoverable. Attached to
@@ -358,10 +391,15 @@ def _attach_sandbox_log_file() -> None:
     log_dir = os.environ.get("AGENTIX_LOG_DIR", "/tmp/agentix")
     if not log_dir:
         return
+    # Per-worker filename: the default dir is machine-shared, and two
+    # processes rotating ONE file race in `doRollover` (the loser's rename
+    # fails → the handler detaches). Every spawn gets a fresh worker id, so
+    # respawns never share a file either.
+    worker_id = os.environ.get("AGENTIX_WORKER_ID", str(os.getpid()))
     try:
         os.makedirs(log_dir, exist_ok=True)
         handler = _SandboxLogFileHandler(
-            os.path.join(log_dir, "sandbox.log"),
+            os.path.join(log_dir, f"sandbox-{worker_id}.log"),
             maxBytes=64 * 1024 * 1024,
             backupCount=1,
             encoding="utf-8",
@@ -381,6 +419,14 @@ def _detach_sandbox_log_file(handler: logging.Handler) -> None:
         logging.getLogger().removeHandler(handler)
     with contextlib.suppress(Exception):
         handler.close()
+    # Announce the loss on `/log` so a truncated post-mortem file is
+    # distinguishable from a sandbox that went quiet. The wire path is safe
+    # here — it is the FILE we can no longer write, not the stream.
+    with contextlib.suppress(Exception):
+        _emit_stdio_line_wire(
+            "stderr",
+            "agentix: durable sandbox log detached after a write failure; later output is stream-only",
+        )
 
 
 def _make_stdout_eager() -> None:
@@ -409,10 +455,13 @@ def _emit_stdio_line(stream: str, raw: bytes) -> None:
     text = raw.decode("utf-8", "replace").rstrip("\r\n")
     handler = _sandbox_log_handler
     if handler is not None:
-        # Direct emit — routing through a logger would multiply the line
-        # into the console/bridge handlers.
+        # handler.handle(), not a logger call: routing through a logger would
+        # multiply the line into the console/bridge handlers. handle() (unlike
+        # a bare emit()) takes the handler lock — sync remote fns run in
+        # threads, so their stdlib records reach this same handler locked, and
+        # an unlocked emit racing a rollover kills the file for good.
         with contextlib.suppress(Exception):
-            handler.emit(
+            handler.handle(
                 logging.makeLogRecord(
                     {
                         "name": f"agentix.sandbox.{stream}",
@@ -423,6 +472,10 @@ def _emit_stdio_line(stream: str, raw: bytes) -> None:
                     }
                 )
             )
+    _emit_stdio_line_wire(stream, text)
+
+
+def _emit_stdio_line_wire(stream: str, text: str) -> None:
     emit_worker_record(
         {
             "name": f"agentix.sandbox.{stream}",
@@ -454,6 +507,8 @@ def main() -> None:
         asyncio.run(_amain())
     except KeyboardInterrupt:
         pass
+    finally:
+        _restore_real_stderr()
 
 
 if __name__ == "__main__":

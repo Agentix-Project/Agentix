@@ -337,8 +337,9 @@ async def test_stdlib_records_are_not_recaptured_as_stderr(live_server):
 @pytest.mark.asyncio
 async def test_sandbox_log_file_captures_records_and_stdio(live_server, tmp_path, monkeypatch):
     """#139: the worker keeps a durable on-disk copy at
-    $AGENTIX_LOG_DIR/sandbox.log — stdlib records AND captured stdout/stderr
-    lines — independent of `/log` stream delivery."""
+    $AGENTIX_LOG_DIR/sandbox-<worker-id>.log — stdlib records AND captured
+    stdout/stderr lines — independent of `/log` stream delivery. The name
+    is per-worker so machine-shared dirs never race rotations."""
     monkeypatch.setenv("AGENTIX_LOG_DIR", str(tmp_path))
     base_url = await live_server()
 
@@ -347,11 +348,11 @@ async def test_sandbox_log_file_captures_records_and_stdio(live_server, tmp_path
         assert await c.remote(print_stderr, "file probe stderr") == "printed-stderr"
         assert await c.remote(log_one_record, "file probe record") == "logged"
 
-    log_file = tmp_path / "sandbox.log"
     deadline = asyncio.get_event_loop().time() + 3.0
     text = ""
     while asyncio.get_event_loop().time() < deadline:
-        text = log_file.read_text(encoding="utf-8") if log_file.exists() else ""
+        files = sorted(tmp_path.glob("sandbox-*.log"))
+        text = "".join(f.read_text(encoding="utf-8") for f in files)
         if all(p in text for p in ("file probe stdout", "file probe stderr", "file probe record")):
             break
         await asyncio.sleep(0.05)
