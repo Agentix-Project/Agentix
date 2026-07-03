@@ -73,6 +73,11 @@ def _encode_ext(obj: Any) -> msgpack.ExtType:
     if _HAS_NUMPY:
         np = _numpy()
         if isinstance(obj, np.ndarray):
+            if obj.dtype.hasobject or obj.dtype.names is not None:
+                # `dtype.str` drops field names/types (a structured dtype
+                # collapses to '|V<size>'), and object arrays are pointers —
+                # neither round-trips. Refuse loudly at the source.
+                raise TypeError(f"agentix.codec: cannot encode ndarray of dtype {obj.dtype}")
             header = f"{obj.dtype.str}|{','.join(map(str, obj.shape))}".encode()
             return msgpack.ExtType(_EXT_NDARRAY, header + b"\x00" + obj.tobytes())
     if isinstance(obj, BaseModel):
@@ -103,7 +108,10 @@ def _decode_ndarray(data: bytes) -> Any:
         dtype = np.dtype(dtype_str)
     except Exception as exc:
         raise ExtDecodeError(f"ndarray ext: unknown dtype {dtype_str!r}") from exc
-    if dtype.hasobject or dtype.itemsize == 0:
+    if dtype.hasobject or dtype.itemsize == 0 or dtype.subdtype is not None or dtype.kind == "V":
+        # object: pointers; V/void: a structured dtype's `.str` collapses to
+        # '|V<size>' with fields stripped; subarray: frombuffer expands extra
+        # elements. No real encode produces any of them (see `_encode_ext`).
         raise ExtDecodeError(f"ndarray ext: refusing dtype {dtype_str!r}")
     try:
         shape = tuple(int(s) for s in shape_str.split(",") if s)
@@ -113,7 +121,13 @@ def _decode_ndarray(data: bytes) -> Any:
         raise ExtDecodeError("ndarray ext: negative shape entry")
     if math.prod(shape) * dtype.itemsize != len(raw):
         raise ExtDecodeError("ndarray ext: shape does not match buffer size")
-    return np.frombuffer(raw, dtype=dtype).reshape(shape)
+    try:
+        return np.frombuffer(raw, dtype=dtype).reshape(shape)
+    except Exception as exc:
+        # Belt-and-braces for numpy refusals the checks above don't model
+        # (e.g. ndim above numpy's cap) — the decode guarantee is that a bad
+        # payload surfaces as ExtDecodeError, never a raw numpy error.
+        raise ExtDecodeError(f"ndarray ext: {exc!r}") from exc
 
 
 def _decode_ext(code: int, data: bytes) -> Any:
@@ -132,7 +146,9 @@ def _decode_ext(code: int, data: bytes) -> Any:
         except ExtDecodeError:
             raise
         except Exception as exc:
-            raise ExtDecodeError(f"pydantic ext: malformed payload: {exc}") from exc
+            # `{exc!r}`: msgpack's FormatError stringifies to "" — keep the
+            # cause class visible in log lines that print only str(error).
+            raise ExtDecodeError(f"pydantic ext: malformed payload: {exc!r}") from exc
         finally:
             _ext_depth -= 1
     return msgpack.ExtType(code, data)

@@ -120,6 +120,40 @@ def test_ndarray_shape_buffer_mismatch_refused() -> None:
         unpack(ndarray_ext(b"<f8|3", b"\x00" * 8))  # 3 float64 needs 24 bytes
 
 
+def test_ndarray_excessive_dimensions_refused() -> None:
+    # prod((1,)*100) == 1 passes the size check, but numpy caps ndim at 64 —
+    # the refusal must be an ExtDecodeError, not numpy's ValueError.
+    header = b"<f8|" + b",".join([b"1"] * 100)
+    with pytest.raises(ExtDecodeError):
+        unpack(ndarray_ext(header, b"\x00" * 8))
+
+
+def test_ndarray_subarray_dtype_refused() -> None:
+    # '(2,2)f8' parses to a subarray dtype (itemsize 32) that frombuffer
+    # expands to extra elements — no real encode produces it.
+    with pytest.raises(ExtDecodeError):
+        unpack(ndarray_ext(b"(2,2)f8|2", b"\x00" * 64))
+
+
+def test_ndarray_void_dtype_refused() -> None:
+    # '|V12' is what a structured dtype's `.str` collapses to — decoding it
+    # would return silently field-stripped data.
+    with pytest.raises(ExtDecodeError):
+        unpack(ndarray_ext(b"V12|3", b"\x00" * 36))
+
+
+def test_structured_array_refused_at_encode() -> None:
+    # `dtype.str` drops field names/types, so a structured array cannot
+    # round-trip — refuse loudly at the source instead of corrupting.
+    with pytest.raises(TypeError):
+        pack(np.zeros(3, dtype="i4,f8"))
+
+
+def test_object_array_refused_at_encode() -> None:
+    with pytest.raises(TypeError):
+        pack(np.array([object()], dtype=object))
+
+
 def test_pydantic_ext_nesting_is_bounded() -> None:
     # Each ext-2 level re-enters the unpacker; unbounded nesting would
     # recurse toward a RecursionError. Legitimate nesting is shallow
@@ -140,5 +174,7 @@ def test_pydantic_ext_shallow_nesting_decodes() -> None:
 
 def test_pydantic_ext_malformed_payload_refused() -> None:
     blob = msgpack.packb(msgpack.ExtType(_EXT_PYDANTIC, b"\xc1"))  # 0xc1: never valid
-    with pytest.raises(ExtDecodeError):
+    with pytest.raises(ExtDecodeError, match="FormatError"):
+        # msgpack's FormatError stringifies to "" — the wrapped message must
+        # still name the cause class.
         unpack(blob)
