@@ -17,6 +17,7 @@ import decimal
 import fractions
 import pathlib
 import pickle
+import sys
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -64,49 +65,23 @@ def _restore_allowlist():
         _POLICY_CALLS.extend(policy_calls)
 
 
-# ── objects that direct reconstruction at non-allowlisted callables ──────────
-# Each `__reduce__` names a callable that a restricted host decode must refuse.
-# The referenced callables are the ones named in issue #116; the arguments are
-# benign so nothing runs even if a regression let one through.
-
-
-class _ReducesToSubprocessCheckOutput:
-    def __reduce__(self):
-        import subprocess
-
-        return (subprocess.check_output, (["true"],))
-
-
-class _ReducesToSubprocessPopen:
-    def __reduce__(self):
-        import subprocess
-
-        return (subprocess.Popen, (["true"],))
-
-
-class _ReducesToEval:
-    def __reduce__(self):
-        return (eval, ("1 + 1",))
-
-
-class _ReducesToOsSystem:
-    def __reduce__(self):
-        import os
-
-        return (os.system, ("true",))
-
-
 @pytest.mark.parametrize(
-    "obj_cls",
+    ("module", "name"),
     [
-        _ReducesToSubprocessCheckOutput,
-        _ReducesToSubprocessPopen,
-        _ReducesToEval,
-        _ReducesToOsSystem,
+        pytest.param("subprocess", "check_output", id="subprocess-check-output"),
+        pytest.param("subprocess", "Popen", id="subprocess-popen"),
+        pytest.param("builtins", "eval", id="builtins-eval"),
+        pytest.param("os", "system", id="os-system"),
     ],
 )
-def test_non_allowlisted_callable_is_refused(obj_cls) -> None:
-    blob = pickle.dumps(obj_cls())
+def test_non_allowlisted_callable_is_refused_without_invocation(module: str, name: str) -> None:
+    blob = _global_reference(module, name)
+
+    # GLOBAL + STOP resolves the object but never invokes it. Keep the
+    # regression harmless even if the restricted decoder accidentally admits
+    # the same reference in the future.
+    assert callable(pickle.loads(blob))
+
     with pytest.raises(RestrictedUnpickleError):
         restricted_loads(blob)
 
@@ -267,10 +242,19 @@ def test_numpy_array_round_trips() -> None:
 def test_numpy_object_array_gates_nested_globals() -> None:
     """An object-dtype array pickles its elements in the same stream, so a
     non-allowlisted callable referenced by an element is still refused."""
+
+    class _ReducesToPolicyRecorder:
+        def __reduce__(self):
+            return (_policy_recorder, ("numpy-object-array-marker",))
+
     np = pytest.importorskip("numpy")
-    arr = np.array([_ReducesToOsSystem()], dtype=object)
+    arr = np.array([_ReducesToPolicyRecorder()], dtype=object)
+    blob = pickle.dumps(arr)
+
+    policy_calls_before = list(_POLICY_CALLS)
     with pytest.raises(RestrictedUnpickleError):
-        restricted_loads(pickle.dumps(arr))
+        restricted_loads(blob)
+    assert _POLICY_CALLS == policy_calls_before
 
 
 def test_none_returns_none() -> None:
@@ -328,6 +312,32 @@ def test_allow_type_opt_in_is_exact() -> None:
 
     with pytest.raises(RestrictedUnpickleError):
         restricted_loads(pickle.dumps(_ProjectResult(patch="d", score=1)))
+
+
+def test_safe_type_identity_must_resolve_to_a_type(monkeypatch) -> None:
+    policy_calls_before = list(_POLICY_CALLS)
+    monkeypatch.setattr(datetime, "date", _policy_recorder)
+
+    with pytest.raises(
+        RestrictedUnpickleError,
+        match="allowlisted value global did not resolve to a type",
+    ):
+        restricted_loads(_global_reference("datetime", "date"))
+    assert _POLICY_CALLS == policy_calls_before
+
+
+def test_allow_type_uses_registered_class_after_module_rebind(monkeypatch) -> None:
+    registered_class = _ProjectPoint
+    value = registered_class(1, 2)
+    safepickle.allow_type(registered_class)
+    blob = pickle.dumps(value)
+
+    module = sys.modules[registered_class.__module__]
+    monkeypatch.setattr(module, registered_class.__qualname__, object)
+
+    out = restricted_loads(blob)
+    assert type(out) is registered_class
+    assert out == value
 
 
 def test_allow_type_requires_a_class() -> None:

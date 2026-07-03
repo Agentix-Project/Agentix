@@ -90,19 +90,3 @@ def spawn_stdin_reading_child() -> int:
         timeout=10,
     )
     return proc.returncode
-
-
-class _ReducesToSubprocess:
-    """A return object whose `__reduce__` directs reconstruction at
-    `subprocess.check_output` — a callable the host must not invoke while
-    decoding a sandbox return value (#116). The argument is benign; the host's
-    restricted unpickler refuses it before anything runs."""
-
-    def __reduce__(self):
-        import subprocess
-
-        return (subprocess.check_output, (["true"],))
-
-
-def return_unsafe_reducer() -> object:
-    return _ReducesToSubprocess()

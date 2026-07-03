@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import pickle
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -17,11 +19,30 @@ import socketio
 from agentix import Failed, Ok, RemoteCallError, RuntimeClient
 from agentix.runtime.shared.codec import pack, unpack
 from agentix.runtime.shared.models import RemoteRequest
+from agentix.runtime.shared.safepickle import RestrictedUnpickleError
 from tests import _worker_target as target
 from tests._rpc_helpers import request_for
 
 pytestmark = pytest.mark.asyncio
 RPC_NAMESPACE = "/rpc"
+
+_HOST_DECODE_CALLS: list[str] = []
+
+
+def _host_decode_recorder() -> None:
+    _HOST_DECODE_CALLS.append("called")
+
+
+def _resolution_only_host_value() -> bytes:
+    module = _host_decode_recorder.__module__
+    name = _host_decode_recorder.__qualname__
+    return f"c{module}\n{name}\n.".encode("ascii")
+
+
+def _assert_resolution_only_value_is_inert(raw_value: bytes) -> None:
+    _HOST_DECODE_CALLS.clear()
+    assert pickle.loads(raw_value) is _host_decode_recorder
+    assert _HOST_DECODE_CALLS == []
 
 
 # ── basics ─────────────────────────────────────────────────────────────
@@ -158,6 +179,7 @@ async def test_same_call_id_via_mixed_paths_runs_fn_exactly_once(use_inprocess_w
 
     assert payload["call_id"] == call_id
     import pickle as _pickle
+
     assert _pickle.loads(payload["value"]) == 1, "fn must have run exactly once"
 
 
@@ -211,6 +233,7 @@ async def test_runtime_replays_unacked_result_after_reconnect(use_inprocess_work
 
     assert payload["call_id"] == call_id
     import pickle as _pickle
+
     assert _pickle.loads(payload["value"]) == 1, "fn must run exactly once"
 
 
@@ -297,8 +320,7 @@ async def test_remote_accepts_script_main_function(
 ):
     script = tmp_path / "runner_like.py"
     script.write_text(
-        "async def get_patch(workdir):\n"
-        "    return f'patch from {workdir}'\n",
+        "async def get_patch(workdir):\n    return f'patch from {workdir}'\n",
     )
     monkeypatch.syspath_prepend(str(tmp_path))
 
@@ -308,8 +330,7 @@ async def test_remote_accepts_script_main_function(
     monkeypatch.setattr(main_module, "__spec__", None, raising=False)
     namespace = {"__name__": "__main__"}
     exec(
-        "async def get_patch(workdir):\n"
-        "    return f'patch from {workdir}'\n",
+        "async def get_patch(workdir):\n    return f'patch from {workdir}'\n",
         namespace,
     )
 
@@ -528,21 +549,70 @@ async def test_malformed_call_error_is_typed_not_keyerror(use_inprocess_worker, 
         assert ei.value.error.type == "MalformedError"
 
 
-async def test_unsafe_return_value_refused_host_side(use_inprocess_worker, live_server):
-    """A sandbox return value whose `__reduce__` names a non-allowlisted
-    callable is refused when the host decodes it (#116)."""
-    from agentix.runtime.shared.safepickle import RestrictedUnpickleError
+async def test_http_fast_path_refuses_nonallowlisted_return_without_network():
+    raw_value = _resolution_only_host_value()
+    _assert_resolution_only_value_is_inert(raw_value)
 
-    use_inprocess_worker()
-    base_url = await live_server()
-    async with RuntimeClient(base_url) as c:
+    request_payload = request_for(target.add, args=[1, 2], call_id="unsafe-http").model_dump()
+
+    def reply(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/call"
+        assert unpack(request.content)["call_id"] == "unsafe-http"
+        return httpx.Response(
+            200,
+            content=pack({"ok": True, "value": raw_value}),
+            headers={"content-type": "application/msgpack"},
+        )
+
+    c = RuntimeClient("http://runtime.test")
+    await c._client.aclose()
+    c._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(reply),
+        base_url="http://runtime.test",
+    )
+    try:
         with pytest.raises(RestrictedUnpickleError):
-            await c.remote(target.return_unsafe_reducer)
+            await c._try_http_fast_path(
+                sio=SimpleNamespace(sid="in-memory-sio"),
+                payload=request_payload,
+            )
+    finally:
+        await c.close()
+    assert _HOST_DECODE_CALLS == []
 
 
-async def test_pydantic_return_value_round_trips_through_restricted_loads(
-    use_inprocess_worker, live_server
-):
+async def test_socketio_result_queue_refuses_nonallowlisted_return_without_network(monkeypatch):
+    raw_value = _resolution_only_host_value()
+    _assert_resolution_only_value_is_inert(raw_value)
+
+    c = RuntimeClient("http://runtime.test", http_sync_ms=None)
+
+    async def emit(event: str, data: bytes, *, namespace: str) -> None:
+        assert namespace == RPC_NAMESPACE
+        if event == "cancel":
+            return
+        assert event == "call"
+        payload = unpack(data)
+        call_id = payload["call_id"]
+        await c._pending[call_id].put(
+            ("result", {"call_id": call_id, "value": raw_value}),
+        )
+
+    fake_sio = SimpleNamespace(emit=emit)
+
+    async def ensure_sio():
+        return fake_sio
+
+    monkeypatch.setattr(c, "_ensure_sio", ensure_sio)
+    try:
+        with pytest.raises(RestrictedUnpickleError):
+            await c.remote(target.add, 1, 2)
+    finally:
+        await c.close()
+    assert _HOST_DECODE_CALLS == []
+
+
+async def test_pydantic_return_value_round_trips_through_restricted_loads(use_inprocess_worker, live_server):
     """The restricted host boundary must not break the common case: a custom
     pydantic model returned from the sandbox still decodes."""
     use_inprocess_worker()
