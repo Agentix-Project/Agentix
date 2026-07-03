@@ -45,17 +45,17 @@
     "links": [
       {
         "label": "Cookbook",
-        "href": "https://github.com/Agentiix/agentix-cookbook"
+        "href": "https://github.com/Agentix-Project/agentix-cookbook"
       },
       {
         "label": "GitHub",
-        "href": "https://github.com/Agentiix/Agentix"
+        "href": "https://github.com/Agentix-Project/Agentix"
       }
     ]
   },
   "footer": {
     "socials": {
-      "github": "https://github.com/Agentiix/Agentix"
+      "github": "https://github.com/Agentix-Project/Agentix"
     }
   }
 }

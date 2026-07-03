@@ -1,6 +1,6 @@
 # Docs deploy
 
-For maintainers. The public docs site at **`https://agentiix.github.io/`**
+For maintainers. The public docs site at **`https://agentix-project.github.io/`**
 is built from the [`docs/`](.) directory with
 [Mintlify](https://mintlify.com) and self-hosted on GitHub Pages.
 
@@ -8,7 +8,7 @@ The [`docs.yml`](../.github/workflows/docs.yml) workflow runs on every
 push that touches `docs/**`:
 
 ```text
-mint validate (strict)  →  mint export (static Next.js site)  →  push to Agentiix/Agentiix.github.io
+mint validate (strict)  →  mint export (static Next.js site)  →  push to Agentix-Project/Agentix-Project.github.io
 ```
 
 The one-time setup below wires up that cross-repo push. Once it's done,
@@ -16,7 +16,7 @@ day-to-day work is just [editing pages](#adding-a-page) and pushing.
 
 ## One-time setup
 
-1. **Create the sibling repo `Agentiix/Agentiix.github.io`** (public,
+1. **Create the sibling repo `Agentix-Project/Agentix-Project.github.io`** (public,
    empty). GitHub Pages serves any repo named `<org>.github.io` at
    `<org>.github.io/` automatically.
 
@@ -25,7 +25,7 @@ day-to-day work is just [editing pages](#adding-a-page) and pushing.
 
 3. **Create a deploy token.** Generate a fine-grained personal access
    token (Settings → Developer settings → Fine-grained tokens) with:
-   - *Repository access*: only `Agentiix/Agentiix.github.io`
+   - *Repository access*: only `Agentix-Project/Agentix-Project.github.io`
    - *Permissions*: **Contents: Read and write**
 
 4. **Add the token as a secret on this repo.** Settings → Secrets and

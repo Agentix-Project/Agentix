@@ -57,11 +57,11 @@ jobs:
                   html.write_text(s.replace('</head>', snippet + '</head>', 1))
           PY
 
-      - name: Deploy to Agentiix.github.io
+      - name: Deploy to Agentix-Project.github.io
         uses: peaceiris/actions-gh-pages@v4
         with:
           personal_token: ${{ secrets.DOCS_DEPLOY_TOKEN }}
-          external_repository: Agentiix/Agentiix.github.io
+          external_repository: Agentix-Project/Agentix-Project.github.io
           publish_branch: main
           publish_dir: docs/_site
           force_orphan: true

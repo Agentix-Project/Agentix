@@ -1,6 +1,6 @@
 # agentix-provider-docker
 
-Docker provider backend for [Agentix](https://github.com/Agentiix/Agentix).
+Docker provider backend for [Agentix](https://github.com/Agentix-Project/Agentix).
 
 Provisions a sandbox by running a deployed Agentix bundle in a
 Docker-compatible runtime, returns the runtime URL the orchestrator's
