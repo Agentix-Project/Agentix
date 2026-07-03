@@ -29,6 +29,19 @@ from agentix.runtime.shared.safepickle import (
 )
 
 
+def _global_reference(module: str, name: str) -> bytes:
+    assert "\n" not in module and "\n" not in name
+    return f"c{module}\n{name}\n.".encode("ascii")
+
+
+_POLICY_CALLS: list[str] = []
+
+
+def _policy_recorder(value: str) -> str:
+    _POLICY_CALLS.append(value)
+    return value
+
+
 @pytest.fixture(autouse=True)
 def _restore_allowlist():
     """`allow_module` / `allow_callable` mutate module-global state — snapshot
@@ -37,6 +50,7 @@ def _restore_allowlist():
     callables = set(safepickle.SAFE_CALLABLES)
     allowed_types = getattr(safepickle, "_ALLOWED_TYPES", None)
     types = dict(allowed_types) if allowed_types is not None else None
+    policy_calls = list(_POLICY_CALLS)
     try:
         yield
     finally:
@@ -47,6 +61,8 @@ def _restore_allowlist():
         if allowed_types is not None and types is not None:
             allowed_types.clear()
             allowed_types.update(types)
+        _POLICY_CALLS.clear()
+        _POLICY_CALLS.extend(policy_calls)
 
 
 # ── objects that direct reconstruction at non-allowlisted callables ──────────
@@ -94,6 +110,35 @@ def test_non_allowlisted_callable_is_refused(obj_cls) -> None:
     blob = pickle.dumps(obj_cls())
     with pytest.raises(RestrictedUnpickleError):
         restricted_loads(blob)
+
+
+def test_unregistered_first_party_function_is_refused() -> None:
+    with pytest.raises(RestrictedUnpickleError):
+        restricted_loads(_global_reference("agentix.runtime.shared.safepickle", "_trust_enabled"))
+
+
+@pytest.mark.parametrize("name", ["allow_module", "allow_callable", "allow_type"])
+def test_policy_functions_are_refused(name: str) -> None:
+    with pytest.raises(RestrictedUnpickleError):
+        restricted_loads(_global_reference("agentix.runtime.shared.safepickle", name))
+
+
+def test_one_load_cannot_modify_policy_then_invoke_new_global() -> None:
+    _POLICY_CALLS.clear()
+    before_callables = set(safepickle.SAFE_CALLABLES)
+    before_types = dict(safepickle._ALLOWED_TYPES)
+    payload = (
+        b"\x80\x04"
+        b"cagentix.runtime.shared.safepickle\nallow_callable\n"
+        b"(Vtests.runtime.test_safepickle\nV_policy_recorder\ntR0"
+        b"ctests.runtime.test_safepickle\n_policy_recorder\n"
+        b"(Vmarker\ntR."
+    )
+    with pytest.raises(RestrictedUnpickleError):
+        restricted_loads(payload)
+    assert _POLICY_CALLS == []
+    assert safepickle.SAFE_CALLABLES == before_callables
+    assert safepickle._ALLOWED_TYPES == before_types
 
 
 def test_refusal_does_not_import_the_named_module() -> None:
