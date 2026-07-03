@@ -526,3 +526,27 @@ async def test_malformed_call_error_is_typed_not_keyerror(use_inprocess_worker, 
         with pytest.raises(RemoteCallError) as ei:
             await task
         assert ei.value.error.type == "MalformedError"
+
+
+async def test_unsafe_return_value_refused_host_side(use_inprocess_worker, live_server):
+    """A sandbox return value whose `__reduce__` names a non-allowlisted
+    callable is refused when the host decodes it (#116)."""
+    from agentix.runtime.shared.safepickle import RestrictedUnpickleError
+
+    use_inprocess_worker()
+    base_url = await live_server()
+    async with RuntimeClient(base_url) as c:
+        with pytest.raises(RestrictedUnpickleError):
+            await c.remote(target.return_unsafe_reducer)
+
+
+async def test_pydantic_return_value_round_trips_through_restricted_loads(
+    use_inprocess_worker, live_server
+):
+    """The restricted host boundary must not break the common case: a custom
+    pydantic model returned from the sandbox still decodes."""
+    use_inprocess_worker()
+    base_url = await live_server()
+    async with RuntimeClient(base_url) as c:
+        result = await c.remote(target.echo, "hi")
+    assert result.msg == "echo:hi"

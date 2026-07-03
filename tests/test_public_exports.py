@@ -15,6 +15,7 @@ def test_failure_vocabulary_importable_from_agentix() -> None:
         Failed,
         Ok,
         RemoteCallError,
+        RestrictedUnpickleError,
         Result,
         RuntimeUnreachable,
         WorkerExited,
@@ -26,6 +27,7 @@ def test_failure_vocabulary_importable_from_agentix() -> None:
     # allow branching.
     assert issubclass(WorkerExited, RemoteCallError)
     assert issubclass(CallCancelled, RemoteCallError)
+    assert issubclass(RestrictedUnpickleError, Exception)
     assert Ok(1).value == 1 and Failed(ValueError()).error is not None
     assert Result[int]  # generic union alias is subscriptable
     assert callable(configure_logging)
@@ -36,7 +38,7 @@ def test_failure_vocabulary_importable_from_agentix() -> None:
 def test_failure_vocabulary_in_dunder_all() -> None:
     for name in (
         "CallCancelled", "CallTimeout", "Failed", "Ok", "Result",
-        "RuntimeUnreachable", "WorkerExited", "configure_logging",
+        "RestrictedUnpickleError", "RuntimeUnreachable", "WorkerExited", "configure_logging",
     ):
         assert name in agentix.__all__
 
