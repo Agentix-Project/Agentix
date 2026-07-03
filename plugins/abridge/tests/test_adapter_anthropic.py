@@ -79,7 +79,8 @@ async def test_anthropic_messages_translates_round_trip(monkeypatch) -> None:
 async def test_anthropic_streaming_returns_sse(monkeypatch) -> None:
     adapter = AnthropicFromOpenAIClient(api_key="k")
     monkeypatch.setattr(
-        adapter._client.chat.completions, "create",
+        adapter._client.chat.completions,
+        "create",
         AsyncMock(return_value=_mock_completion()),
     )
     result = await adapter.messages(
@@ -119,3 +120,40 @@ async def test_aclose_closes_upstream_sdk_client() -> None:
     assert not adapter._client.is_closed()
     await adapter.aclose()
     assert adapter._client.is_closed()
+
+
+@pytest.mark.asyncio
+async def test_upstream_params_forced_onto_upstream_call(monkeypatch) -> None:
+    """`upstream_params` (sampling, reasoning_effort, ...) are merged into
+    every upstream body AFTER conversion — the operator's values win over
+    whatever the agent sent — and the non-streaming invariant survives."""
+    adapter = AnthropicFromOpenAIClient(
+        api_key="k",
+        model="upstream-model",
+        upstream_params={
+            "reasoning_effort": "medium",
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "stream": True,  # must NOT be able to break the one-shot upstream call
+        },
+    )
+    create = AsyncMock(return_value=_mock_completion(content="ok"))
+    monkeypatch.setattr(adapter._client.chat.completions, "create", create)
+
+    await adapter.messages(
+        _req(
+            "/v1/messages",
+            {
+                "model": "claude-3-haiku",
+                "max_tokens": 8,
+                "temperature": 0.2,
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+    )
+
+    kwargs = create.call_args.kwargs
+    assert kwargs["reasoning_effort"] == "medium"
+    assert kwargs["temperature"] == 1.0  # operator value beats the agent's 0.2
+    assert kwargs["top_p"] == 0.95
+    assert kwargs["stream"] is False

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from agentix.utils import trace
 
@@ -50,10 +50,7 @@ else:
 logger = logging.getLogger(__name__)
 
 
-_INSTALL_HINT = (
-    "AnthropicFromOpenAIClient requires the openai SDK. "
-    "Install with: pip install 'agentix-bridge[openai]'"
-)
+_INSTALL_HINT = "AnthropicFromOpenAIClient requires the openai SDK. Install with: pip install 'agentix-bridge[openai]'"
 
 
 class AnthropicFromOpenAIClient:
@@ -71,6 +68,11 @@ class AnthropicFromOpenAIClient:
     `count_tokens` is answered locally with a character-based estimate
     (no upstream call); the real Anthropic count_tokens API is
     tokenizer-specific and an OpenAI endpoint can't satisfy it.
+
+    `upstream_params`, when set, is merged into every upstream body after
+    conversion — the operator's values (sampling, `reasoning_effort`, any
+    vendor knob) win over whatever the agent sent. The upstream call stays
+    non-streaming regardless.
     """
 
     def __init__(
@@ -81,18 +83,19 @@ class AnthropicFromOpenAIClient:
         model: str | None = None,
         timeout: float = 120.0,
         session_id: str | None = None,
+        upstream_params: dict[str, Any] | None = None,
     ) -> None:
         if AsyncOpenAI is None:
             raise ImportError(_INSTALL_HINT)
         self._client = AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
         self._model = model
+        self._upstream_params = dict(upstream_params or {})
         self.session_id = session_id or uuid.uuid4().hex
 
     @on("/v1/messages")
     async def messages(self, request: Request) -> ClientResponse:
-        openai_body = anthropic_messages_to_openai(
-            request.body, upstream_model=self._model
-        )
+        openai_body = anthropic_messages_to_openai(request.body, upstream_model=self._model)
+        openai_body.update(self._upstream_params)
         openai_body["stream"] = False
         record_id = uuid.uuid4().hex
         extra_headers = {
@@ -104,9 +107,7 @@ class AnthropicFromOpenAIClient:
         # is the right scope for `populate_anthropic_span` to find.
         with trace.span(f"anthropic messages {request.body.get('model') or ''}"):
             try:
-                completion = await self._client.chat.completions.create(
-                    **openai_body, extra_headers=extra_headers
-                )
+                completion = await self._client.chat.completions.create(**openai_body, extra_headers=extra_headers)
             except OpenAIError as exc:
                 status = int(getattr(exc, "status_code", 502) or 502)
                 raise AbridgeError(f"openai: {exc}", status_code=status) from exc
@@ -122,9 +123,7 @@ class AnthropicFromOpenAIClient:
 
     @on("/v1/messages/count_tokens")
     async def count_tokens(self, request: Request) -> ClientResponse:
-        return ClientResponse.json(
-            {"input_tokens": count_anthropic_tokens(request.body).input_tokens}
-        )
+        return ClientResponse.json({"input_tokens": count_anthropic_tokens(request.body).input_tokens})
 
     def environ(self, handle: TunnelHandle) -> dict[str, str]:
         """Same env vars as `AnthropicClient.environ` — from the agent's
