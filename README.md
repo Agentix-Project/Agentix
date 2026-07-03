@@ -170,7 +170,7 @@ roadmap.
 | | swe-rex · E2B · Daytona · Harbor | Agentix |
 |---|---|---|
 | **Reach into the sandbox** | Fixed RPC surface, or shell / `docker exec` + vendor SDK | `await sandbox.remote(fn, ...)` — any importable function |
-| **Sandbox logs & stdout** | Scrape command output | stdlib `logging` auto-bridged to the host over `/log` |
+| **Sandbox logs & stdout** | Scrape command output | stdlib `logging` **and** captured stdout/stderr auto-bridged to the host over `/log`, plus a durable in-sandbox `sandbox-<id>.log` |
 | **Observability** | Bring your own | `/trace` spans (OTel-shaped) for every step |
 | **Model under test** | Whatever the agent's SDK speaks | [`abridge`](plugins/abridge/README.md) translates Anthropic → OpenAI-compatible at the wire — Claude-speaking agents on OpenAI, OpenRouter, vLLM, your gateway |
 
@@ -201,8 +201,10 @@ Five capabilities, one primitive underneath each:
 inside the sandbox and returns its typed value. No fixed RPC surface to
 conform to, no base class to inherit — extend the loop by writing another
 function. The agent, the repo setup, the scorer are all just functions
-you remote-call. `print`, stdlib `logging`, and OTel-shaped `/trace`
-spans from inside the sandbox replay on the host automatically.
+you remote-call. Captured stdout/stderr (`print`, subprocess output),
+stdlib `logging`, and OTel-shaped `/trace` spans from inside the sandbox
+replay on the host automatically over `/log`; the same output is also
+kept in a durable `$AGENTIX_LOG_DIR/sandbox-<id>.log` for post-mortem.
 
 ### 2 · Eval/run any agent, in any sandbox, with any model
 
@@ -262,11 +264,12 @@ up). The core is `agentixx`; everything else is an optional plugin under
 | Package | Role |
 |---|---|
 | [`agentix-runtime-basic`](plugins/runtime-basic/README.md) | `agentix.bash`, file ops, sandbox primitives |
-| [`agentix-provider-docker`](plugins/providers/docker) · [`-apptainer`](plugins/providers/apptainer) | Sandbox backends ([`-daytona`](plugins/providers/daytona) · [`-e2b`](plugins/providers/e2b) are placeholders pending integration) |
+| [`agentix-provider-docker`](plugins/providers/docker) · [`-apptainer`](plugins/providers/apptainer) · [`-uv`](plugins/providers/uv/README.md) | Sandbox backends — Docker/podman, Apptainer, and a local uv-materialized runtime (no container) ([`-daytona`](plugins/providers/daytona) · [`-e2b`](plugins/providers/e2b) are placeholders pending integration) |
 | [`agentix-runner`](plugins/runner/README.md) | `run_rollouts(...)` — batch eval/rollout orchestration |
 | [`agentix-dataset-swe`](plugins/datasets/swebench) | SWE-bench task images + official-harness scoring |
 | [`agentix-agent-claude-code`](plugins/agents/claude-code) · [`-mini-swe-agent`](plugins/agents/mini-swe-agent) · [`-qwen-code`](plugins/agents/qwen-code) | Agent adapters |
-| [`agentix-bridge`](plugins/abridge/README.md) | Model translation + rollout → RL buffer capture (abridge) |
+| [`agentix-bridge`](plugins/abridge/README.md) | Model translation + tunnel-traffic recording (abridge) |
+| [`agentix-tito`](plugins/tito/README.md) | Token-in / token-out session-recording gateway |
 | [`agentix-trace-otel`](plugins/trace-otel/README.md) | Export `/trace` spans to any OTLP backend |
 
 Drop a directory under `plugins/` and it becomes a workspace member;

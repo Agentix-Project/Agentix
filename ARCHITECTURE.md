@@ -145,8 +145,14 @@ becomes a wire payload like:
 ```
 
 Sync and async functions both work as targets; the worker awaits when the
-return value is awaitable. Args and return values round-trip as pickle
-blobs — the runtime does not run pydantic validation on the wire today.
+return value is awaitable. Payloads round-trip as pickle blobs, but the two
+directions are asymmetric: host→sandbox `arguments` are decoded with plain
+`pickle.loads` (the host is trusted), while the sandbox→host return value —
+which a less-trusted workload can shape — is decoded through a restricted
+allowlist loader (`agentix.runtime.shared.safepickle`) that admits only
+reviewed value types and raises the public `agentix.RestrictedUnpickleError`
+on anything else. The runtime still does not run pydantic validation on the
+wire.
 
 ## Flow
 
@@ -166,12 +172,21 @@ Single runtime worker process
   pickle.loads(arguments)
   call fn(*args, **kwargs)   (awaiting when needed)
   pickle.dumps(result)
+      |
+      v  call:result — host decodes via safepickle.restricted_loads
+        (allowlist; refuses unknown globals with RestrictedUnpickleError)
 ```
+
+The msgpack codec that frames every event and side-channel payload also
+validates its own extension types on decode, raising `ExtDecodeError`
+(`agentix.runtime.shared.codec`) on a malformed frame rather than letting a
+raw numpy/msgpack error escape.
 
 Side channels share the same Socket.IO connection:
 
 - `/trace` — span lifecycle from sandbox to host
-- `/log` — stdlib logging records from sandbox to host
+- `/log` — stdlib logging records plus captured stdout/stderr
+  (`agentix.sandbox.stdout` / `agentix.sandbox.stderr`) from sandbox to host
 - `/<plugin>` — plugin namespaces registered via `agentix.sio`
 
 ## Worker model
@@ -183,7 +198,14 @@ anything installed into the bundle can be imported. For each call it:
 1. resolves the `RemoteCallable` import path
 2. unpickles `(args, kwargs)`
 3. calls the callable (awaiting when needed)
-4. pickles the return value
+4. pickles the return value (the host decodes it through the restricted
+   allowlist loader, not plain `pickle.loads`)
+
+The worker also captures the process's stdout and stderr — `print()`,
+subprocess output, C-extension writes — replays each line on `/log` as
+`agentix.sandbox.stdout` / `agentix.sandbox.stderr`, and appends it to a
+durable `$AGENTIX_LOG_DIR/sandbox-<worker-id>.log` (default `/tmp/agentix`)
+so output survives a dropped connection.
 
 The single-worker model is intentional for now — it keeps runtime state
 and debugging simple while the public API settles. It is an

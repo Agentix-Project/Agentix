@@ -20,7 +20,7 @@ pip install agentix-provider-docker
 ## Use
 
 ```python
-from agentix import RuntimeClient, SandboxConfig, session
+from agentix import SandboxConfig
 from agentix.provider.docker import DockerProvider, DockerProviderConfig
 
 provider = DockerProvider(
@@ -32,16 +32,14 @@ provider = DockerProvider(
     )
 )
 
-async with session(
-    provider,
+async with provider.session(
     SandboxConfig(
         image="python:3.13-slim",
         bundle="/home/me/.cache/agentix/bundles/sha256-...",  # printed by `agentix deploy`
         resource={"cpu": 4, "memory": "16g", "gpu": 1},
     )
 ) as sandbox:
-    async with RuntimeClient(sandbox.runtime_url) as c:
-        ...
+    result = await sandbox.remote(my_fn, ...)
 ```
 
 ```bash

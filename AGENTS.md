@@ -94,10 +94,16 @@ Agentix/                       — repo root = workspace root
 │   │   ├── docker/            — `agentix-provider-docker` → `docker` + `podman`
 │   │   ├── daytona/           — `agentix-provider-daytona` → `daytona`
 │   │   ├── e2b/               — `agentix-provider-e2b` → `e2b`
-│   │   └── apptainer/         — `agentix-provider-apptainer` → `apptainer`
+│   │   ├── apptainer/         — `agentix-provider-apptainer` → `apptainer`
+│   │   └── uv/                — `agentix-provider-uv` → local uv-materialized runtime (no container)
 │   └── runtime-basic/         — `agentix-runtime-basic` → `bash` + `files`
 └── examples/
-    └── eval-cc-swe/           — `eval-cc-swe` cookbook example
+    ├── hello-world/           — minimal `remote(fn)` example
+    ├── run-swe-rollouts/      — batch SWE-bench rollouts via `agentix.runner`
+    ├── run-claude-code/       — Claude Code through the abridge tunnel
+    ├── run-mini-swe-agent/    — mini-swe-agent harness
+    ├── eval-tui/              — terminal eval dashboard
+    └── eval-web/              — web eval dashboard
 ```
 
 `[tool.uv.workspace] members = ["plugins/*"]` — drop a plugin dir under

@@ -86,6 +86,14 @@ At worker boot, Agentix installs a root `logging.Handler` that forwards
 `LogRecord` data over `/log`. The sandbox automatically registers the host
 consumer and replays those records into the host logging tree.
 
+Beyond stdlib records, the worker also captures the process's raw stdout and
+stderr — `print()`, subprocess output, C-extension writes — and replays each
+line over the same `/log` namespace under the logger names
+`agentix.sandbox.stdout` and `agentix.sandbox.stderr`. The identical output
+is also appended to a durable `$AGENTIX_LOG_DIR/sandbox-<worker-id>.log`
+(default `/tmp/agentix`; set the variable empty to disable), so output that
+outlives a dropped connection is still recoverable inside the sandbox.
+
 ```mermaid actions={false}
 flowchart LR
     SandboxLogger["Sandbox code<br/>logging.getLogger(...)"]

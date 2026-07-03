@@ -1,0 +1,40 @@
+[
+  {
+    "instance_id": "django__django-11099",
+    "resolved": true,
+    "patch_bytes": 1948,
+    "agent_exit": 0,
+    "error": null,
+    "skipped": null,
+    "score": {
+      "resolved": true,
+      "patch_applied": true,
+      "timed_out": false,
+      "test_status": {
+        "test_help_text (auth_tests.test_validators.UserAttributeSimilarityValidatorTest)": "PASSED",
+        "test_validate (auth_tests.test_validators.UserAttributeSimilarityValidatorTest)": "PASSED",
+        "test_validate_property (auth_tests.test_validators.UserAttributeSimilarityValidatorTest)": "PASSED",
+        "test_help_text (auth_tests.test_validators.CommonPasswordValidatorTest)": "PASSED",
+        "test_validate (auth_tests.test_validators.CommonPasswordValidatorTest)": "PASSED",
+        "test_validate_custom_list (auth_tests.test_validators.CommonPasswordValidatorTest)": "PASSED",
+        "test_validate_django_supplied_file (auth_tests.test_validators.CommonPasswordValidatorTest)": "PASSED",
+        "test_help_text (auth_tests.test_validators.MinimumLengthValidatorTest)": "PASSED",
+        "test_validate (auth_tests.test_validators.MinimumLengthValidatorTest)": "PASSED",
+        "test_help_text (auth_tests.test_validators.NumericPasswordValidatorTest)": "PASSED",
+        "test_validate (auth_tests.test_validators.NumericPasswordValidatorTest)": "PASSED",
+        "test_empty_password_validator_help_text_html (auth_tests.test_validators.PasswordValidationTest)": "PASSED",
+        "test_get_default_password_validators (auth_tests.test_validators.PasswordValidationTest)": "PASSED",
+        "test_get_password_validators_custom (auth_tests.test_validators.PasswordValidationTest)": "PASSED",
+        "test_password_changed (auth_tests.test_validators.PasswordValidationTest)": "PASSED",
+        "test_password_changed_with_custom_validator (auth_tests.test_validators.PasswordValidationTest)": "PASSED",
+        "test_password_validators_help_text_html (auth_tests.test_validators.PasswordValidationTest)": "PASSED",
+        "test_password_validators_help_text_html_escaping (auth_tests.test_validators.PasswordValidationTest)": "PASSED",
+        "test_password_validators_help_texts (auth_tests.test_validators.PasswordValidationTest)": "PASSED",
+        "test_validate_password (auth_tests.test_validators.PasswordValidationTest)": "PASSED",
+        "test_ascii_validator (auth_tests.test_validators.UsernameValidatorsTests)": "PASSED",
+        "test_unicode_validator (auth_tests.test_validators.UsernameValidatorsTests)": "PASSED"
+      }
+    },
+    "duration_s": 98.2
+  }
+]

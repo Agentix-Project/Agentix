@@ -108,7 +108,9 @@ with Agentix HEAD while the design is still moving quickly.
 - [`agentix-provider-docker`](plugins/providers/docker) /
   [`-daytona`](plugins/providers/daytona) /
   [`-e2b`](plugins/providers/e2b) /
-  [`-apptainer`](plugins/providers/apptainer) — sandbox backends.
+  [`-apptainer`](plugins/providers/apptainer) /
+  [`-uv`](plugins/providers/uv) — sandbox backends (the uv backend
+  materializes the runtime from a local uv venv, with no container).
 - [`agentix-runner`](plugins/runner) — `run_rollouts(...)` batch
   orchestration.
 - [`agentix-dataset-swe`](plugins/datasets/swebench) — SWE-bench task
@@ -116,7 +118,9 @@ with Agentix HEAD while the design is still moving quickly.
 - [`agentix-agent-*`](plugins/agents) — agent adapters (Claude Code,
   mini-swe-agent, Qwen Code).
 - [`agentix-bridge`](plugins/abridge) — model translation and host-side
-  rollout-to-RL-buffer capture (abridge).
+  tunnel-traffic recording (abridge).
+- [`agentix-tito`](plugins/tito) — token-in / token-out session-recording
+  gateway.
 - [`agentix-trace-otel`](plugins/trace-otel) — OTLP trace export.
 
 ## Later
@@ -158,6 +162,9 @@ dead-ends without expanding the current API prematurely.
 - **RolloutPool** — warm sandbox pool for batched RL rollouts.
 - **LLM proxy** — transparent proxy for API calls from remote functions,
   enabling token-level trajectory capture, cost tracking, and replay.
+  (Capture has partly shipped — `agentix-tito` records token-in/token-out
+  sessions and `abridge.Recorder` records tunnel request/response pairs;
+  cost tracking and replay remain.)
 - **Checkpoint / partial rollout** — snapshot a sandbox filesystem and
   loaded runtime state, then fork to explore alternative continuations.
 - **K8s provider backend** — `SandboxProvider` implementation using the

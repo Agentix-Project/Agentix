@@ -20,25 +20,50 @@ If an API is not listed here, treat it as internal and subject to change.
 
 ## Core Python API (`import agentix`)
 
-Top-level names exported by `agentix`:
+Top-level names exported by `agentix` (this list mirrors `agentix.__all__`):
+
+Remote calls and namespaces:
 
 - `RuntimeClient`
 - `RemoteCallable`
-- `RemoteCallError`
 - `Namespace`
-- `RemoteSioError`
+- `AsyncClientNamespace`
 - `register_namespace`
 - `request_handler` (host-side round-trip helper)
-- `AsyncClientNamespace`
+
+Providers and sandboxes:
+
 - `SandboxProvider`
 - `Sandbox`
 - `SandboxConfig`
+- `SandboxResource`
 - `SandboxId`
 - `SandboxInfo`
 - `providers`
 - `register_provider`
+- `BundleDeployer` (optional provider deploy hook)
+- `DeployedBundle`
+
+Failure and result vocabulary (raised by / returned from `.remote` and
+`.try_remote`):
+
+- `RemoteCallError`
+- `CallCancelled`
+- `CallTimeout`
+- `WorkerExited`
+- `RuntimeUnreachable`
+- `RemoteSioError`
+- `RestrictedUnpickleError` (a refused return-value global — see
+  [Remote Calls](/concepts/remote-calls))
+- `Result`, `Ok`, `Failed` (the `try_remote` result union)
+
+Logging and tracing:
+
+- `configure_logging`
+- `context`
 - `log` (re-exported from `agentix.utils.log`)
 - `trace` (re-exported from `agentix.utils.trace`)
+
 - `__version__`
 
 The canonical submodule paths are `agentix.utils.log` and
@@ -226,6 +251,13 @@ logger = logging.getLogger(__name__)
 logger.info("message from sandbox")
 ```
 
+The worker also captures the process's raw stdout and stderr (`print()`,
+subprocess output, C-extension writes) and replays each line over `/log`
+under the logger names `agentix.sandbox.stdout` / `agentix.sandbox.stderr`.
+The same output is appended to a durable `$AGENTIX_LOG_DIR/sandbox-<id>.log`
+inside the sandbox (default `/tmp/agentix`; set the variable empty to
+disable) so it survives a dropped connection.
+
 Host applications can use normal logging handlers and the Agentix convenience
 configuration helper:
 
@@ -282,9 +314,18 @@ These modules are public once their plugin package is installed:
 - `agentix.plugins.datasets.swe`
   - `prepare_env(...)`
   - `score(...)`
+- `agentix.bridge` (tunnel an in-sandbox agent's LLM traffic to the host)
+  - `Proxy`, `on`, `Request`, `ClientResponse`, `Client`, `Handler`,
+    `TunnelHandle`, `AbridgeError`, `DynamicRoutes`
+  - `Forward`, `SessionForward` (forward to a host-side sidecar / gateway)
+  - `Recorder` (record tunnel request/response pairs to JSONL)
+  - `Sidecar`, `SidecarError`, `Command`
+  - handler clients under `agentix.bridge.clients` (`AnthropicClient`,
+    `OpenAIClient`, `AnthropicFromOpenAIClient`, `AnthropicToOpenAI`)
 - provider backends (contribute siblings into `agentix.provider`)
   - `agentix.provider.docker` (production; provides `docker` + `podman`)
   - `agentix.provider.apptainer` (production)
+  - `agentix.provider.uv` (local uv-materialized runtime; no container)
   - `agentix.provider.daytona` (stub)
   - `agentix.provider.e2b` (stub)
 

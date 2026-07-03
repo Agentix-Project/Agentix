@@ -50,7 +50,9 @@ client = AnthropicFromOpenAIClient(
     base_url="https://api.openai.com/v1",   # OpenAI / OpenRouter / vLLM / your gateway
     api_key="sk-...",
     model="gpt-4o",                         # the agent keeps sending claude-* model ids
-)
+    upstream_params={"reasoning_effort": "medium", "temperature": 1.0},
+)                                           # force-merged onto every upstream call,
+                                            # overriding whatever the agent sent
 proxy = Proxy(client)
 
 async with provider.session(cfg) as sandbox:
@@ -118,6 +120,28 @@ async with Sidecar(
 This path forwards JSON bodies and buffers the complete sidecar response.
 An SSE payload is preserved as `text/event-stream`, but chunks do not reach
 the sandbox incrementally yet.
+
+`SessionForward` is the per-rollout variant: it opens a fresh recording
+session on the target (e.g. the `agentix-tito` gateway) for each proxy
+session and forwards under that session's path, so each rollout's traffic
+is grouped on the sidecar. `AnthropicToOpenAI` composes over any handler to
+translate Anthropic ↔ OpenAI without an SDK — e.g.
+`Proxy(AnthropicToOpenAI(SessionForward(gateway_url).handler()))` puts a
+Claude-speaking agent in front of an OpenAI-shaped recording gateway.
+
+### Record the tunnel traffic
+
+`Recorder` wraps any handler client and appends one JSONL line per served
+call — `{ts, path, request, response}` — flushed as it goes, so the file is
+complete up to the last call even if the host dies mid-rollout. It exposes
+the wrapped client's routes and closes it on teardown, so it drops in
+transparently:
+
+```python
+from agentix.bridge import Proxy, Recorder
+
+proxy = Proxy(Recorder(client, "runs/rollout-42.jsonl"))
+```
 
 ## Writing your own handler
 

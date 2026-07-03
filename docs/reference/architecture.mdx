@@ -54,7 +54,7 @@ Agentix core owns three reserved Socket.IO namespaces:
 | Namespace | System | Public API |
 | --- | --- | --- |
 | `/rpc` | RPC | `RuntimeClient.remote(fn, *args, **kwargs)` |
-| `/log` | logging | standard `logging` records forwarded sandbox -> host |
+| `/log` | logging | standard `logging` records plus captured stdout/stderr (`agentix.sandbox.stdout` / `agentix.sandbox.stderr`) forwarded sandbox -> host; also written to a durable `$AGENTIX_LOG_DIR/sandbox-<id>.log` |
 | `/trace` | tracing | `agentix.trace.trace(...)`, `agentix.trace.span(...)`, `trace.Processor` |
 
 Plugin-specific protocols use their own namespace, conventionally
@@ -91,7 +91,10 @@ arguments = pickle.dumps((args, kwargs))
 
 The runtime worker imports the module, resolves the function, unpickles
 the arguments, and invokes it. Return values travel back as pickle
-blobs inside `call:result`.
+blobs inside `call:result`. Because a sandbox may run less-trusted code,
+the host decodes those blobs through a restricted allowlist loader
+(`agentix.runtime.shared.safepickle`) rather than plain `pickle.loads`,
+refusing any non-allowlisted global with `agentix.RestrictedUnpickleError`.
 
 ## Call Flow
 
@@ -103,7 +106,8 @@ blobs inside `call:result`.
 5. Runtime server forwards the request to the worker subprocess.
 6. Worker imports `app`, resolves `run`, unpickles args, and calls it.
 7. Worker pickles the return value.
-8. Server emits `call:result`; client unpickles the value and returns it.
+8. Server emits `call:result`; client decodes the value through the
+   restricted allowlist loader and returns it.
 ```
 
 ## Transports

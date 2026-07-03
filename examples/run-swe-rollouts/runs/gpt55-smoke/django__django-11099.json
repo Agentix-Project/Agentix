@@ -1,0 +1,10 @@
+{
+  "instance_id": "django__django-11099",
+  "resolved": false,
+  "patch_bytes": 0,
+  "agent_exit": 0,
+  "error": null,
+  "skipped": "empty_patch",
+  "score": null,
+  "duration_s": 21.3
+}
