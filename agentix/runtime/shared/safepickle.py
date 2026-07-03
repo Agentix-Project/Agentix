@@ -117,8 +117,20 @@ SAFE_TYPES: frozenset[GlobalName] = frozenset(
 # "must be an allowed type" check below excludes them.
 _SAFE_BUILTIN_TYPES: frozenset[type] = frozenset(
     {
-        complex, range, slice, bytearray, frozenset,
-        set, list, dict, tuple, bytes, str, int, float, bool,
+        complex,
+        range,
+        slice,
+        bytearray,
+        frozenset,
+        set,
+        list,
+        dict,
+        tuple,
+        bytes,
+        str,
+        int,
+        float,
+        bool,
     }
 )
 
@@ -151,8 +163,7 @@ class RestrictedUnpickler(pickle.Unpickler):
             obj = super().find_class(module, name)
             if not isinstance(obj, type):
                 raise RestrictedUnpickleError(
-                    f"refusing to reconstruct {module}.{name}: the allowlisted value "
-                    f"global did not resolve to a type"
+                    f"refusing to reconstruct {module}.{name}: the allowlisted value global did not resolve to a type"
                 )
             return obj
 
