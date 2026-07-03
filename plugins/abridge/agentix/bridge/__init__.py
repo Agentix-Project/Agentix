@@ -46,6 +46,7 @@ from .proxy import (
     TunnelHandle,
     on,
 )
+from .recorder import Recorder
 from .sidecar import Command, Sidecar, SidecarError
 
 __version__ = "0.5.0"
@@ -60,6 +61,7 @@ __all__ = [
     "Handler",
     "NAMESPACE",
     "Proxy",
+    "Recorder",
     "Request",
     "SessionForward",
     "Sidecar",
