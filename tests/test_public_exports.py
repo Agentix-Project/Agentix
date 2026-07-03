@@ -37,8 +37,15 @@ def test_failure_vocabulary_importable_from_agentix() -> None:
 
 def test_failure_vocabulary_in_dunder_all() -> None:
     for name in (
-        "CallCancelled", "CallTimeout", "Failed", "Ok", "Result",
-        "RestrictedUnpickleError", "RuntimeUnreachable", "WorkerExited", "configure_logging",
+        "CallCancelled",
+        "CallTimeout",
+        "Failed",
+        "Ok",
+        "Result",
+        "RestrictedUnpickleError",
+        "RuntimeUnreachable",
+        "WorkerExited",
+        "configure_logging",
     ):
         assert name in agentix.__all__
 
