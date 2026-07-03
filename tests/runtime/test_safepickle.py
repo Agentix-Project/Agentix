@@ -11,6 +11,7 @@ reconstruction of non-allowlisted callables/types is refused.
 from __future__ import annotations
 
 import collections
+import copyreg
 import datetime
 import decimal
 import fractions
@@ -167,6 +168,46 @@ def test_refusal_does_not_import_the_named_module() -> None:
 def test_attribute_access_helpers_are_refused(crafted) -> None:
     with pytest.raises(RestrictedUnpickleError):
         restricted_loads(crafted)
+
+
+@pytest.mark.parametrize(
+    ("encoded_extension", "extension_code"),
+    [
+        pytest.param(b"\x82\xff", 0xFF, id="EXT1"),
+        pytest.param(b"\x83\xff\xff", 0xFFFF, id="EXT2"),
+        pytest.param(b"\x84\xff\xff\xff\x7f", 0x7FFFFFFF, id="EXT4"),
+    ],
+)
+def test_warm_extension_cache_cannot_bypass_exact_global_policy(encoded_extension: bytes, extension_code: int) -> None:
+    module = _policy_recorder.__module__
+    name = _policy_recorder.__qualname__
+    extension_cache: dict[int, object] = getattr(copyreg, "_extension_cache")
+    cache_missing = object()
+    previous_cached = extension_cache.pop(extension_code, cache_missing)
+    registered = False
+    try:
+        copyreg.add_extension(module, name, extension_code)
+        registered = True
+        payload = b"\x80\x04" + encoded_extension + b"\x8c\x16extension-cache-marker\x85R."
+
+        _POLICY_CALLS.clear()
+        assert pickle.loads(payload) == "extension-cache-marker"
+        assert _POLICY_CALLS == ["extension-cache-marker"]
+        assert extension_cache[extension_code] is _policy_recorder
+
+        _POLICY_CALLS.clear()
+        with pytest.raises(
+            RestrictedUnpickleError,
+            match="extension opcodes cannot be safely validated against the exact allowlist",
+        ):
+            restricted_loads(payload)
+        assert _POLICY_CALLS == []
+    finally:
+        if registered:
+            copyreg.remove_extension(module, name, extension_code)
+        extension_cache.pop(extension_code, None)
+        if previous_cached is not cache_missing:
+            extension_cache[extension_code] = previous_cached
 
 
 # ── permitted values round-trip ─────────────────────────────────────────────
