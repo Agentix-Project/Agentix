@@ -72,6 +72,15 @@ becomes this wire payload:
 runtime uses it to correlate `call:result` / `call:error` responses and
 to support cancellation.
 
+The return value comes back as its own pickle blob. Because a sandbox may
+run less-trusted code, the host does **not** decode it with plain
+`pickle.loads`: it uses a restricted allowlist loader that admits only
+reviewed value types and refuses anything else with
+`agentix.RestrictedUnpickleError`. Returning a workload's own custom class
+raises that error unless the class is explicitly allowed (see
+`agentix.runtime.shared.safepickle`); return plain data or the framework's
+own result types and it just works.
+
 Remote calls use Socket.IO events on the `/rpc` namespace. The sandbox
 may use the internal HTTP `/call` fast path for short calls, but accepted
 long-running calls and replayed results still complete over `/rpc`.
@@ -119,7 +128,7 @@ ride their own namespaces, separate from `sandbox.remote()`:
 | --- | --- | --- |
 | `/rpc` | host ↔ sandbox | `sandbox.remote()` |
 | `/trace` | sandbox → host | span lifecycle (auto-registered) |
-| `/log` | sandbox → host | stdlib logging records (auto-registered) |
+| `/log` | sandbox → host | stdlib logging records + captured stdout/stderr (auto-registered) |
 | `/<plugin>` | both | plugin-defined events via `agentix.sio` |
 
 Register a host-side handler before the first remote call:

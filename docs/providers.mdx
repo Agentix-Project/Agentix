@@ -151,8 +151,11 @@ in `SandboxConfig`, not the backend.
 
 The `daytona` and `e2b` backends are placeholders today: they validate
 configuration but their lifecycle methods raise `NotImplementedError`
-pending integration. `docker`/`podman` and `apptainer` are the working
-backends.
+pending integration. `docker`/`podman`, `apptainer`, and `uv` are the
+working backends. The `uv` backend materializes the runtime from a local
+uv venv with no container — no isolation, but the fastest path to run the
+runtime/RPC stack on a bare host for local dev, CI, or trusted eval (see
+[`plugins/providers/uv/README.md`](https://github.com/Agentix-Project/Agentix/tree/master/plugins/providers/uv)).
 
 Fail fast in `__init__` when required configuration is missing. The
 error should surface before the backend starts creating infrastructure.
