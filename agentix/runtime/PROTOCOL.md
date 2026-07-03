@@ -31,12 +31,15 @@ plain unpickling reconstructs objects by invoking whatever callables the stream
 names. The restricted loader decodes through a strict **allowlist** — only a
 reviewed set of value types (stdlib data, builtin containers and exceptions,
 numpy arrays, …) and inert reconstruction helpers are permitted, and anything
-else is refused *without importing it*. First-party types (`agentix.*`) are
-trusted by default — the framework's own return types (`TunnelHandle`,
-`BashResult`, agent results, …) cross the boundary with no setup. A *workload's*
-own return types (a project's dataclasses / pydantic models) are refused by
-default; opt them in with `safepickle.allow_module(prefix)` /
-`allow_callable(module, name)`, or set `AGENTIX_PICKLE_TRUST=1` to trust the
+else is refused *without importing it*. Six first-party return types are on
+the default allowlist, each registered individually by exact module and class
+name — `TunnelHandle`, `BashResult`, `UploadResult`, `ClaudeCodeResult`, the
+qwen_code `Result`, and `PrepareEnvResult` — so the framework's own return
+values cross the boundary with no setup. Every other global — including the
+rest of `agentix.*` and a *workload's* own return types (a project's
+dataclasses / pydantic models) — is refused by default; opt a class in with
+`safepickle.allow_type(Class)`, which trusts exactly one class (there is no
+module- or prefix-level trust), or set `AGENTIX_PICKLE_TRUST=1` to trust the
 sandbox fully. A refusal raises
 `agentix.RestrictedUnpickleError`. (The sandbox-side decode of host-sent
 `arguments` / `context` stays plain — that is the trusted host→sandbox
