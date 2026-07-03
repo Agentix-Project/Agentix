@@ -19,6 +19,11 @@ hand-written per-instance orchestration.
   CI can spread a full run across parallel jobs. An empty shard (more shards
   than rows) exits 0. `--instance-id` is an explicit selection and cannot be
   combined with sharding.
+- `--container-engine` / `--network` / `--run-arg` configure the sandbox
+  provider for hosts without a Docker daemon (e.g. rootless podman:
+  `--container-engine podman --network host --run-arg=--runtime=crun
+  --run-arg=--cgroups=disabled`). `--rmi-after` cleans up through the same
+  engine.
 
 Run as::
 
@@ -43,7 +48,7 @@ import agentix.plugins.datasets.swe as swe
 from agentix.bash import run as bash_run
 from agentix.bridge import Proxy
 from agentix.bridge.clients import ANTHROPIC_PLACEHOLDER_API_KEY, AnthropicFromOpenAIClient
-from agentix.provider.docker import DockerProvider
+from agentix.provider.docker import DockerProvider, DockerProviderConfig
 from agentix.runner import AgentResult, run_rollouts
 from datasets import load_dataset
 
@@ -51,9 +56,7 @@ logger = logging.getLogger("run_swe_rollouts")
 
 WORKDIR = "/testbed"
 _DIFF_CMD = (
-    "cd /testbed && "
-    "git -c core.fileMode=false add -A && "
-    "git -c core.fileMode=false diff --cached --no-color --binary"
+    "cd /testbed && git -c core.fileMode=false add -A && git -c core.fileMode=false diff --cached --no-color --binary"
 )
 
 # Instances whose gold patches score unresolved for reasons outside this
@@ -239,6 +242,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--swebench-tag", default="latest")
     parser.add_argument("--arch", default="x86_64", choices=["x86_64", "arm64"])
     parser.add_argument("--docker-platform", default=None)
+    parser.add_argument("--container-engine", default="docker")
+    parser.add_argument("--network", default=None, help="container network mode, e.g. `host`")
+    parser.add_argument(
+        "--run-arg",
+        action="append",
+        default=[],
+        dest="run_args",
+        help="extra container run arg (repeatable; use --run-arg=VALUE when the value starts with --)",
+    )
     parser.add_argument("--dataset", default="princeton-nlp/SWE-bench_Verified")
     parser.add_argument("--dataset-file", default=None)
     parser.add_argument("--split", default="test")
@@ -323,7 +335,7 @@ async def main(argv: list[str] | None = None) -> int:
         print(f"[{rollout.instance_id}] {verdict} ({rollout.duration_s:.1f}s)")
         if args.rmi_after and rollout.instance_id in images:
             subprocess.run(
-                ["docker", "rmi", "-f", images[rollout.instance_id]],
+                [args.container_engine, "rmi", "-f", images[rollout.instance_id]],
                 capture_output=True,
             )
 
@@ -331,7 +343,13 @@ async def main(argv: list[str] | None = None) -> int:
     rollouts = await run_rollouts(
         dataset=dataset,
         agent=agent,
-        provider=DockerProvider(),
+        provider=DockerProvider(
+            DockerProviderConfig(
+                container_engine=args.container_engine,
+                network=args.network,
+                run_args=args.run_args,
+            )
+        ),
         bundle=args.bundle,
         model=args.response_model,
         instances=rows,

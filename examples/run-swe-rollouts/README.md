@@ -37,6 +37,11 @@ uv run python main.py --bundle "$BUNDLE" --ground-truth --fail-on-unresolved
 
 # CI-style sharding — run one slice of the split (nightly-CI runs 20 of these):
 uv run python main.py --bundle "$BUNDLE" --ground-truth --num-shards 20 --shard-index 0
+
+# Hosts without a Docker daemon (rootless podman; deploy with `agentix deploy podman`):
+uv run python main.py --bundle "$BUNDLE" --ground-truth \
+    --container-engine podman --network host \
+    --run-arg=--runtime=crun --run-arg=--cgroups=disabled
 ```
 
 Sharding is round-robin and deterministic; `--limit` applies per shard, and a
