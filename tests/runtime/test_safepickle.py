@@ -18,6 +18,7 @@ import pathlib
 import pickle
 import uuid
 from dataclasses import dataclass
+from typing import Any
 
 import pytest
 from pydantic import BaseModel
@@ -168,9 +169,21 @@ def test_attribute_access_helpers_are_refused(crafted) -> None:
 @pytest.mark.parametrize(
     "value",
     [
-        42, "hi", 3.5, True, None, b"bytes", bytearray(b"ba"),
-        complex(1, 2), range(0, 10, 2), slice(1, 9, 2),
-        [1, 2, 3], {"a": 1}, (1, 2), {1, 2}, frozenset([1]),
+        42,
+        "hi",
+        3.5,
+        True,
+        None,
+        b"bytes",
+        bytearray(b"ba"),
+        complex(1, 2),
+        range(0, 10, 2),
+        slice(1, 9, 2),
+        [1, 2, 3],
+        {"a": 1},
+        (1, 2),
+        {1, 2},
+        frozenset([1]),
         {"nested": [1, {"b": (2, 3)}]},
         datetime.datetime(2026, 1, 1, 12, 30),
         datetime.date(2026, 1, 1),
@@ -235,14 +248,23 @@ def test_first_party_return_types_round_trip_by_default() -> None:
     """The framework's own shipped return types are trusted (`agentix.*`) and
     must cross the boundary with no opt-in — otherwise the restriction breaks
     the framework's own main paths (Proxy.start, bash.run, agent adapters)."""
+    from agentix.agents.claude_code.agent import ClaudeCodeResult
+    from agentix.agents.qwen_code import Result as QwenResult
+    from agentix.bash import BashResult
     from agentix.bridge.proxy import TunnelHandle
+    from agentix.files import UploadResult
+    from agentix.plugins.datasets.swe.env import PrepareEnvResult
 
-    handle = TunnelHandle(url="http://127.0.0.1:9", port=9)
-    assert restricted_loads(pickle.dumps(handle)) == handle
-
-    bash = pytest.importorskip("agentix.bash")
-    result = bash.BashResult(stdout="o", stderr="", exit_code=0)
-    assert restricted_loads(pickle.dumps(result)) == result
+    values = [
+        TunnelHandle(url="http://127.0.0.1:9", port=9),
+        BashResult(exit_code=0, stdout="o", stderr=""),
+        UploadResult(path="/workspace/a", size=1),
+        ClaudeCodeResult(returncode=0, stdout=b"o", stderr=b""),
+        QwenResult(exit_code=0, stdout="o", stderr=""),
+        PrepareEnvResult(ok=True, head="abc", log=""),
+    ]
+    for value in values:
+        assert restricted_loads(pickle.dumps(value)) == value
 
 
 def test_custom_type_refused_by_default() -> None:
@@ -265,6 +287,17 @@ def test_allow_type_opt_in_is_exact() -> None:
         restricted_loads(pickle.dumps(_ProjectResult(patch="d", score=1)))
 
 
+def test_allow_type_requires_a_class() -> None:
+    not_a_class: Any = object()
+    with pytest.raises(TypeError, match="requires a class"):
+        safepickle.allow_type(not_a_class)
+
+
+@pytest.mark.parametrize("name", ["allow_module", "allow_callable"])
+def test_broad_policy_helpers_are_not_exposed(name: str) -> None:
+    assert not hasattr(safepickle, name)
+
+
 def test_trust_env_disables_restriction(monkeypatch) -> None:
     """The escape hatch fully trusts the sandbox. Verified with a benign
     reducer (json.dumps) that the restricted path refuses but is harmless."""
@@ -283,4 +316,4 @@ def test_refusal_message_points_to_opt_in() -> None:
     with pytest.raises(RestrictedUnpickleError) as ei:
         restricted_loads(pickle.dumps(_ProjectPoint(1, 2)))
     msg = str(ei.value)
-    assert "allow_module" in msg or "AGENTIX_PICKLE_TRUST" in msg
+    assert "allow_type" in msg
