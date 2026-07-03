@@ -14,8 +14,13 @@ At worker boot, `install_worker_bridge()` adds a `logging.Handler` to
 the root logger that emits each `LogRecord` on the `/log` SIO
 namespace. The host's `RuntimeClient` auto-registers a consumer that
 forwards records into the host's own `logging` system, so they appear
-in host logs untouched. The worker runtime also captures stdout and sends
-each line through the same `/log` stream as `agentix.sandbox.stdout`.
+in host logs untouched. The worker runtime also captures raw stdout and
+stderr (fd 1 / fd 2 — `print()`, child-process output, C-extension writes)
+and sends each line through the same `/log` stream as
+`agentix.sandbox.stdout` / `agentix.sandbox.stderr`; every record and
+captured line is also appended to a size-bounded on-disk copy at
+`$AGENTIX_LOG_DIR/sandbox.log` (default `/tmp/agentix`) inside the
+sandbox, so output survives a lost connection for post-mortem reads.
 
 ## Delivery contract
 

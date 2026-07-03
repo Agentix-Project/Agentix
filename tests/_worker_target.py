@@ -90,3 +90,31 @@ def spawn_stdin_reading_child() -> int:
         timeout=10,
     )
     return proc.returncode
+
+
+def print_stderr(message: str) -> str:
+    import sys
+
+    print(message, file=sys.stderr)
+    return "printed-stderr"
+
+
+def spawn_stderr_writing_child(message: str) -> str:
+    """A child process inheriting fd 2 — its stderr must reach the host
+    `/log` stream even though stdlib logging never sees it."""
+    import subprocess
+    import sys
+
+    subprocess.run(
+        [sys.executable, "-c", f"import sys; print({message!r}, file=sys.stderr)"],
+        check=True,
+        timeout=10,
+    )
+    return "spawned-stderr"
+
+
+def log_one_record(message: str) -> str:
+    import logging
+
+    logging.getLogger("tests.worker.dedup").warning(message)
+    return "logged"

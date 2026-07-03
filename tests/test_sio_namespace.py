@@ -20,7 +20,12 @@ from tests._namespace_target import (
     emit_log_with_extra,
     fire_namespace_event,
 )
-from tests._worker_target import print_stdout
+from tests._worker_target import (
+    log_one_record,
+    print_stderr,
+    print_stdout,
+    spawn_stderr_writing_child,
+)
 
 
 class _EchoHost(AsyncClientNamespace):
@@ -229,6 +234,132 @@ async def test_remote_print_stdout_arrives_on_host(live_server):
         target_logger.removeHandler(handler)
 
 
+@pytest.mark.asyncio
+async def test_remote_stderr_arrives_on_host(live_server):
+    """fd 2 is captured like fd 1: a direct `sys.stderr` print inside the
+    remote fn replays on the host under `agentix.sandbox.stderr` (#138)."""
+    base_url = await live_server()
+
+    captured: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            if record.name == "agentix.sandbox.stderr":
+                captured.append(record)
+
+    target_logger = logging.getLogger("agentix.sandbox.stderr")
+    target_logger.setLevel(logging.INFO)
+    handler = _Capture()
+    target_logger.addHandler(handler)
+    try:
+        async with RuntimeClient(base_url) as c:
+            result = await c.remote(print_stderr, "hello from stderr")
+            assert result == "printed-stderr"
+            record = await _await_record(captured, "hello from stderr")
+            assert record is not None
+            assert getattr(record, "agentix_stream", None) == "stderr"
+            context = getattr(record, LOG_CONTEXT_ATTR, "")
+            assert context.startswith("sandbox-")
+            assert "-worker-" in context
+    finally:
+        target_logger.removeHandler(handler)
+
+
+@pytest.mark.asyncio
+async def test_child_process_stderr_arrives_on_host(live_server):
+    """Child processes inherit fd 2 — their stderr is exactly the output
+    stdlib logging cannot see, and it must still reach `/log` (#138)."""
+    base_url = await live_server()
+
+    captured: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            if record.name == "agentix.sandbox.stderr":
+                captured.append(record)
+
+    target_logger = logging.getLogger("agentix.sandbox.stderr")
+    target_logger.setLevel(logging.INFO)
+    handler = _Capture()
+    target_logger.addHandler(handler)
+    try:
+        async with RuntimeClient(base_url) as c:
+            result = await c.remote(spawn_stderr_writing_child, "child stderr line")
+            assert result == "spawned-stderr"
+            record = await _await_record(captured, "child stderr line")
+            assert record is not None
+    finally:
+        target_logger.removeHandler(handler)
+
+
+@pytest.mark.asyncio
+async def test_stdlib_records_are_not_recaptured_as_stderr(live_server):
+    """A stdlib record reaches the host exactly once — structured, via the
+    bridge. The console handler writes to the REAL stderr, so the record
+    must NOT come back a second time as a captured `agentix.sandbox.stderr`
+    line (#138 keeps the structured bridge; capture is additive)."""
+    base_url = await live_server()
+
+    structured: list[logging.LogRecord] = []
+    raw_stderr: list[logging.LogRecord] = []
+
+    class _Structured(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            if record.name == "tests.worker.dedup":
+                structured.append(record)
+
+    class _Raw(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            if record.name == "agentix.sandbox.stderr":
+                raw_stderr.append(record)
+
+    probe = "dedup probe 4242"
+    structured_logger = logging.getLogger("tests.worker.dedup")
+    structured_logger.setLevel(logging.INFO)
+    raw_logger = logging.getLogger("agentix.sandbox.stderr")
+    raw_logger.setLevel(logging.INFO)
+    s_handler, r_handler = _Structured(), _Raw()
+    structured_logger.addHandler(s_handler)
+    raw_logger.addHandler(r_handler)
+    try:
+        async with RuntimeClient(base_url) as c:
+            assert await c.remote(log_one_record, probe) == "logged"
+            assert await _await_record(structured, probe) is not None
+            # Grace period: a duplicate raw line would be the FORMATTED
+            # console line containing the probe text.
+            await asyncio.sleep(0.5)
+            assert not [r for r in raw_stderr if probe in r.getMessage()]
+    finally:
+        structured_logger.removeHandler(s_handler)
+        raw_logger.removeHandler(r_handler)
+
+
+@pytest.mark.asyncio
+async def test_sandbox_log_file_captures_records_and_stdio(live_server, tmp_path, monkeypatch):
+    """#139: the worker keeps a durable on-disk copy at
+    $AGENTIX_LOG_DIR/sandbox.log — stdlib records AND captured stdout/stderr
+    lines — independent of `/log` stream delivery."""
+    monkeypatch.setenv("AGENTIX_LOG_DIR", str(tmp_path))
+    base_url = await live_server()
+
+    async with RuntimeClient(base_url) as c:
+        assert await c.remote(print_stdout, "file probe stdout") == "printed"
+        assert await c.remote(print_stderr, "file probe stderr") == "printed-stderr"
+        assert await c.remote(log_one_record, "file probe record") == "logged"
+
+    log_file = tmp_path / "sandbox.log"
+    deadline = asyncio.get_event_loop().time() + 3.0
+    text = ""
+    while asyncio.get_event_loop().time() < deadline:
+        text = log_file.read_text(encoding="utf-8") if log_file.exists() else ""
+        if all(p in text for p in ("file probe stdout", "file probe stderr", "file probe record")):
+            break
+        await asyncio.sleep(0.05)
+    assert "file probe stdout" in text
+    assert "file probe stderr" in text
+    assert "file probe record" in text
+
+
 async def _await_record(
     captured: list[logging.LogRecord],
     message: str,
@@ -284,9 +415,7 @@ async def test_log_stream_preserves_order_and_envelope(live_server):
 
     messages = [r.getMessage() for r in captured if r.getMessage().startswith("burst-")]
     expected = [f"burst-{i:03d}" for i in range(burst_count)]
-    assert messages == expected, (
-        f"log stream lost or reordered events: got {len(messages)} of {burst_count}"
-    )
+    assert messages == expected, f"log stream lost or reordered events: got {len(messages)} of {burst_count}"
 
 
 @pytest.mark.asyncio
