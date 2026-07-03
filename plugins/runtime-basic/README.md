@@ -1,6 +1,6 @@
 # agentix-runtime-basic
 
-Shell + file I/O primitives for [Agentix](https://github.com/Agentiix/Agentix)
+Shell + file I/O primitives for [Agentix](https://github.com/Agentix-Project/Agentix)
 sandboxes. One wheel, two namespaces:
 
 | Namespace | Purpose |

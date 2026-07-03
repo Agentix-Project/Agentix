@@ -5,8 +5,8 @@ description = "The universal bridge between agents and environments (import as `
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "Agentiix" }]
-urls = { Homepage = "https://github.com/Agentiix/Agentix" }
+authors = [{ name = "Agentix maintainers" }]
+urls = { Homepage = "https://github.com/Agentix-Project/Agentix" }
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",

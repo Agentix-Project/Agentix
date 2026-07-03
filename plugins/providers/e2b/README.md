@@ -1,7 +1,7 @@
 # agentix-provider-e2b
 
 [E2B](https://e2b.dev/) provider backend for
-[Agentix](https://github.com/Agentiix/Agentix).
+[Agentix](https://github.com/Agentix-Project/Agentix).
 
 > Status: CLI surface in place; the managed-sandbox integration is
 > still a stub. Tracking parity with `DockerProvider` (live runtime

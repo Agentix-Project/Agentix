@@ -9,8 +9,8 @@ description = "Live Textual dashboard for Agentix batch rollouts"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "Agentiix" }]
-urls = { Homepage = "https://github.com/Agentiix/Agentix" }
+authors = [{ name = "Agentix maintainers" }]
+urls = { Homepage = "https://github.com/Agentix-Project/Agentix" }
 dependencies = [
     "agentixx",
     "agentix-runner>=0.1.0",
