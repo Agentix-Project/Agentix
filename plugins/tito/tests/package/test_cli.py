@@ -75,3 +75,12 @@ def test_cli_values_plumb_pool_and_trust_flags():
 def test_cli_trust_remote_code_defaults_off():
     args = build_parser().parse_args(["serve", "--hf-checkpoint", "X"])
     assert args.trust_remote_code is False
+
+
+def test_cli_backend_kind_defaults_to_sglang_and_validates_choices():
+    args = build_parser().parse_args(["serve", "--hf-checkpoint", "X"])
+    assert args.backend_kind == "sglang"
+    args = build_parser().parse_args(["serve", "--hf-checkpoint", "X", "--backend-kind", "vllm"])
+    assert args.backend_kind == "vllm"
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["serve", "--hf-checkpoint", "X", "--backend-kind", "tgi"])

@@ -1,13 +1,13 @@
 """FastAPI session routes for the TITO gateway.
 
 The gateway keeps a token-aligned trajectory per session and proxies chat
-completions to an OpenAI-compatible backend (sglang). The chat-completions flow:
-prepare pretokenized input_ids (lock held briefly) -> force logprobs/meta_info ->
-proxy to the backend (no lock) -> validate -> append the trajectory checkpoint
-(lock held briefly). The proxy is NOT held under the lock so a slow generation
-doesn't block DELETE/other ops.
+completions to an OpenAI-compatible backend. The chat-completions flow:
+prepare pretokenized prompt ids (lock held briefly) -> run the backend turn
+via the kind-specific upstream adapter (no lock; see ``engine.upstream``) ->
+append the trajectory checkpoint (lock held briefly). The upstream exchange is
+NOT held under the lock so a slow generation doesn't block DELETE/other ops.
 
-`build_session_app` is backend-agnostic: pass any object exposing
+`setup_session_routes` is transport-agnostic: pass any object exposing
 ``do_proxy(request, path, body=None) -> dict`` and ``build_proxy_response(result)``.
 """
 
@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any, Protocol
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -27,18 +27,13 @@ from .errors import (
     SessionError,
     SessionNotFoundError,
     TokenizationError,
-    UpstreamResponseError,
 )
 from .pretokenize import get_tito_tokenizer
 from .processing import load_tokenizer
 from .trajectory import GetSessionResponse, SessionRecord, SessionRegistry
+from .upstream import Backend, get_upstream
 
 logger = logging.getLogger(__name__)
-
-
-class Backend(Protocol):
-    async def do_proxy(self, request: Request, path: str, body: bytes | None = None) -> dict: ...
-    def build_proxy_response(self, result: dict) -> Response: ...
 
 
 def build_registry(args: Any) -> SessionRegistry | None:
@@ -69,6 +64,8 @@ def setup_session_routes(app: FastAPI, backend: Backend, args: Any) -> None:
         return
     # Exposed for operational introspection (session counts, tests).
     app.state.tito_registry = registry
+
+    adapter = get_upstream(getattr(args, "backend_kind", "sglang"))
 
     instance_id = getattr(args, "session_server_instance_id", None)
 
@@ -135,82 +132,38 @@ def setup_session_routes(app: FastAPI, backend: Backend, args: Any) -> None:
         if not isinstance(request_body, dict):
             raise MessageValidationError("request body must be a JSON object")
 
-        # Phase 1: prepare pretokenized input_ids (lock held briefly).
+        # Phase 1: prepare the pretokenized prompt ids (lock held briefly).
         async with session.lock:
             if session.closing:
                 raise SessionNotFoundError(f"session not found: session_id={session_id}")
-            # Hardcoded so an agent override can't break token accumulation:
-            request_body["logprobs"] = True          # -> meta_info.output_token_logprobs
-            request_body["return_meta_info"] = True   # -> choice.meta_info
-            request_body["no_stop_trim"] = False       # stop-token text trimmed from content
-            # The TITO flow needs the complete JSON completion (logprobs +
-            # meta_info); an SSE stream would be unparseable below. Force
-            # non-streaming — a stream:true agent gets the full JSON body back.
-            request_body["stream"] = False
-            request_body.pop("stream_options", None)
             request_messages = request_body.get("messages", [])
             prompt_token_ids = session.prepare_pretokenized(
                 request_messages, tools=request_body.get("tools"), tito_tokenizer=registry.tito_tokenizer
             )
-            request_body["input_ids"] = prompt_token_ids
-            body = json.dumps(request_body).encode()
             # `version` advances on BOTH update and rollback; `num_assistant`
             # would be ABA-prone (a concurrent rollback+update restores it).
             expected_version = session.version
 
-        # Phase 2: proxy to the backend (NO lock).
-        result = await backend.do_proxy(request, "v1/chat/completions", body=body)
-        if result["status_code"] != 200:
-            return backend.build_proxy_response(result)
-
-        # Structural failures in a 200 body are the backend's fault — surface
-        # every shape violation as a clean 502, never an unhandled 500.
-        try:
-            response = json.loads(result["response_body"])
-        except ValueError as e:
-            raise UpstreamResponseError(f"backend returned an unparseable 200 body: {e}") from e
-        if not isinstance(response, dict):
-            raise UpstreamResponseError("backend 200 body is not a JSON object")
-        choices = response.get("choices")
-        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-            raise UpstreamResponseError("backend 200 body has no choices")
-        choice = choices[0]
-        meta_info = choice.get("meta_info")
-        if not isinstance(meta_info, dict) or "output_token_logprobs" not in meta_info:
-            raise UpstreamResponseError("meta_info.output_token_logprobs missing (needs logprobs=True)")
-        assistant_message = choice.get("message")
-        if not isinstance(assistant_message, dict):
-            raise UpstreamResponseError("assistant message missing")
-        if assistant_message.get("content") is None and not assistant_message.get("tool_calls"):
-            # Tool-call-only turns routinely carry content:null (the parser
-            # consumed all generated text) — only a turn with NEITHER content
-            # NOR tool_calls is malformed.
-            raise UpstreamResponseError("assistant message has neither content nor tool_calls")
-        output_token_logprobs = meta_info["output_token_logprobs"]
-        completion_tokens = meta_info.get("completion_tokens")
-        if not isinstance(output_token_logprobs, list) or not isinstance(completion_tokens, int):
-            raise UpstreamResponseError("meta_info output_token_logprobs/completion_tokens malformed")
-        if len(output_token_logprobs) != completion_tokens:
-            raise UpstreamResponseError(
-                f"len(output_token_logprobs)={len(output_token_logprobs)} != completion_tokens={completion_tokens}"
-            )
-        try:
-            completion_token_ids = [t[1] for t in output_token_logprobs]
-        except (TypeError, IndexError, KeyError) as e:
-            raise UpstreamResponseError(f"malformed output_token_logprobs entry: {e}") from e
+        # Phase 2: run the backend turn (NO lock). The adapter forces the
+        # token-recording fields onto the body (so an agent override can't
+        # break token accumulation) and harvests the exact completion ids.
+        turn = await adapter.chat_turn(backend, request, request_body, prompt_token_ids)
+        if turn.harvest is None:
+            return backend.build_proxy_response(turn.proxy_result)
+        harvest = turn.harvest
 
         # Phase 3: append the trajectory checkpoint (lock held briefly).
         async with session.lock:
             if session.closing:
-                return backend.build_proxy_response(result)
+                return backend.build_proxy_response(turn.proxy_result)
             if session.version != expected_version:
                 logger.warning("session %s changed during proxy; skipping state update", session_id)
-                return backend.build_proxy_response(result)
+                return backend.build_proxy_response(turn.proxy_result)
             session.update_pretokenized_state(
                 request_messages,
-                assistant_message,
+                harvest.assistant_message,
                 prompt_token_ids=prompt_token_ids,
-                completion_token_ids=completion_token_ids,
+                completion_token_ids=harvest.completion_token_ids,
                 max_trim_tokens=registry.tito_tokenizer.max_trim_tokens,
             )
             session.append_record(
@@ -218,12 +171,12 @@ def setup_session_routes(app: FastAPI, backend: Backend, args: Any) -> None:
                     timestamp=time.time(),
                     method=request.method,
                     path="/v1/chat/completions",
-                    status_code=result["status_code"],
+                    status_code=turn.proxy_result["status_code"],
                     request=request_body,
-                    response=response,
+                    response=harvest.response,
                 )
             )
-        return backend.build_proxy_response(result)
+        return backend.build_proxy_response(turn.proxy_result)
 
     @app.api_route("/sessions/{session_id}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
     async def session_proxy(request: Request, session_id: str, path: str) -> Response:

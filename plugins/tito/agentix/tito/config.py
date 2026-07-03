@@ -15,11 +15,13 @@ class TITOGatewayConfig:
 
     hf_checkpoint: str
     backend_url: str | None = None
-    # Explicit multi-backend pool (sglang replicas — the token-recording chat
-    # flow needs sglang's meta_info extension). When set, these are used as-is
-    # and single-URL discovery is skipped; `backend_url` is left as the first
-    # entry for callers that read it.
+    # Explicit multi-backend pool — replicas of ONE backend kind. When set,
+    # these are used as-is and single-URL discovery is skipped; `backend_url`
+    # is left as the first entry for callers that read it.
     backend_urls: tuple[str, ...] = ()
+    # Which token-exact dialect the backend speaks: "sglang" (input_ids +
+    # meta_info extensions) or "vllm" (>= 0.24.0, render/generate/derender).
+    backend_kind: str = "sglang"
     routing_policy: str = "sticky"
     # Execute Python shipped inside the checkpoint repo when loading the
     # tokenizer. Off by default; opt in only for checkpoints you trust.
@@ -48,6 +50,9 @@ class TITOGatewayConfig:
                 f"routing_policy must be 'sticky' or 'round_robin'; got {self.routing_policy!r}"
             )
 
+        if self.backend_kind not in ("sglang", "vllm"):
+            raise ValueError(f"backend_kind must be 'sglang' or 'vllm'; got {self.backend_kind!r}")
+
     @classmethod
     def from_cli_values(
         cls,
@@ -61,6 +66,7 @@ class TITOGatewayConfig:
         session_server_port: int,
         router_timeout: float,
         backend_urls: list[str] | None = None,
+        backend_kind: str = "sglang",
         routing_policy: str = "sticky",
         trust_remote_code: bool = False,
         backend_probe_candidates: list[str] | None = None,
@@ -70,6 +76,7 @@ class TITOGatewayConfig:
             hf_checkpoint=hf_checkpoint,
             backend_url=backend_url,
             backend_urls=tuple(backend_urls or ()),
+            backend_kind=backend_kind,
             routing_policy=routing_policy,
             trust_remote_code=trust_remote_code,
             chat_template_path=chat_template_path,
@@ -88,6 +95,7 @@ class TITOGatewayConfig:
 
         return SimpleNamespace(
             hf_checkpoint=self.hf_checkpoint,
+            backend_kind=self.backend_kind,
             chat_template_path=self.chat_template_path,
             tito_model=self.tito_model,
             tito_allowed_append_roles=list(self.tito_allowed_append_roles),
