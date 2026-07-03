@@ -21,6 +21,12 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
+from agentix.agents.claude_code.agent import ClaudeCodeResult
+from agentix.agents.qwen_code import Result as QwenResult
+from agentix.bash import BashResult
+from agentix.bridge.proxy import TunnelHandle
+from agentix.files import UploadResult
+from agentix.plugins.datasets.swe.env import PrepareEnvResult
 from pydantic import BaseModel
 
 from agentix.runtime.shared import safepickle
@@ -244,27 +250,23 @@ class _ProjectPoint:
     y: int
 
 
-def test_first_party_return_types_round_trip_by_default() -> None:
-    """The framework's own shipped return types are trusted (`agentix.*`) and
-    must cross the boundary with no opt-in — otherwise the restriction breaks
-    the framework's own main paths (Proxy.start, bash.run, agent adapters)."""
-    from agentix.agents.claude_code.agent import ClaudeCodeResult
-    from agentix.agents.qwen_code import Result as QwenResult
-    from agentix.bash import BashResult
-    from agentix.bridge.proxy import TunnelHandle
-    from agentix.files import UploadResult
-    from agentix.plugins.datasets.swe.env import PrepareEnvResult
-
-    values = [
-        TunnelHandle(url="http://127.0.0.1:9", port=9),
-        BashResult(exit_code=0, stdout="o", stderr=""),
-        UploadResult(path="/workspace/a", size=1),
-        ClaudeCodeResult(returncode=0, stdout=b"o", stderr=b""),
-        QwenResult(exit_code=0, stdout="o", stderr=""),
-        PrepareEnvResult(ok=True, head="abc", log=""),
-    ]
-    for value in values:
-        assert restricted_loads(pickle.dumps(value)) == value
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(TunnelHandle(url="http://127.0.0.1:9", port=9), id="TunnelHandle"),
+        pytest.param(BashResult(exit_code=0, stdout="o", stderr=""), id="BashResult"),
+        pytest.param(UploadResult(path="/workspace/a", size=1), id="UploadResult"),
+        pytest.param(
+            ClaudeCodeResult(returncode=0, stdout=b"o", stderr=b""),
+            id="ClaudeCodeResult",
+        ),
+        pytest.param(QwenResult(exit_code=0, stdout="o", stderr=""), id="QwenResult"),
+        pytest.param(PrepareEnvResult(ok=True, head="abc", log=""), id="PrepareEnvResult"),
+    ],
+)
+def test_first_party_return_types_round_trip_by_default(value: object) -> None:
+    """The six individually registered first-party return types need no opt-in."""
+    assert restricted_loads(pickle.dumps(value)) == value
 
 
 def test_custom_type_refused_by_default() -> None:
@@ -315,5 +317,11 @@ def test_trust_env_disables_restriction(monkeypatch) -> None:
 def test_refusal_message_points_to_opt_in() -> None:
     with pytest.raises(RestrictedUnpickleError) as ei:
         restricted_loads(pickle.dumps(_ProjectPoint(1, 2)))
-    msg = str(ei.value)
-    assert "allow_type" in msg
+    expected = (
+        "refusing to reconstruct tests.runtime.test_safepickle._ProjectPoint: it is not "
+        "on the host allowlist for sandbox return values. If this is a return type you "
+        "trust, import its class and call "
+        "agentix.runtime.shared.safepickle.allow_type(Class) before the call; or set "
+        "AGENTIX_PICKLE_TRUST=1 to trust the sandbox fully."
+    )
+    assert str(ei.value) == expected
