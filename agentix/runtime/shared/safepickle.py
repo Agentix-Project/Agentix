@@ -54,6 +54,7 @@ from __future__ import annotations
 import io
 import os
 import pickle
+import pickletools
 from typing import Any
 
 GlobalName = tuple[str, str]
@@ -197,6 +198,15 @@ def restricted_loads(data: bytes) -> Any:
     Honors `AGENTIX_PICKLE_TRUST=1` as a full-trust bypass (plain `pickle.loads`)."""
     if _trust_enabled():
         return pickle.loads(data)
+    try:
+        for opcode, _, _ in pickletools.genops(data):
+            if opcode.name in {"EXT1", "EXT2", "EXT4"}:
+                raise RestrictedUnpickleError(
+                    f"refusing pickle {opcode.name}: extension opcodes cannot be safely "
+                    f"validated against the exact allowlist"
+                )
+    except ValueError as exc:
+        raise RestrictedUnpickleError(f"refusing malformed pickle opcode stream: {exc}") from exc
     return RestrictedUnpickler(io.BytesIO(data)).load()
 
 
