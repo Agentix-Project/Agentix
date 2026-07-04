@@ -490,10 +490,20 @@ class Proxy(AsyncClientNamespace):
     grouping; the bundled clients populate it via `populate_*_span`.
     """
 
-    def __init__(self, *clients: Client) -> None:
+    def __init__(self, *clients: Client, request_timeout: float = 600.0) -> None:
         super().__init__(NAMESPACE)
         if not clients:
             raise ValueError("Proxy requires at least one client with @on-decorated handlers")
+        if request_timeout <= 0:
+            raise ValueError(f"request_timeout must be > 0, got {request_timeout!r}")
+        # Per-request tunnel window. Its timer starts when the agent's request
+        # reaches the sandbox — strictly BEFORE the host's upstream call — so
+        # size it to cover the slowest client's worst case. The lower bound is
+        # client timeout x (1 + client max_retries); SDK retry backoff and
+        # Retry-After waits (up to 60s each) sit ON TOP of that, so leave real
+        # margin, and note an explicit Sandbox call_deadline can still end the
+        # whole operation earlier.
+        self._request_timeout = float(request_timeout)
         self._handle: TunnelHandle | None = None
         self._clients = clients
         self._clients_closed = False
@@ -632,7 +642,11 @@ class Proxy(AsyncClientNamespace):
                     "sandbox.remote()/health() call — its /abridge namespace must be "
                     "registered before the runtime client connects"
                 ) from exc
-            handle = await sandbox.remote(_start_tunnel, paths=list(self.paths))
+            handle = await sandbox.remote(
+                _start_tunnel,
+                paths=list(self.paths),
+                request_timeout=self._request_timeout,
+            )
         except BaseException:
             try:
                 await self._close_clients()

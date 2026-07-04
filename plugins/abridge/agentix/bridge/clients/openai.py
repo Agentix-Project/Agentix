@@ -77,11 +77,16 @@ class OpenAIClient:
         model: str | None = None,
         extra_body: dict[str, Any] | None = None,
         timeout: float = 120.0,
+        max_retries: int = 0,
         session_id: str | None = None,
     ) -> None:
         if AsyncOpenAI is None:
             raise ImportError(_INSTALL_HINT)
-        self._sdk = AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
+        # 0, not the SDK's 2: silent retries multiply tunnel-window occupancy;
+        # retry policy is the operator's call (see Proxy.request_timeout).
+        self._sdk = AsyncOpenAI(
+            base_url=base_url, api_key=api_key, timeout=timeout, max_retries=max_retries
+        )
         self._model = model
         self._extra_body = extra_body or {}
         self.session_id = session_id or uuid.uuid4().hex

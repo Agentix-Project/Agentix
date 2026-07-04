@@ -86,7 +86,11 @@ class Forward:
         target_url: str,
         *,
         paths: list[str],
-        timeout: float = 600.0,
+        # Strictly under Proxy's default 600s tunnel window: the window's
+        # timer starts before this forward does, so an equal deadline always
+        # loses the race and turns a slow-but-successful sidecar call into a
+        # tunnel 504.
+        timeout: float = 540.0,
         session_id: str | None = None,
         headers: Mapping[str, str] | None = None,
     ) -> None:
@@ -214,7 +218,11 @@ class SessionForward(Forward):
         paths: list[str],
         create_path: str = "/sessions",
         session_id_field: str = "session_id",
-        timeout: float = 600.0,
+        # Strictly under Proxy's default 600s tunnel window: the window's
+        # timer starts before this forward does, so an equal deadline always
+        # loses the race and turns a slow-but-successful sidecar call into a
+        # tunnel 504.
+        timeout: float = 540.0,
         headers: Mapping[str, str] | None = None,
     ) -> None:
         super().__init__(target_url, paths=paths, timeout=timeout, headers=headers)
