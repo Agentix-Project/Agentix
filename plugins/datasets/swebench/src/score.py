@@ -260,13 +260,14 @@ async def _run(command: str, workdir: str, env: dict[str, str], timeout: float, 
 
 
 def _get_env() -> dict[str, str]:
-    from agentix.runtime.shared.env import get_env_without_agentix
+    # The image's own environment (bundle paths subtracted, stripped vars
+    # restored, BASH_ENV pointed at ~/.bashrc). Imported from the core
+    # contract module — same symbol as `agentix.bash.image_env`, but a
+    # cross-plugin import would not resolve statically in the pkgutil
+    # namespace layout.
+    from agentix.runtime.shared.env import image_env
 
-    env = get_env_without_agentix()
-    bashrc = Path.home() / ".bashrc"
-    if bashrc.is_file() and "BASH_ENV" not in env:
-        env["BASH_ENV"] = str(bashrc)
-    return env
+    return image_env()
 
 
 def _apply_export(command: str, env: dict[str, str]) -> bool:

@@ -56,7 +56,7 @@ async def test_bash_run_honors_bash_env(tmp_path: Path):
 
     result = await bash.run(
         "printf '%s' \"$FROM_BASH_ENV\"",
-        env={"BASH_ENV": str(bash_env)},
+        env={**os.environ, "BASH_ENV": str(bash_env)},
     )
 
     assert result.exit_code == 0
@@ -116,42 +116,66 @@ async def test_bash_run_stream_can_use_explicit_executable(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_bash_run_clean_env_runs_in_the_image_environment(monkeypatch):
-    """clean_env=True subtracts the bundle's recorded PATH additions and
-    restores stripped vars, so the command resolves the image's toolchain."""
+async def test_bash_run_none_env_inherits_worker_environment(monkeypatch):
+    """subprocess.run parity: no env → inherit the worker's environment."""
+    monkeypatch.setenv("AGENTIX_TEST_MARKER", "inherited")
+    result = await bash.run(command='printf %s "$AGENTIX_TEST_MARKER"')
+    assert result.stdout == "inherited"
+
+
+@pytest.mark.asyncio
+async def test_bash_run_env_dict_replaces_the_environment(monkeypatch):
+    """subprocess.run parity: an explicit env dict REPLACES the environment;
+    a worker var not in it is gone from the child (no merge)."""
+    monkeypatch.setenv("AGENTIX_TEST_MARKER", "should-not-leak")
+    result = await bash.run(
+        command='printf %s "${AGENTIX_TEST_MARKER-absent}"',
+        env={"PATH": os.environ.get("PATH", "/usr/bin")},
+    )
+    assert result.stdout == "absent"
+
+
+def test_image_env_subtracts_additions_and_restores_saved(monkeypatch):
+    """The task-image env util: recorded bundle PATH additions subtracted,
+    stripped vars restored from their AGENTIX_SAVED_* snapshot."""
+    from agentix.bash import image_env
+
+    from agentix.runtime.shared.env import AGENTIX_ADDED_PATH
+
+    monkeypatch.setenv("PATH", os.pathsep.join(["/nix/runtime/bin", "/usr/bin"]))
+    monkeypatch.setenv(AGENTIX_ADDED_PATH, "/nix/runtime/bin")
+    monkeypatch.setenv("AGENTIX_SAVED_PYTHONPATH", "/testbed/src")
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+
+    env = image_env()
+    assert env["PATH"] == "/usr/bin"
+    assert env["PYTHONPATH"] == "/testbed/src"
+    assert AGENTIX_ADDED_PATH not in env
+    assert "AGENTIX_SAVED_PYTHONPATH" not in env
+
+
+@pytest.mark.asyncio
+async def test_bash_run_with_image_env_runs_in_the_image_world(monkeypatch):
+    """The blessed recipe: bash.run(cmd, env=image_env()) drops the bundle's
+    injected PATH and restores the image's stripped vars."""
+    from agentix.bash import image_env
+
     from agentix.runtime.shared.env import AGENTIX_ADDED_PATH
 
     real_path = os.environ.get("PATH", "/usr/bin")
     monkeypatch.setenv("PATH", os.pathsep.join(["/agentix-injected/bin", real_path]))
     monkeypatch.setenv(AGENTIX_ADDED_PATH, "/agentix-injected/bin")
     monkeypatch.setenv("AGENTIX_SAVED_PYTHONPATH", "/testbed/src")
-    # restore is live-wins: an ambient PYTHONPATH (conda, IDE runners) would
-    # legitimately shadow the snapshot and flake this test — clear it.
     monkeypatch.delenv("PYTHONPATH", raising=False)
 
-    polluted = await bash.run(command="printf %s \"$PATH\"")
+    polluted = await bash.run(command='printf %s "$PATH"')
     assert polluted.stdout.startswith("/agentix-injected/bin")
 
-    clean = await bash.run(command="printf %s \"$PATH:$PYTHONPATH\"", clean_env=True)
+    clean = await bash.run(command='printf %s "$PATH:$PYTHONPATH"', env=image_env())
     assert "/agentix-injected/bin" not in clean.stdout
     assert clean.stdout.endswith("/testbed/src")
 
 
-def test_shell_executable_prefers_image_bash_in_clean_mode(tmp_path):
-    """A clean-env command's restored vars (LD_PRELOAD, ...) target the
-    image's own bash; the bundled Nix bash is only the last resort."""
-    fakebin = tmp_path / "bin"
-    fakebin.mkdir()
-    image_bash = fakebin / "bash"
-    image_bash.write_text("#!/bin/sh\n")
-    image_bash.chmod(0o755)
-
-    resolved = bash._shell_executable(None, {"PATH": str(fakebin)}, clean=True)
-    assert resolved == str(image_bash)
-
-    # without clean mode the bundled-bash preference is unchanged (falls back
-    # to PATH lookup here because /nix/runtime/bin/bash does not exist)
-    assert bash._shell_executable(None, {"PATH": str(fakebin)}) == str(image_bash)
 def _set_files_root(monkeypatch, root):
     # UPLOAD_ROOT is computed from env at import time; patch the module
     # attribute directly — reloading the module would re-create its classes
@@ -303,3 +327,33 @@ async def test_files_link_resolving_exactly_to_root_then_suffix(tmp_path, monkey
     _set_files_root(monkeypatch, root)
 
     assert await files.download("sub/up/target.txt") == b"hit"
+
+
+def test_image_env_bashrc_follows_the_env_home(tmp_path, monkeypatch):
+    """BASH_ENV must point at the RESULT env's ~/.bashrc — including when the
+    image's HOME was stripped+restored or overridden via extra — not at the
+    worker process's ambient HOME."""
+    from agentix.bash import image_env
+
+    (tmp_path / ".bashrc").write_text("export FROM_IMAGE_RC=1\n")
+    env = image_env({"HOME": str(tmp_path)})
+    assert env["BASH_ENV"] == str(tmp_path / ".bashrc")
+
+    explicit = image_env({"HOME": str(tmp_path), "BASH_ENV": "/custom/rc"})
+    assert explicit["BASH_ENV"] == "/custom/rc"  # caller's value is preserved
+
+
+def test_shell_executable_follows_the_env_path(tmp_path):
+    """The shell resolves from the env's PATH like everything else the
+    command runs: an image_env() PATH selects the image's bash (its restored
+    LD_PRELOAD etc. target that binary); no bash on PATH falls back."""
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    image_bash = fakebin / "bash"
+    image_bash.write_text("#!/bin/sh\n")
+    image_bash.chmod(0o755)
+
+    assert bash._shell_executable(None, {"PATH": str(fakebin)}) == str(image_bash)
+    # no bash anywhere on the supplied PATH -> /bin/bash fallback
+    # (BUNDLE_RUNTIME_BASH does not exist outside a bundle)
+    assert bash._shell_executable(None, {"PATH": str(tmp_path)}) == "/bin/bash"

@@ -144,6 +144,29 @@ def _target_var(tracking_var: str) -> str | None:
     return name or None
 
 
+def image_env(extra: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The task image's own environment, ready to pass as a subprocess env.
+
+    :func:`get_env_without_agentix` plus a shell convenience: if the image
+    ships a ``~/.bashrc`` (per the RESULT env's ``HOME``) and nothing set
+    ``BASH_ENV``, point ``BASH_ENV`` at it so a non-interactive ``bash -c``
+    sources the image's shell setup. Canonically re-exported as
+    ``agentix.bash.image_env`` — implemented here because this module owns
+    the ``AGENTIX_ADDED_*``/``AGENTIX_SAVED_*`` contract and is importable
+    from every plugin without a cross-plugin dependency.
+
+    Reads the calling process's live environment, so it is only meaningful
+    INSIDE the sandbox; a host driving the sandbox fetches it over the wire
+    (``env = await c.remote(image_env)``) rather than evaluating it host-side.
+    """
+    env = get_env_without_agentix(extra)
+    home = env.get("HOME") or os.path.expanduser("~")
+    bashrc = os.path.join(home, ".bashrc")
+    if "BASH_ENV" not in env and os.path.isfile(bashrc):
+        env["BASH_ENV"] = bashrc
+    return env
+
+
 def get_env_without_agentix(
     extra: Mapping[str, str] | None = None,
     *,
@@ -207,4 +230,5 @@ __all__ = [
     "BUNDLE_RUNTIME_VENV",
     "BUNDLE_RUNTIME_VENV_BIN",
     "get_env_without_agentix",
+    "image_env",
 ]

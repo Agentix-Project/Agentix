@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 
-from agentix.bash import _clean_env
+from agentix.bash import _build_env, image_env
 
 from agentix.runtime.shared.env import (
     AGENTIX_ADDED_LD_LIBRARY_PATH,
@@ -85,14 +85,16 @@ def test_get_env_without_agentix_applies_extra_last() -> None:
     assert env[AGENTIX_ADDED_PATH] == "/caller/value"
 
 
-def test_bash_clean_env_inherits_agentix_runtime_env(monkeypatch) -> None:
-    monkeypatch.setenv("PATH", os.pathsep.join(["/nix/runtime/bin", "/task/bin"]))
-    monkeypatch.setenv(AGENTIX_ADDED_PATH, "/nix/runtime/bin")
+def test_build_env_none_inherits_and_dict_replaces(monkeypatch) -> None:
+    """bash env follows subprocess.run: None inherits the worker env, a dict
+    replaces it wholesale."""
+    monkeypatch.setenv("AGENTIX_TEST_MARKER", "present")
 
-    env = _clean_env(None)
+    inherited = _build_env(None)
+    assert inherited.get("AGENTIX_TEST_MARKER") == "present"
 
-    assert env["PATH"].split(os.pathsep) == ["/nix/runtime/bin", "/task/bin"]
-    assert env[AGENTIX_ADDED_PATH] == "/nix/runtime/bin"
+    replaced = _build_env({"ONLY": "1"})
+    assert replaced == {"ONLY": "1"}
 
 
 def test_get_env_without_agentix_restores_saved_vars() -> None:
@@ -135,12 +137,13 @@ def test_get_env_without_agentix_extra_wins_over_restored() -> None:
     assert env["PYTHONPATH"] == "/caller"
 
 
-def test_bash_clean_env_opt_in_builds_the_image_environment(monkeypatch) -> None:
+def test_image_env_builds_the_task_image_environment(monkeypatch) -> None:
     monkeypatch.setenv("PATH", os.pathsep.join(["/nix/runtime/bin", "/task/bin"]))
     monkeypatch.setenv(AGENTIX_ADDED_PATH, "/nix/runtime/bin")
     monkeypatch.setenv("AGENTIX_SAVED_PYTHONPATH", "/testbed/src")
+    monkeypatch.delenv("PYTHONPATH", raising=False)
 
-    env = _clean_env({"EXTRA": "1"}, clean=True)
+    env = image_env({"EXTRA": "1"})
 
     assert env["PATH"] == "/task/bin"
     assert env["PYTHONPATH"] == "/testbed/src"
