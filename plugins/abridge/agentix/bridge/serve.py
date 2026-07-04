@@ -351,6 +351,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--host", default="127.0.0.1", help="bind address; expose beyond loopback deliberately")
     parser.add_argument("--port", type=int, default=8399)
     parser.add_argument("--upstream-timeout", type=float, default=180.0)
+    parser.add_argument(
+        "--upstream-max-retries",
+        type=int,
+        default=0,
+        help="openai SDK retries per upstream call; keep total occupancy = timeout x (1+retries) explicit",
+    )
     parser.add_argument("--max-sessions", type=int, default=256)
     args = parser.parse_args(argv)
     if not args.upstream_base_url:
@@ -365,6 +371,7 @@ def main(argv: list[str] | None = None) -> None:
             api_key=args.upstream_api_key,
             model=args.upstream_model,
             timeout=args.upstream_timeout,
+            max_retries=args.upstream_max_retries,
             session_id=session_id,
         )
 

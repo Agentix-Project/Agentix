@@ -82,12 +82,19 @@ class AnthropicFromOpenAIClient:
         api_key: str | None = None,
         model: str | None = None,
         timeout: float = 120.0,
+        max_retries: int = 0,
         session_id: str | None = None,
         upstream_params: dict[str, Any] | None = None,
     ) -> None:
         if AsyncOpenAI is None:
             raise ImportError(_INSTALL_HINT)
-        self._client = AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
+        # max_retries defaults to 0, not the SDK's 2: silent retries multiply
+        # the handler's occupancy of the tunnel window (Proxy.request_timeout)
+        # behind the operator's back. Opt in explicitly and size the window to
+        # timeout x (1 + max_retries).
+        self._client = AsyncOpenAI(
+            base_url=base_url, api_key=api_key, timeout=timeout, max_retries=max_retries
+        )
         self._model = model
         self._upstream_params = dict(upstream_params or {})
         self.session_id = session_id or uuid.uuid4().hex
