@@ -114,3 +114,42 @@ async def test_bash_run_stream_can_use_explicit_executable(tmp_path: Path):
 
     assert [event.data for event in events if isinstance(event, bash.BashStdout)] == ["zsh"]
     assert [event.exit_code for event in events if isinstance(event, bash.BashExit)] == [0]
+
+
+@pytest.mark.asyncio
+async def test_bash_run_clean_env_runs_in_the_image_environment(monkeypatch):
+    """clean_env=True subtracts the bundle's recorded PATH additions and
+    restores stripped vars, so the command resolves the image's toolchain."""
+    from agentix.runtime.shared.env import AGENTIX_ADDED_PATH
+
+    real_path = os.environ.get("PATH", "/usr/bin")
+    monkeypatch.setenv("PATH", os.pathsep.join(["/agentix-injected/bin", real_path]))
+    monkeypatch.setenv(AGENTIX_ADDED_PATH, "/agentix-injected/bin")
+    monkeypatch.setenv("AGENTIX_SAVED_PYTHONPATH", "/testbed/src")
+    # restore is live-wins: an ambient PYTHONPATH (conda, IDE runners) would
+    # legitimately shadow the snapshot and flake this test — clear it.
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+
+    polluted = await bash.run(command="printf %s \"$PATH\"")
+    assert polluted.stdout.startswith("/agentix-injected/bin")
+
+    clean = await bash.run(command="printf %s \"$PATH:$PYTHONPATH\"", clean_env=True)
+    assert "/agentix-injected/bin" not in clean.stdout
+    assert clean.stdout.endswith("/testbed/src")
+
+
+def test_shell_executable_prefers_image_bash_in_clean_mode(tmp_path):
+    """A clean-env command's restored vars (LD_PRELOAD, ...) target the
+    image's own bash; the bundled Nix bash is only the last resort."""
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    image_bash = fakebin / "bash"
+    image_bash.write_text("#!/bin/sh\n")
+    image_bash.chmod(0o755)
+
+    resolved = bash._shell_executable(None, {"PATH": str(fakebin)}, clean=True)
+    assert resolved == str(image_bash)
+
+    # without clean mode the bundled-bash preference is unchanged (falls back
+    # to PATH lookup here because /nix/runtime/bin/bash does not exist)
+    assert bash._shell_executable(None, {"PATH": str(fakebin)}) == str(image_bash)

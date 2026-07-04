@@ -93,3 +93,45 @@ def test_clean_worker_env_injects_recorded_runtime_build_paths(monkeypatch: pyte
         "/task/lib/pkgconfig",
     ]
     assert env["CMAKE_PREFIX_PATH"] == "/nix/runtime"
+
+
+def test_clean_worker_env_records_stripped_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stripping without recording makes the image env unrecoverable for task
+    subprocesses; every stripped var must land in AGENTIX_SAVED_*."""
+    monkeypatch.setenv("PYTHONPATH", "/testbed/src")
+    monkeypatch.setenv("LD_PRELOAD", "/usr/lib/libfoo.so")
+    monkeypatch.setenv("NIX_CFLAGS_COMPILE", "-O2")
+
+    env = _clean_worker_env(Path("/runtime/venv/bin"))
+
+    assert "PYTHONPATH" not in env
+    assert env["AGENTIX_SAVED_PYTHONPATH"] == "/testbed/src"
+    assert env["AGENTIX_SAVED_LD_PRELOAD"] == "/usr/lib/libfoo.so"
+    assert env["AGENTIX_SAVED_NIX_CFLAGS_COMPILE"] == "-O2"
+
+
+def test_clean_worker_env_records_nothing_when_nothing_stripped(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The runner's own environment may legitimately carry strippable vars
+    # (NIX_*, SSL_CERT_FILE on Nix-based CI) — clear them all so this test
+    # asserts the production rule, not the runner's environment.
+    for key in list(os.environ):
+        if key in {"LD_PRELOAD", "PYTHONPATH", "PYTHONHOME", "LOCALE_ARCHIVE", "SSL_CERT_FILE"} or key.startswith(
+            ("NIX_", "FONTCONFIG_", "AGENTIX_SAVED_")
+        ):
+            monkeypatch.delenv(key, raising=False)
+
+    env = _clean_worker_env(Path("/runtime/venv/bin"))
+
+    assert not any(key.startswith("AGENTIX_SAVED_") for key in env)
+
+
+def test_clean_worker_env_fresh_strip_overwrites_inherited_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nested spawn: the freshly-observed live value is authoritative — an
+    AGENTIX_SAVED_* snapshot inherited from an outer layer must not shadow it."""
+    monkeypatch.setenv("AGENTIX_SAVED_PYTHONPATH", "/stale/outer")
+    monkeypatch.setenv("PYTHONPATH", "/fresh/inner")
+
+    env = _clean_worker_env(Path("/runtime/venv/bin"))
+
+    assert env["AGENTIX_SAVED_PYTHONPATH"] == "/fresh/inner"
+    assert "PYTHONPATH" not in env

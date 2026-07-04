@@ -33,20 +33,37 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from agentix.runtime.shared.env import BUNDLE_RUNTIME_BASH
+from agentix.runtime.shared.env import BUNDLE_RUNTIME_BASH, get_env_without_agentix
 
 
-def _clean_env(extra: dict[str, str] | None) -> dict[str, str]:
-    """Build a subprocess env: inherited runtime env + caller overrides."""
-    env = dict(os.environ)
+def _clean_env(extra: dict[str, str] | None, clean: bool = False) -> dict[str, str]:
+    """Build a subprocess env, then apply caller overrides last.
+
+    Default: the worker's own environment — right for runtime tools (the
+    claude CLI, bundled rg, ...) that live under /nix. ``clean=True``: the
+    task IMAGE's environment (bundle path additions subtracted, stripped vars
+    restored) — right for task commands that must resolve the image's own
+    toolchain instead of the bundle venv.
+    """
+    env = get_env_without_agentix() if clean else dict(os.environ)
     if extra:
         env.update(extra)
     return env
 
 
-def _shell_executable(executable: str | None, env: dict[str, str]) -> str:
+def _shell_executable(executable: str | None, env: dict[str, str], clean: bool = False) -> str:
     if executable:
         return shutil.which(executable, path=env.get("PATH")) or executable
+    if clean:
+        # A clean-env command belongs to the image's world entirely — its
+        # restored vars (LD_PRELOAD, ...) target the image's own bash, not
+        # the Nix one. Fall back to the bundled bash only when the image has
+        # none at all.
+        image_bash = shutil.which("bash", path=env.get("PATH"))
+        if image_bash:
+            return image_bash
+        if os.access("/bin/bash", os.X_OK):
+            return "/bin/bash"
     if os.access(BUNDLE_RUNTIME_BASH, os.X_OK):
         return BUNDLE_RUNTIME_BASH
     return shutil.which("bash", path=env.get("PATH")) or "/bin/bash"
@@ -145,16 +162,23 @@ async def run(
     timeout: float | None = None,
     max_output: int = 10 * 1024 * 1024,
     executable: str | None = None,
+    clean_env: bool = False,
 ) -> BashResult:
-    """Run a shell command in the sandbox and return its captured output."""
-    sub_env = _clean_env(env)
+    """Run a shell command in the sandbox and return its captured output.
+
+    ``clean_env=True`` runs the command in the task image's environment
+    (Agentix's recorded path additions subtracted, stripped vars restored)
+    instead of the bundle-polluted worker environment; ``env`` overrides win
+    last either way.
+    """
+    sub_env = _clean_env(env, clean=clean_env)
     proc = await asyncio.create_subprocess_shell(
         command,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
         env=sub_env,
-        executable=_shell_executable(executable, sub_env),
+        executable=_shell_executable(executable, sub_env, clean=clean_env),
     )
     assert proc.stdout is not None and proc.stderr is not None
     stdout_task = asyncio.create_task(_read_capped(proc.stdout, max_output))
@@ -185,20 +209,22 @@ async def run_stream(
     env: dict[str, str] | None = None,
     timeout: float | None = None,
     executable: str | None = None,
+    clean_env: bool = False,
 ) -> AsyncIterator[BashEvent]:
     """Run a shell command, yielding events as the subprocess emits them.
 
     Terminates with a single `BashExit` event on normal completion or
     a single `BashError` event on timeout / wire-level failure.
+    ``clean_env`` selects the task image's environment, as in `run`.
     """
-    sub_env = _clean_env(env)
+    sub_env = _clean_env(env, clean=clean_env)
     proc = await asyncio.create_subprocess_shell(
         command,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
         env=sub_env,
-        executable=_shell_executable(executable, sub_env),
+        executable=_shell_executable(executable, sub_env, clean=clean_env),
     )
 
     async def _pump(stream, tag, queue):

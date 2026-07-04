@@ -117,6 +117,14 @@ AGENTIX_ADDED_LD_LIBRARY_PATH = "AGENTIX_ADDED_LD_LIBRARY_PATH"
 
 _TRACKING_PREFIX = "AGENTIX_ADDED_"
 
+AGENTIX_SAVED_PREFIX = "AGENTIX_SAVED_"
+"""Prefix for vars the worker spawn STRIPPED (rather than prepended to).
+
+The worker removes interpreter-hostile vars (``PYTHONPATH``, ``LD_PRELOAD``,
+...) from its own environment, but the task image legitimately owns them —
+so the spawn records each one under ``AGENTIX_SAVED_<NAME>`` and
+:func:`get_env_without_agentix` restores them for task subprocesses."""
+
 
 def _split_path(value: str) -> list[str]:
     return value.split(os.pathsep) if value else []
@@ -144,8 +152,11 @@ def get_env_without_agentix(
     """Return an environment for user subprocesses without Agentix-added paths.
 
     The helper only subtracts entries that Agentix explicitly recorded in
-    `AGENTIX_ADDED_*`. It intentionally does not remove arbitrary `/nix`
-    paths, because a task image may itself be Nix-based.
+    `AGENTIX_ADDED_*` (it intentionally does not remove arbitrary `/nix`
+    paths, because a task image may itself be Nix-based), and restores vars
+    the worker spawn stripped and recorded under `AGENTIX_SAVED_*`. A live
+    value wins over its saved snapshot — presence means something set it
+    after the spawn, which is more recent intent than the pre-strip original.
     """
 
     env = dict(os.environ if base is None else base)
@@ -164,6 +175,14 @@ def get_env_without_agentix(
     for name in tracking_vars:
         env.pop(name, None)
 
+    saved_vars = [name for name in env if name.startswith(AGENTIX_SAVED_PREFIX)]
+    for saved_var in saved_vars:
+        target = saved_var.removeprefix(AGENTIX_SAVED_PREFIX)
+        if target and target not in env:
+            env[target] = env[saved_var]
+    for name in saved_vars:
+        env.pop(name, None)
+
     if extra:
         env.update(extra)
     return env
@@ -172,6 +191,7 @@ def get_env_without_agentix(
 __all__ = [
     "AGENTIX_ADDED_LD_LIBRARY_PATH",
     "AGENTIX_ADDED_PATH",
+    "AGENTIX_SAVED_PREFIX",
     "BIND_HOST_ENV",
     "BIND_PORT_ENV",
     "BUNDLE_NIX_ROOT",

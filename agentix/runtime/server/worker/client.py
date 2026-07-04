@@ -20,7 +20,12 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from agentix.runtime.server.worker.invoker import CallableInvoker
-from agentix.runtime.shared.env import AGENTIX_ADDED_PATH, BUNDLE_RUNTIME_BIN, BUNDLE_RUNTIME_PATH_ENTRIES
+from agentix.runtime.shared.env import (
+    AGENTIX_ADDED_PATH,
+    AGENTIX_SAVED_PREFIX,
+    BUNDLE_RUNTIME_BIN,
+    BUNDLE_RUNTIME_PATH_ENTRIES,
+)
 from agentix.runtime.shared.framing import read_frame, write_frame
 from agentix.runtime.shared.models import RemoteError, RemoteRequest, RemoteResponse
 
@@ -106,11 +111,20 @@ def _prepend_recorded_path_entries(env: dict[str, str], name: str, entries: Iter
 
 
 def _clean_worker_env(runtime_bin_dir: Path | None) -> dict[str, str]:
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if key not in _STRIPPED_ENV and not any(key.startswith(prefix) for prefix in _STRIPPED_ENV_PREFIXES)
-    }
+    env: dict[str, str] = {}
+    saved: dict[str, str] = {}
+    for key, value in os.environ.items():
+        if key in _STRIPPED_ENV or any(key.startswith(prefix) for prefix in _STRIPPED_ENV_PREFIXES):
+            # Stripped for the worker's own interpreter hygiene, but the task
+            # image legitimately owns these — record them so
+            # `get_env_without_agentix` can restore them for task subprocesses.
+            saved[f"{AGENTIX_SAVED_PREFIX}{key}"] = value
+            continue
+        env[key] = value
+    # The freshly-observed value is authoritative: overwrite any stale
+    # AGENTIX_SAVED_* snapshot inherited from an outer layer, so a nested
+    # clean env restores this spawn's image value, not an older one.
+    env.update(saved)
     # Build PATH from: the venv's bin (`runtime_bin_dir`), the bundle's
     # symlink-join (`BUNDLE_RUNTIME_BIN`), then the parent environment's
     # PATH. Inside the bundle runtime tree the first two are siblings and both
