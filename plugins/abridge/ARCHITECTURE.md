@@ -62,17 +62,21 @@ Solid = code present in this branch. Dashed = planned (see below).
 - **`Sidecar(command=..., health_path=...)`** — owns a local sidecar
   process's lifecycle (spawn → health → URL → teardown). abridge-managed
   by default; pass an external URL straight to `Forward` to opt out.
+- **`cc_convert_sidecar(...)`** *(experimental)* — configures an externally
+  installed `cc_convert_sidecar` executable through its environment contract.
+  abridge does not install, build, or publish that executable.
 
 ## Status
 
-- **Implemented in this branch:** `Forward` and generic `Sidecar` process
-  supervision. Tests cover a local HTTP sidecar, the complete in-process
-  tunnel/namespace/Proxy/Forward path, process cleanup, noisy output, and
-  auto-port bind retries.
+- **Implemented in this branch:** `Forward`, generic `Sidecar` process
+  supervision, and an experimental `cc_convert_sidecar` configuration preset.
+  Required tests cover the generic path and preset environment wiring. An
+  optional binary-backed test exercises translated JSON and a completed SSE
+  payload only when a caller supplies the external executable.
 - **Not implemented yet:** incremental SSE delivery. `Forward` buffers the
   complete sidecar response before the tunnel sends it to the agent.
-- **Planned:** pinned adapters for specific gateway binaries, a deployed
-  runtime/SIO/sidecar integration check, the `tito` pretokenize/record
-  sidecar, a first-class `Session`/`Trajectory` model bridged onto `/trace`,
+- **Planned:** a reproducibly pinned `cc_convert_sidecar` binary and required
+  full tunnel/SIO/sidecar integration check; the `tito` pretokenize/record
+  sidecar; a first-class `Session`/`Trajectory` model bridged onto `/trace`;
   and an open/chunk/end streaming primitive. Existing in-process clients
   remain supported until a separate migration removes them.

@@ -274,6 +274,7 @@ agentix/bridge/
 ├── serve.py                       # direct mode: @on handlers as a standalone HTTP service
 ├── forward.py                     # JSON POST forwarding to a host-side service
 ├── sidecar.py                     # local process lifecycle + health supervision
+├── sidecars.py                    # presets for external sidecar binaries
 └── clients/                       # bundled handler implementations
     ├── openai.py                  # OpenAIClient (openai SDK) + PLACEHOLDER_API_KEY
     ├── anthropic.py               # AnthropicClient (anthropic SDK) + environ() + PLACEHOLDER_API_KEY
