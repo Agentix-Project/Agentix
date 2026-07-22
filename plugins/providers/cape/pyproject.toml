@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentix-provider-cape"
+version = "0.1.0"
+description = "CAPE lease-based GPU pool provider backend for Agentix (registers the `cape` backend; assumed CLI contract)"
+requires-python = ">=3.11"
+dependencies = [
+    # Protocol + dataclasses (`SandboxProvider`, `Sandbox`, `SandboxConfig`,
+    # `SandboxInfo`, `SandboxId`) all live in core agentix. The backend
+    # drives the submitter-side `cape` CLI via asyncio subprocesses and
+    # health-checks the runtime with raw asyncio sockets, so no httpx —
+    # it would honor environment proxy vars and hang loopback/tunnel
+    # probes on hosts behind a corp proxy.
+    "agentixx",
+]
+
+# `agentixx` is the monorepo workspace root — used editable, never from
+# PyPI. Core edits are live here with no release step.
+[tool.uv.sources]
+agentixx = { workspace = true }
+
+# `uv sync` makes `providers().get("cape")` work with zero framework
+# changes — the registry walks this entry-point group.
+[project.entry-points."agentix.provider"]
+cape = "agentix.provider.cape:CapeProvider"
+
+[tool.hatch.build.targets.wheel]
+# One file at `agentix/provider/cape.py`. The `agentix` and
+# `agentix/provider` dirs carry no __init__.py here — those belong to
+# core agentix; this wheel installs a sibling into the same namespace.
+packages = ["agentix"]
+
+# ruff / pyright / pytest config is centralized in the workspace-root
+# pyproject.toml — this member doesn't repeat it.

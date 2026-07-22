@@ -24,6 +24,7 @@ members = [
     "agentix-bridge",
     "agentix-dataset-swe",
     "agentix-provider-apptainer",
+    "agentix-provider-cape",
     "agentix-provider-daytona",
     "agentix-provider-docker",
     "agentix-provider-e2b",
@@ -127,6 +128,17 @@ requires-dist = [
 name = "agentix-provider-apptainer"
 version = "0.1.0"
 source = { editable = "plugins/providers/apptainer" }
+dependencies = [
+    { name = "agentixx" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "agentixx", editable = "." }]
+
+[[package]]
+name = "agentix-provider-cape"
+version = "0.1.0"
+source = { editable = "plugins/providers/cape" }
 dependencies = [
     { name = "agentixx" },
 ]
