@@ -109,8 +109,11 @@ with Agentix HEAD while the design is still moving quickly.
   [`-daytona`](plugins/providers/daytona) /
   [`-e2b`](plugins/providers/e2b) /
   [`-apptainer`](plugins/providers/apptainer) /
-  [`-uv`](plugins/providers/uv) — sandbox backends (the uv backend
-  materializes the runtime from a local uv venv, with no container).
+  [`-uv`](plugins/providers/uv) /
+  [`-cape`](plugins/providers/cape) — sandbox backends (the uv backend
+  materializes the runtime from a local uv venv, with no container; the
+  cape backend drives a lease-based GPU pool through an assumed CLI
+  contract pending verification against the real `cape` CLI).
 - [`agentix-runner`](plugins/runner) — `run_rollouts(...)` batch
   orchestration.
 - [`agentix-dataset-swe`](plugins/datasets/swebench) — SWE-bench task
