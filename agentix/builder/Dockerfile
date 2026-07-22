@@ -11,7 +11,11 @@
 #
 # Nix runs only inside this build — the host needs just docker.
 
-ARG AGENTIX_BUILDER_BASE=nixos/nix:latest
+# Pinned by digest: the floating `latest` tag moved to an image whose
+# nix binary segfaults under qemu-user x86_64 emulation on arm64 hosts
+# (breaks the cross-arch e2e matrix), and an unpinned base makes bundle
+# builds unreproducible. Override with --build-arg to test newer images.
+ARG AGENTIX_BUILDER_BASE=nixos/nix:latest@sha256:bf1d938835ab96312f098fa6c2e9cab367728e0aad0646ee3e02a787c80d8fb8
 FROM ${AGENTIX_BUILDER_BASE}
 
 # Flakes + the modern CLI; accept flake `nixConfig` for substituters.
