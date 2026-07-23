@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "agentix-provider-cape"
 version = "0.1.0"
-description = "CAPE lease-based GPU pool provider backend for Agentix (registers the `cape` backend; assumed CLI contract)"
+description = "CAPE lease-based GPU pool provider backend for Agentix (registers the `cape` backend; CLI contract verified against the CAPE source)"
 requires-python = ">=3.11"
 dependencies = [
     # Protocol + dataclasses (`SandboxProvider`, `Sandbox`, `SandboxConfig`,
