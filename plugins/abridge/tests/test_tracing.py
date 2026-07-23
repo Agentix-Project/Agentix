@@ -95,6 +95,65 @@ async def test_openai_client_emits_genai_span(wired, capture_spans) -> None:
     assert sp.attrs["gen_ai.completion.0.content"] == "hello from upstream"
 
 
+def test_genai_span_content_is_byte_faithful_for_long_prompts(capture_spans, tmp_path) -> None:
+    """Byte-fidelity spike: the span-population path must NOT truncate
+    gen_ai content attributes.
+
+    A downstream consumer's captured-span fixture showed every
+    `gen_ai.prompt.*.content` cut at exactly 120 chars, raising the
+    question whether agentix's capture truncates attribute values.
+    Verdict from source: it does not — `populate_*_span` stores the full
+    string, `Span.set_attribute` keeps raw values, and `JsonlProcessor`
+    writes `Span.export()` verbatim (no OTel attribute-length limit is
+    involved on this path). That fixture was hand-trimmed. This test
+    locks the property in: a >2000-char prompt survives population,
+    in-memory capture, AND the JSONL sink byte-for-byte.
+    """
+    from agentix.bridge.clients import populate_anthropic_span
+
+    # Deterministic, marker-rich content: mid-string and end markers would
+    # be destroyed by any length-limited capture.
+    prompt = ("0123456789" * 250) + "<END-OF-PROMPT sentinel 中文>"
+    completion = ("abcdefghij" * 300) + "<END-OF-COMPLETION sentinel>"
+    assert len(prompt) > 2000 and len(completion) > 2000
+
+    sink_path = tmp_path / "spans.jsonl"
+    sink = trace.JsonlProcessor(sink_path)
+    trace.add_processor(sink)
+    try:
+        with trace.span("anthropic messages fidelity"):
+            populate_anthropic_span(
+                request={
+                    "model": "claude-3-haiku",
+                    "system": prompt,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+                response={
+                    "model": "m",
+                    "content": [{"type": "text", "text": completion}],
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+            )
+    finally:
+        trace.remove_processor(sink)
+        sink.shutdown()
+
+    # In-memory capture: full fidelity.
+    (sp,) = capture_spans.spans
+    assert sp.attrs["gen_ai.prompt.0.content"] == prompt
+    assert sp.attrs["gen_ai.prompt.1.content"] == prompt
+    assert sp.attrs["gen_ai.completion.0.content"] == completion
+
+    # JSONL capture channel (`trace.collect` / `JsonlProcessor`): what is
+    # read back from disk is byte-identical to what was populated.
+    import json as _json
+
+    (record,) = [_json.loads(line) for line in sink_path.read_text().splitlines()]
+    assert record["attrs"]["gen_ai.prompt.0.content"] == prompt
+    assert record["attrs"]["gen_ai.prompt.1.content"] == prompt
+    assert record["attrs"]["gen_ai.completion.0.content"] == completion
+
+
 @pytest.mark.asyncio
 async def test_silent_client_emits_no_spans(capture_spans) -> None:
     """A custom client that opens no spans and calls no populate helper

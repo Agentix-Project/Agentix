@@ -125,3 +125,24 @@ def test_resource_carries_service_name() -> None:
     resource = spans[0].resource
     assert resource.attributes["service.name"] == "rollout-eval"
     assert resource.attributes["deployment.environment"] == "test"
+
+
+def test_long_attribute_values_export_untruncated(otel_recorder) -> None:
+    """Byte-fidelity guard for the OTel leg: the exporter must not
+    truncate long attribute values. The OTel Python SDK's attribute
+    value-length limit defaults to None (unlimited) and
+    `OTelTraceProcessor` sets no explicit limit; gen_ai content
+    attributes (full prompts/completions) rely on that. If a future SDK
+    or processor change introduces a limit, this fails loudly instead of
+    silently clipping capture data."""
+    exporter, _ = otel_recorder
+
+    long_value = ("0123456789" * 250) + "<END sentinel>"
+    assert len(long_value) > 2000
+
+    with trace.trace("workflow"):
+        with trace.span("llm.request") as s:
+            s.set_attribute("gen_ai.prompt.0.content", long_value)
+
+    span = _by_name(list(exporter.get_finished_spans()), "llm.request")
+    assert span.attributes["gen_ai.prompt.0.content"] == long_value
