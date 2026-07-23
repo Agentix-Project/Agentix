@@ -29,11 +29,22 @@ class _FakeTito(BaseHTTPRequestHandler):
 
     sessions: list[str] = []
     chat_calls: list[dict[str, Any]] = []  # {"session", "body", "headers"}
+    deletes: list[str] = []
 
     @classmethod
     def reset(cls) -> None:
         cls.sessions = []
         cls.chat_calls = []
+        cls.deletes = []
+
+    def do_DELETE(self) -> None:  # noqa: N802 - http.server convention
+        parts = self.path.strip("/").split("/")
+        if len(parts) == 2 and parts[0] == "sessions":
+            _FakeTito.deletes.append(parts[1])
+            self.send_response(204)
+            self.end_headers()
+            return
+        self._json(404, {"error": f"no route {self.path}"})
 
     def do_POST(self) -> None:  # noqa: N802 - http.server convention
         length = int(self.headers.get("Content-Length") or 0)
@@ -133,16 +144,68 @@ def test_tito_composition_end_to_end(fake_tito: str) -> None:
     assert call["headers"]["x-request-id"]
 
 
-def test_tito_composition_one_gateway_session_per_caller_key(fake_tito: str) -> None:
+def test_tito_composition_one_gateway_session_per_conversation_per_caller(fake_tito: str) -> None:
+    """The demux unit is (caller key, logical conversation): repeated turns
+    of one conversation share a gateway session; another caller's identical
+    conversation gets its own."""
     tc = TestClient(_tito_app(fake_tito))
     assert tc.post("/v1/messages", json=_ANTHROPIC_BODY, headers={"x-api-key": "rollout-a"}).status_code == 200
     assert tc.post("/v1/messages", json=_ANTHROPIC_BODY, headers={"x-api-key": "rollout-a"}).status_code == 200
     assert tc.post("/v1/messages", json=_ANTHROPIC_BODY, headers={"x-api-key": "rollout-b"}).status_code == 200
 
-    assert len(_FakeTito.sessions) == 2  # one gateway session per caller key
+    assert len(_FakeTito.sessions) == 2
     assert [c["session"] for c in _FakeTito.chat_calls] == [
         _FakeTito.sessions[0], _FakeTito.sessions[0], _FakeTito.sessions[1],
     ]
+
+
+def test_multiplexed_conversations_on_one_key_get_separate_gateway_sessions(fake_tito: str) -> None:
+    """Adversarial-review regression: real Anthropic agents multiplex
+    unrelated conversations over ONE key (helper calls, Task subagents,
+    reruns). Each distinct (system, first user message) must land in its own
+    gateway session — not 400 against the first conversation's linear
+    history — while later turns of each conversation stay in theirs."""
+    tc = TestClient(_tito_app(fake_tito))
+    key = {"x-api-key": "rollout-1"}
+
+    # Conversation A, turn 1.
+    assert tc.post("/v1/messages", json=_ANTHROPIC_BODY, headers=key).status_code == 200
+    # Conversation B: same key, different opening (a subagent-style call).
+    conv_b = {**_ANTHROPIC_BODY, "messages": [{"role": "user", "content": "summarize the repo"}]}
+    assert tc.post("/v1/messages", json=conv_b, headers=key).status_code == 200
+    # Conversation C: different system prompt (a helper-call profile).
+    conv_c = {**_ANTHROPIC_BODY, "system": "you detect topics"}
+    assert tc.post("/v1/messages", json=conv_c, headers=key).status_code == 200
+    # Conversation A, turn 2 (history extended) routes back to A's session.
+    turn2 = {
+        **_ANTHROPIC_BODY,
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello from tito"},
+            {"role": "user", "content": "and?"},
+        ],
+    }
+    assert tc.post("/v1/messages", json=turn2, headers=key).status_code == 200
+
+    assert len(_FakeTito.sessions) == 3
+    by_session = [c["session"] for c in _FakeTito.chat_calls]
+    assert by_session == [
+        _FakeTito.sessions[0], _FakeTito.sessions[1], _FakeTito.sessions[2], _FakeTito.sessions[0],
+    ]
+
+
+def test_tito_delete_on_evict_reaps_gateway_sessions(fake_tito: str) -> None:
+    """--tito-delete-on-evict: closing a caller session (here: app shutdown
+    via the TestClient context manager) DELETEs its gateway sessions. The
+    default keeps them alive for harvest."""
+    with TestClient(_tito_app(fake_tito, "--tito-delete-on-evict")) as tc:
+        assert tc.post("/v1/messages", json=_ANTHROPIC_BODY, headers={"x-api-key": "r1"}).status_code == 200
+    assert _FakeTito.deletes == [_FakeTito.sessions[0]]
+
+    _FakeTito.reset()
+    with TestClient(_tito_app(fake_tito)) as tc:  # default: no reap
+        assert tc.post("/v1/messages", json=_ANTHROPIC_BODY, headers={"x-api-key": "r1"}).status_code == 200
+    assert _FakeTito.deletes == []
 
 
 def test_tito_composition_with_record_dir_joins_rows_to_gateway_calls(fake_tito: str, tmp_path) -> None:
@@ -158,6 +221,10 @@ def test_tito_composition_with_record_dir_joins_rows_to_gateway_calls(fake_tito:
     (call,) = _FakeTito.chat_calls
     assert row["session_id"] == serve_session
     assert row["request_id"] == call["headers"]["x-request-id"]
+    # The gateway's OWN session id (== session_id in its token records) is
+    # read back from the transport, restoring the session-level join the
+    # caller-key hash cannot provide.
+    assert row["gateway_session_id"] == call["session"] == _FakeTito.sessions[0]
     assert row["path"] == "/v1/messages"
     assert row["request"] == _ANTHROPIC_BODY  # the agent-side (Anthropic) shape
     assert row["response"]["body"]["content"] == [{"type": "text", "text": "hello from tito"}]

@@ -14,6 +14,14 @@ when present) mints the id and binds it for the duration of the handler call;
 inner layers reuse a bound id and only mint their own when nothing upstream
 bound one. Works unchanged across `await` within one handler invocation and
 never leaks across concurrent calls.
+
+`current_upstream_session_id` flows the OTHER way on the same principle: the
+transport layer (`Forward`) publishes the session id it stamped upstream as
+`x-session-id` — for a `SessionForward` that is the gateway-assigned session
+id, which the caller-side capture cannot otherwise know (it exists only
+after the lazy session create). The `Recorder` clears it before each handler
+call and reads it afterwards into the row's `gateway_session_id`, restoring
+the session-level join between caller-side rows and gateway-side records.
 """
 
 from __future__ import annotations
@@ -22,6 +30,10 @@ import uuid
 from contextvars import ContextVar
 
 current_request_id: ContextVar[str | None] = ContextVar("abridge_request_id", default=None)
+
+current_upstream_session_id: ContextVar[str | None] = ContextVar(
+    "abridge_upstream_session_id", default=None
+)
 
 
 def mint_request_id() -> str:
@@ -34,4 +46,9 @@ def get_or_mint_request_id() -> str:
     return bound if bound else mint_request_id()
 
 
-__all__ = ["current_request_id", "get_or_mint_request_id", "mint_request_id"]
+__all__ = [
+    "current_request_id",
+    "current_upstream_session_id",
+    "get_or_mint_request_id",
+    "mint_request_id",
+]

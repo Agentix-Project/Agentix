@@ -35,7 +35,7 @@ from collections.abc import Mapping
 
 import httpx
 
-from ._request_id import get_or_mint_request_id
+from ._request_id import current_upstream_session_id, get_or_mint_request_id
 from .proxy import AbridgeError, ClientResponse, Handler, Request
 
 logger = logging.getLogger(__name__)
@@ -136,6 +136,11 @@ class Forward:
         # Reuses the id a wrapping capture layer (Recorder) bound for this
         # call, so its JSONL row and the sidecar's token record share one id.
         record_id = get_or_mint_request_id()
+        # Publish the upstream session identity for the capture layer: for a
+        # SessionForward this is the gateway-assigned session id (known only
+        # here, after the lazy create) — the Recorder reads it back into the
+        # row's `gateway_session_id` join key.
+        current_upstream_session_id.set(self.session_id)
         headers = {
             **self._headers,
             "x-session-id": self.session_id,

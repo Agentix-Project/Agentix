@@ -334,7 +334,11 @@ def _messages_anthropic_to_openai(messages: list[Any]) -> list[dict[str, Any]]:
                 message["reasoning_content"] = "\n".join(part for part in thinking_parts if part)
             if tool_calls:
                 message["tool_calls"] = tool_calls
-            if message["content"] is not None or tool_calls:
+            # A thinking-only assistant turn (legal Anthropic shape — e.g.
+            # extended thinking cut off at max_tokens) maps to reasoning_content
+            # and must survive: dropping the whole message would leave two
+            # adjacent user turns and silently lose the forwarded reasoning.
+            if message["content"] is not None or tool_calls or thinking_parts:
                 out.append(message)
         else:
             out.extend(tool_results)
@@ -405,14 +409,36 @@ def _sse(event: str, data: dict[str, Any]) -> bytes:
     return f"event: {event}\ndata: {payload}\n\n".encode()
 
 
-# The translation contract version: SHA-256 over this module's source. Any
-# edit to the transforms — however small — changes the byte identity of the
-# OpenAI bodies a recording backend sees, so downstream data contracts pin
-# this value (abridge-serve reports it on `/_health`). Deliberately the
-# file's bytes, not a semantic hash: comments and docstrings changing the sha
-# is a false positive we accept; a behavior change slipping through unhashed
-# is not.
-TRANSLATION_SPEC_SHA: str = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+# The translation contract version: SHA-256 over the source of EVERY module
+# that shapes what an upstream/recording backend receives — the pure
+# transforms here, plus the two client modules that rewrite the body around
+# them (assistant-replay memory, forced stream=False, model override,
+# operator upstream_params). Hashing only this file would let those rewrites
+# drift without moving the pin. Any edit — however small — changes the byte
+# identity of the OpenAI bodies a recording backend sees, so downstream data
+# contracts pin this value (abridge-serve reports it on `/_health`).
+# Deliberately file bytes, not a semantic hash: comments changing the sha is
+# a false positive we accept; a behavior change slipping through unhashed is
+# not. Sibling sources are read directly (no import) to avoid a cycle with
+# the client modules, which import this one.
+_TRANSLATION_SPEC_FILES = (
+    "_anthropic_transforms.py",
+    "anthropic_to_openai.py",
+    "anthropic_from_openai.py",
+)
+
+
+def _translation_spec_sha() -> str:
+    digest = hashlib.sha256()
+    for name in _TRANSLATION_SPEC_FILES:
+        digest.update(name.encode())
+        digest.update(b"\x00")
+        digest.update((Path(__file__).parent / name).read_bytes())
+        digest.update(b"\x00")
+    return digest.hexdigest()
+
+
+TRANSLATION_SPEC_SHA: str = _translation_spec_sha()
 
 
 __all__ = [

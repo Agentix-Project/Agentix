@@ -32,13 +32,30 @@ Two upstream modes, mutually exclusive:
 * `--upstream-base-url` — plain OpenAI-compatible engine; translation +
   transport live in `AnthropicFromOpenAIClient` (the openai SDK owns the
   HTTP). The original mode, unchanged.
-* `--tito-url` — a token-recording session gateway (the TITO gateway):
-  each caller session composes
-  `AnthropicToOpenAI(SessionForward(tito_url).handler(), model=...)`, so
-  the gateway sees the OpenAI chat body, owns render/generate and the
-  token record, and one abridge caller session maps to one gateway
-  session. Token capture stays the gateway's job; this server only adds
-  the Anthropic shell and identity stamping.
+* `--tito-url` — a token-recording session gateway (the TITO gateway).
+  The gateway keeps ONE append-only linear conversation per session,
+  while real Anthropic agents multiplex several logical conversations
+  over a single API key (helper calls, subagents, a rerun). So each
+  caller session DEMUXES by conversation: requests are keyed by
+  `sha256(canonical system + first user message)` and each distinct key
+  gets its own `AnthropicToOpenAI(SessionForward(tito_url).handler())` —
+  its own gateway session. The gateway sees the OpenAI chat body, owns
+  render/generate and the token record; this server only adds the
+  Anthropic shell, identity stamping, and the demux.
+
+  Demux boundaries (documented, not silently papered over): a history
+  rewrite that keeps the first user message (e.g. mid-conversation
+  compaction) still lands in the SAME gateway session and is handled by
+  the gateway's rollback / from-scratch paths — rewrites deeper than the
+  gateway's rollback window are its documented 400. Two genuinely
+  different conversations with byte-identical (system, first user
+  message) collide into one session. And when the caller-session LRU
+  evicts a key (max_sessions), a still-active rollout on that key
+  continues in FRESH gateway sessions — the gateway-side capture splits
+  at that boundary (turn_index restarts); size `--max-sessions` above
+  the number of concurrent rollout keys. `--tito-delete-on-evict` opts
+  into reaping the gateway sessions when a caller session closes; the
+  default keeps them for harvest.
 
 `--record-dir` (either mode) wraps each session's client in a `Recorder`
 writing message-level rows to `<record_dir>/<session_id>.jsonl`; rows
@@ -59,6 +76,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import json
 import logging
 import os
 from collections import OrderedDict
@@ -66,13 +84,23 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI
 from fastapi import Request as FastAPIRequest
 from fastapi.responses import JSONResponse, Response
 
-from .proxy import AbridgeError, Client, Handler, Request, _AsyncCloseable, _collect_handlers
+from .proxy import (
+    AbridgeError,
+    Client,
+    ClientResponse,
+    Handler,
+    Request,
+    _AsyncCloseable,
+    _collect_handlers,
+    on,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +119,13 @@ def session_id_for(caller_key: str) -> str:
     `"anonymous"`. Public so the side minting per-rollout keys can
     compute the same id and correlate upstream `x-session-id` values
     (the raw key is never echoed into logs or upstream headers).
+
+    Correlation caveat for `--tito-url` mode: there the upstream
+    `x-session-id` is the GATEWAY's own session id (assigned per
+    conversation), not this hash — the caller-side↔gateway-side join
+    lives in the Recorder rows instead (`session_id` = this hash,
+    `gateway_session_id` = the gateway's id, `request_id` = the per-call
+    `x-request-id` echoed into the gateway's token records).
     """
     if not caller_key:
         return "anonymous"
@@ -404,10 +439,136 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "record every served (request, response) pair to "
             "<record-dir>/<session_id>.jsonl via Recorder — message-level rows with "
-            "session_id + request_id, flushed per line (env: ABRIDGE_RECORD_DIR)"
+            "session_id + request_id (+ gateway_session_id in tito mode), flushed "
+            "per line (env: ABRIDGE_RECORD_DIR)"
+        ),
+    )
+    parser.add_argument(
+        "--tito-delete-on-evict",
+        action="store_true",
+        help=(
+            "tito mode only: DELETE the gateway sessions when a caller session "
+            "closes (LRU eviction or shutdown). Default off — gateway sessions "
+            "stay alive for harvest, and the harvester deletes them"
         ),
     )
     return parser
+
+
+def _canonical_text(value: Any) -> str:
+    """Flatten Anthropic content (str or block list) to conversation-identity
+    text: text blocks contribute their text (cache_control and other
+    tokenization-irrelevant decorations are ignored), other blocks their
+    sorted-JSON form."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: list[str] = []
+        for block in value:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                parts.append(str(block.get("text", "")))
+            else:
+                parts.append(json.dumps(block, sort_keys=True, ensure_ascii=False, default=repr))
+        return "\n".join(parts)
+    return json.dumps(value, sort_keys=True, ensure_ascii=False, default=repr)
+
+
+def _conversation_key(body: dict[str, Any]) -> str:
+    """A logical-conversation key for an Anthropic Messages request: the
+    canonicalized system prompt + first user message. Turns of one
+    conversation share it (the head of the history is append-only in normal
+    operation); a helper call, subagent, or rerun with a different opening
+    gets a different key."""
+    first_user = next(
+        (m.get("content") for m in body.get("messages") or [] if isinstance(m, dict) and m.get("role") == "user"),
+        None,
+    )
+    blob = _canonical_text(body.get("system")) + "\x00" + _canonical_text(first_user)
+    return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+
+class _TitoConversationDemux:
+    """One caller key, many logical conversations → one gateway session each.
+
+    The TITO gateway's session is a single append-only linear history, but an
+    Anthropic agent multiplexes conversations over one API key (helper calls,
+    subagents, reruns). Routing everything into one gateway session bricks
+    the key at the first unrelated history (the gateway rightly 400s a
+    request sharing no prefix). This client keys each request by
+    `_conversation_key` and lazily builds one
+    `AnthropicToOpenAI(SessionForward(...).handler())` per conversation —
+    scoped like the conversation itself, including the converter's
+    assistant-replay memory. The conversation map is bounded by the caller
+    session's own lifetime (LRU eviction / shutdown closes all of them).
+
+    `delete_on_close=True` reaps the gateway sessions on `aclose()`
+    (`--tito-delete-on-evict`); the default leaves them alive for harvest.
+    """
+
+    def __init__(
+        self,
+        tito_url: str,
+        *,
+        model: str | None = None,
+        timeout: float = 540.0,
+        delete_on_close: bool = False,
+    ) -> None:
+        self._tito_url = tito_url
+        self._model = model
+        self._timeout = timeout
+        self._delete_on_close = delete_on_close
+        self._conversations: dict[str, Any] = {}  # key -> AnthropicToOpenAI
+        self._forwards: dict[str, Any] = {}  # key -> SessionForward
+
+    def _converter_for(self, body: dict[str, Any]) -> Any:
+        key = _conversation_key(body)
+        converter = self._conversations.get(key)
+        if converter is None:
+            from .clients import AnthropicToOpenAI
+            from .forward import SessionForward
+
+            forward = SessionForward(self._tito_url, paths=["/v1/chat/completions"], timeout=self._timeout)
+            converter = AnthropicToOpenAI(forward.handler(), model=self._model)
+            self._conversations[key] = converter
+            self._forwards[key] = forward
+            logger.info("tito demux: new conversation %s -> fresh gateway session", key)
+        return converter
+
+    @on("/v1/messages")
+    async def messages(self, request: Request) -> ClientResponse:
+        return await self._converter_for(request.body).messages(request)
+
+    @on("/v1/messages/count_tokens")
+    async def count_tokens(self, request: Request) -> ClientResponse:
+        # Answered locally (same estimate as the converters) — counting must
+        # not create a gateway session for a conversation that never runs.
+        from .clients._anthropic_transforms import count_anthropic_tokens
+
+        return ClientResponse.json({"input_tokens": count_anthropic_tokens(request.body).input_tokens})
+
+    def environ(self, handle: Any) -> dict[str, str]:
+        from .clients.anthropic import PLACEHOLDER_API_KEY
+
+        return {"ANTHROPIC_BASE_URL": handle.url, "ANTHROPIC_API_KEY": PLACEHOLDER_API_KEY}
+
+    async def aclose(self) -> None:
+        for key, forward in self._forwards.items():
+            if self._delete_on_close:
+                try:
+                    await forward.delete_session()
+                except Exception:  # noqa: BLE001 - best-effort reap
+                    logger.exception("tito demux: failed to delete gateway session for conversation %s", key)
+        for key, converter in self._conversations.items():
+            try:
+                await converter.aclose()
+            except Exception:  # noqa: BLE001 - close every conversation
+                logger.exception("tito demux: failed to close conversation %s", key)
+        self._conversations.clear()
+        self._forwards.clear()
 
 
 def _client_factory(args: argparse.Namespace) -> Callable[[str], Client]:
@@ -415,15 +576,16 @@ def _client_factory(args: argparse.Namespace) -> Callable[[str], Client]:
     a `Recorder` when `--record-dir` is set."""
     if args.tito_url:
         # Composition seam (transport-blind): the TITO gateway sees the
-        # OpenAI chat body and owns tokens + recording; abridge adds only the
-        # Anthropic shell. One SessionForward per caller session == one
-        # gateway session per rollout key.
-        from .clients import AnthropicToOpenAI
-        from .forward import SessionForward
-
+        # OpenAI chat body and owns tokens + recording; abridge adds the
+        # Anthropic shell and the per-conversation demux (one gateway
+        # session per logical conversation on the caller key).
         def build(session_id: str) -> Client:
-            forward = SessionForward(args.tito_url, paths=["/v1/chat/completions"], timeout=args.upstream_timeout)
-            return AnthropicToOpenAI(forward.handler(), model=args.upstream_model)
+            return _TitoConversationDemux(
+                args.tito_url,
+                model=args.upstream_model,
+                timeout=args.upstream_timeout,
+                delete_on_close=bool(getattr(args, "tito_delete_on_evict", False)),
+            )
     else:
         # Lazy: the translation client needs the `openai` extra.
         from .clients import AnthropicFromOpenAIClient

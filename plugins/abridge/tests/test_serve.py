@@ -49,17 +49,25 @@ def test_build_app_serves_handlers_and_health() -> None:
 
 
 def test_health_pins_the_translation_spec() -> None:
-    """`/_health` reports the SHA-256 of the Anthropic<->OpenAI transform
-    module, so downstream data contracts can pin the exact translation their
-    captured trajectories were produced under."""
+    """`/_health` reports one SHA-256 over the source of every module that
+    shapes what an upstream/recording backend receives — the pure transforms
+    AND the client modules that rewrite the body around them (assistant
+    replay, forced stream=False, model override, upstream_params). A change
+    to any of them must move the pin."""
     import hashlib
     from pathlib import Path
 
     import agentix.bridge.clients._anthropic_transforms as transforms
 
     health = TestClient(build_app(EchoClient())).get("/_health").json()
-    expected = hashlib.sha256(Path(transforms.__file__).read_bytes()).hexdigest()
-    assert health["translation_spec_sha"] == expected == transforms.TRANSLATION_SPEC_SHA
+    clients_dir = Path(transforms.__file__).parent
+    digest = hashlib.sha256()
+    for name in ("_anthropic_transforms.py", "anthropic_to_openai.py", "anthropic_from_openai.py"):
+        digest.update(name.encode())
+        digest.update(b"\x00")
+        digest.update((clients_dir / name).read_bytes())
+        digest.update(b"\x00")
+    assert health["translation_spec_sha"] == digest.hexdigest() == transforms.TRANSLATION_SPEC_SHA
 
 
 def test_handler_errors_become_wire_errors() -> None:

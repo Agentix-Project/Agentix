@@ -182,3 +182,45 @@ def test_recorder_opens_file_lazily(tmp_path) -> None:
     recorder = Recorder(_EchoClient(), out)
     recorder.abridge_routes()
     assert not out.exists()
+
+
+@pytest.mark.asyncio
+async def test_recorder_write_failure_is_log_and_serve(tmp_path, monkeypatch, caplog) -> None:
+    """Capture failures never fail the served call (matching the token
+    gateway's policy): with the record path unwritable the agent still gets
+    its response and the drop is logged."""
+    import logging
+
+    out = tmp_path / "run.jsonl"
+    recorder = Recorder(_EchoClient(), out)
+    routes = recorder.abridge_routes()
+
+    def broken_open(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(type(out), "open", broken_open)
+    with caplog.at_level(logging.ERROR, logger="agentix.bridge.recorder"):
+        resp = await routes["/v1/messages"](Request(path="/v1/messages", body={"msg": "hi"}))
+    assert json.loads(resp.body)["echo"] == "hi"  # the call succeeded
+    assert any("row NOT persisted" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_recorder_drops_rows_after_aclose(tmp_path, caplog) -> None:
+    """A straggler dispatch that outlives aclose() must not resurrect the
+    record file: the row is dropped (logged), the file stays closed, and no
+    orphan handle is created."""
+    import logging
+
+    out = tmp_path / "run.jsonl"
+    recorder = Recorder(_EchoClient(), out)
+    routes = recorder.abridge_routes()
+    await routes["/v1/messages"](Request(path="/v1/messages", body={"msg": "before"}))
+    await recorder.aclose()
+
+    with caplog.at_level(logging.WARNING, logger="agentix.bridge.recorder"):
+        resp = await routes["/v1/messages"](Request(path="/v1/messages", body={"msg": "late"}))
+    assert json.loads(resp.body)["echo"] == "late"  # still served
+    assert any("recorder is closed" in r.message for r in caplog.records)
+    assert [r["request"]["msg"] for r in _lines(out)] == ["before"]  # no late row
+    assert recorder._file is not None and recorder._file.closed  # noqa: SLF001 - not reopened

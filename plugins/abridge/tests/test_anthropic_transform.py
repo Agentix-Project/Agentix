@@ -226,3 +226,28 @@ def test_tool_loop_turn_ordering_matches_openai_protocol():
     assert roles[ai + 1] == "tool", f"tool result must follow tool_calls: {roles}"
     assert out[ai + 1]["tool_call_id"] == "tu_1"
     assert "file.txt" in out[ai + 1]["content"]
+
+
+def test_thinking_only_assistant_history_is_preserved():
+    """A thinking-only assistant turn (legal Anthropic shape — e.g. extended
+    thinking cut off at max_tokens) must not be dropped from the history: its
+    reasoning rides `reasoning_content`, and the surrounding user turns stay
+    non-adjacent."""
+    from agentix.bridge.clients._anthropic_transforms import anthropic_messages_to_openai
+
+    body = {
+        "model": "m",
+        "max_tokens": 16,
+        "messages": [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "hmm, hard", "signature": "sig"},
+            ]},
+            {"role": "user", "content": "continue"},
+        ],
+    }
+    out = anthropic_messages_to_openai(body)
+    assert [m["role"] for m in out["messages"]] == ["user", "assistant", "user"]
+    assistant = out["messages"][1]
+    assert assistant["reasoning_content"] == "hmm, hard"
+    assert assistant["content"] is None
