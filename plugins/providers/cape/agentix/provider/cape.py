@@ -14,31 +14,64 @@ provider never submits a second request into the same session, so it
 does not depend on same-session concurrency or on cross-request
 workspace persistence.
 
-  - `create()` submits a runtime request whose workload prints an
-    `AGENTIX_ENDPOINT <host> <port>` marker line to stdout (first IP of
-    `hostname -i`, plus the assigned bind port) and then execs the
-    bundle's `/nix/runtime/bootstrap.sh`. The provider polls
-    `cape status` (to detect early death) and `cape logs` (to find the
-    marker), then health-checks `GET /health` on the discovered
-    endpoint with a raw TCP probe (never an env-proxy-aware HTTP
-    client, which would hang behind a corp proxy or SSH tunnel).
-  - `delete()` cancels the runtime request; bookkeeping is dropped only
-    after the controller confirms the cancel, so a failed cancel can be
-    retried with another `delete()`.
+  - `create()` submits a runtime request whose workload creates the
+    per-sandbox workspace, writes an `AGENTIX_ENDPOINT <host> <port>`
+    marker file into the per-sandbox meta directory (rw-bound at
+    `/agentix-meta`), and execs the bundle's
+    `/nix/runtime/bootstrap.sh`. The provider discovers the endpoint by
+    polling the *host side* of that marker file, interleaved with
+    `cape status` (to fail fast when the workload dies), then
+    health-checks `GET /health` on the discovered endpoint with a raw
+    TCP probe (never an env-proxy-aware HTTP client, which would hang
+    behind a corp proxy or SSH tunnel).
+  - `delete()` cancels the runtime request and removes the meta dir;
+    bookkeeping is dropped only after the controller confirms the
+    cancel (or reports the request as unknown — HTTP 404 — after e.g. a
+    journal-less controller restart), so a failed cancel can be retried
+    with another `delete()`.
   - `config.bundle` for this backend is an OPAQUE node-visible path to
     an already-extracted bundle tree; it is bind-mounted read-only at
     `/nix`. How the bundle tree gets onto CAPE nodes (shared FS, prior
     upload) is deliberately out of scope — there is no `BundleDeployer`
     in this iteration.
+  - `CapeProviderConfig.meta_root` must be a directory visible to both
+    the submitter and the pool nodes — the same shared-filesystem
+    assumption `bundle` already makes. Each sandbox uses
+    `<meta_root>/<sandbox_id>`, created before submit and removed on
+    delete.
 
-ASSUMED CLI CONTRACT — the `cape run/status/logs/cancel` verb surface
-implemented in `_CapeCli` was reverse-documented from a sibling
-project's adapter of the same CLI and has only ever been
-exercised against fakes and emulators; the official CAPE CLI has never
-been obtained. Endpoint discovery additionally assumes `cape logs` can
-return the stdout of a still-RUNNING request. Verify every verb, flag,
-and the `cape status` JSON schema against the real CLI before
-production use (see the provider README's "Contract status" checklist).
+CLI CONTRACT — verified item by item against the CAPE source. The key
+verified facts this provider is built on:
+
+  * `cape run` requires `--pool`, `--user`, and `--task-id` (argparse
+    exits 2 without them) and has NO `--workspace` flag. Without
+    `--wait`, stdout is exactly one line: the request id (`req-%06d`,
+    matched here with `req-\\d{6,}`).
+  * `cape status` prints a single JSON object on stdout (the
+    human-readable state line goes to stderr). Terminal states are
+    COMPLETED / FAILED / CANCELLED / EXPIRED / LOST / INFEASIBLE, and
+    the JSON carries no stdout/stderr fields.
+  * `cape logs` succeeds for RUNNING requests but returns EMPTY output
+    until the command exits — the node agent reports stdout/stderr
+    once, after reaping the process; CAPE has no streaming/incremental
+    log channel. Endpoint discovery therefore CANNOT go through logs
+    (the runtime server never exits); it uses the marker file above.
+    Logs are fetched only for terminal requests, as error diagnostics.
+  * The token can only be passed as `--token` on argv (the CLI reads no
+    env var or file). This provider's token-file/env indirection is
+    client-side convenience that feeds that flag; the literal value is
+    redacted from error text, but `ps` visibility cannot be avoided
+    from the CLI side.
+
+NETWORKING — the client-assigned-port scheme (`AGENTIX_BIND_PORT` plus
+a direct probe of `<host>:<port>`) requires the workload to share the
+host's network stack. Pin `CapeProviderConfig.runtime_adapter` to a
+host-network adapter: apptainer and bubblewrap do not unshare the
+network namespace, but CAPE's podman adapter runs without host
+networking, so an endpoint bound inside it would be unreachable.
+(`local-process` shares everything and suits CPU-only local
+validation.) The default stays None — the pool default applies — but
+deployments must ensure a host-network adapter serves Agentix requests.
 """
 
 from __future__ import annotations
@@ -50,6 +83,8 @@ import logging
 import math
 import os
 import re
+import shlex
+import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -71,17 +106,30 @@ from agentix.runtime import BIND_PORT_ENV, BUNDLE_NIX_ROOT, BUNDLE_RUNTIME_ENTRY
 
 logger = logging.getLogger("agentix.provider.cape")
 
-_REQUEST_ID_RE = re.compile(r"req-[A-Za-z0-9][A-Za-z0-9_.-]*")
-"""Shape of the request id `cape run` prints on stdout (assumed contract)."""
+_REQUEST_ID_RE = re.compile(r"req-\d{6,}")
+"""Shape of the request id `cape run` prints on stdout (`req-%06d` in
+the CAPE source; more than six digits once the sequence outgrows the
+minimum width)."""
 
 _TERMINAL_STATES = frozenset({"COMPLETED", "FAILED", "CANCELLED", "EXPIRED", "LOST", "INFEASIBLE"})
-"""Terminal request states in the `cape status` JSON (assumed contract)."""
+"""Terminal request states in the `cape status` JSON (verified against
+the CAPE source; the non-terminal states are SUBMITTED / QUEUED /
+LEASED / PREPARING_IMAGE / STARTING_SESSION / RUNNING / RECONCILING)."""
 
 _REASON_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_.-]")
 """Characters stripped from `cape cancel --reason` strings."""
 
 _ENDPOINT_MARKER = "AGENTIX_ENDPOINT"
-"""Prefix of the stdout marker line the boot script prints before exec."""
+"""Prefix of the marker line the boot script writes to the meta dir."""
+
+_META_MOUNT = "/agentix-meta"
+"""In-sandbox mount point of the per-sandbox meta directory (rw bind)."""
+
+_ENDPOINT_FILE_NAME = "endpoint"
+"""Marker file name inside the per-sandbox meta directory."""
+
+_BUNDLE_BOOT_RELATIVE = BUNDLE_RUNTIME_ENTRYPOINT.removeprefix(BUNDLE_NIX_ROOT + "/")
+"""Bootstrap path relative to the bundle root (`runtime/bootstrap.sh`)."""
 
 _MEMORY_RE = re.compile(r"(\d+)\s*([kmgt])?i?b?", re.IGNORECASE)
 _MEMORY_UNIT_BYTES = {"k": 1 << 10, "m": 1 << 20, "g": 1 << 30, "t": 1 << 40}
@@ -95,8 +143,8 @@ class CapeProviderConfig(BaseModel):
 
     Every field is optional or defaulted so `CapeProvider()` constructs
     with zero arguments — the plugin registry instantiates providers
-    with `cls()`. Anything unset falls back to environment variables at
-    first use.
+    with `cls()`. Fields the real CLI cannot work without (`pool`,
+    `user`, `meta_root`) are checked at first use, not construction.
     """
 
     binary: str | None = Field(
@@ -120,12 +168,31 @@ class CapeProviderConfig(BaseModel):
         default="CAPE_TOKEN",
         description="Env var consulted for the token when no token file is configured.",
     )
-    pool: str | None = Field(default=None, description="Optional CAPE pool name.")
-    user: str | None = Field(default=None, description="Optional CAPE user identity.")
+    pool: str | None = Field(
+        default=None,
+        description="CAPE pool name (`--pool`). The real CLI requires it; "
+        "checked at first use.",
+    )
+    user: str | None = Field(
+        default=None,
+        description="CAPE user identity (`--user`). The real CLI requires it; "
+        "checked at first use.",
+    )
+    meta_root: str | None = Field(
+        default=None,
+        description="Directory for per-sandbox meta dirs (`<meta_root>/<sandbox_id>`), "
+        "used for endpoint discovery: the boot script writes the endpoint marker "
+        "file through a rw bind of the meta dir, and the provider polls the host "
+        "side. Must be visible to both the submitter and the pool nodes — the "
+        "same shared-filesystem assumption `bundle` makes. Checked at first use.",
+    )
     workspace_root: str = Field(
         default="/workspace",
         description="Node-side base directory; each sandbox uses "
-        "`<workspace_root>/<sandbox_id>` as its session workspace and cwd.",
+        "`<workspace_root>/<sandbox_id>` as its workspace. The boot script "
+        "creates it (`mkdir -p`) and cd's into it before exec'ing the runtime — "
+        "nothing else creates it, which is also why `--cwd` is never passed "
+        "(every CAPE runtime adapter fails at process start on a missing cwd).",
     )
     cpu_cores: int | None = Field(
         default=None,
@@ -142,12 +209,16 @@ class CapeProviderConfig(BaseModel):
     isolation_policy: str = Field(default="default", description="`--isolation-policy` value.")
     runtime_adapter: str | None = Field(
         default=None,
-        description="Optional `--runtime-adapter` (e.g. `apptainer`).",
+        description="Optional `--runtime-adapter`. Production deployments should pin "
+        "a host-network adapter (`apptainer` or `bubblewrap`): the client-assigned-"
+        "port scheme needs the workload on the host network stack, and CAPE's "
+        "podman adapter has no host networking. `local-process` suits CPU-only "
+        "local validation.",
     )
     extra_binds: list[str] = Field(
         default_factory=list,
         description="Raw `src:dst[:ro|rw]` bind specs passed through in addition to "
-        "the bundle's `/nix` bind.",
+        "the bundle's `/nix` bind and the meta dir's `/agentix-meta` bind.",
     )
     runtime_port_base: int = Field(
         default=8710,
@@ -184,9 +255,9 @@ class CapeProviderConfig(BaseModel):
     )
     transient_failure_limit: int = Field(
         default=5,
-        description="Consecutive `cape status`/`cape logs` failures tolerated during "
-        "endpoint discovery before the create is failed (a single controller "
-        "blip must not cancel a lease that already queued onto a GPU).",
+        description="Consecutive `cape status` failures tolerated during endpoint "
+        "discovery before the create is failed (a single controller blip must "
+        "not cancel a lease that already queued onto a GPU).",
     )
 
 
@@ -216,6 +287,31 @@ def _resolve_controller_url(config: CapeProviderConfig) -> str:
             "or the CAPE_CONTROLLER_URL environment variable"
         )
     return url
+
+
+def _required_settings(config: CapeProviderConfig) -> tuple[str, str, str]:
+    """Fail fast on the settings the real CLI / discovery cannot work without.
+
+    `cape run` rejects submissions without `--pool`/`--user` (argparse
+    exits 2 with a usage error that would otherwise surface as an
+    unreadable RuntimeError), and endpoint discovery needs `meta_root`.
+    Returns the narrowed `(pool, user, meta_root)` triple.
+    """
+    pool, user, meta_root = config.pool, config.user, config.meta_root
+    if not pool or not user or not meta_root:
+        missing = [
+            name
+            for name, value in (("pool", pool), ("user", user), ("meta_root", meta_root))
+            if not value
+        ]
+        raise RuntimeError(
+            "CapeProviderConfig." + ", CapeProviderConfig.".join(missing) + " must be set "
+            "before creating sandboxes: the real `cape run` requires --pool and --user, "
+            "and endpoint discovery needs meta_root — a directory visible to both the "
+            "submitter and the pool nodes (the same shared-filesystem assumption "
+            "`bundle` makes)"
+        )
+    return pool, user, meta_root
 
 
 def _read_token(config: CapeProviderConfig) -> str:
@@ -295,29 +391,50 @@ def _memory_gb(resource: SandboxResource | None, config: CapeProviderConfig) -> 
     return max(1, math.ceil(num_bytes / (1 << 30)))
 
 
-def _boot_script() -> str:
+def _boot_script(*, workspace: str, meta_dir: str, bundle: str) -> str:
     """Workload for the long-lived runtime request.
 
-    Prints the `AGENTIX_ENDPOINT <host> <port>` marker to stdout (first
-    IP of `hostname -i`, plus the assigned bind port) and execs the
-    bundle's bootstrap entry point. The marker is read back host-side
-    via `cape logs` during endpoint discovery — nothing is written to
-    the workspace, so discovery does not depend on cross-request
-    workspace persistence or on a second same-session command.
+    Creates and enters the per-sandbox workspace (nothing else creates
+    it — `--cwd` is deliberately not passed, because every CAPE runtime
+    adapter fails at process start when the cwd does not exist), writes
+    the `AGENTIX_ENDPOINT <host> <port>` marker file into the meta dir,
+    and execs the bundle's bootstrap entry point.
+
+    The marker goes to `/agentix-meta/endpoint` — the rw bind of the
+    host-side per-sandbox meta dir — and the provider polls the host
+    side of that file during endpoint discovery. `cape logs` cannot be
+    used for discovery: CAPE has no streaming logs (stdout/stderr are
+    reported once, after the command exits), so a runtime server that
+    never exits never publishes anything through logs.
+
+    Adapters that ignore bind specs but share the host filesystem
+    (local-process) fall back to the host-side meta dir path and the
+    host-side bundle bootstrap path, so the same script stays honest
+    there. A marker-write failure exits non-zero on purpose: the
+    request goes terminal and `create()` fails fast with diagnostics
+    instead of burning the whole discovery budget.
     """
+    quoted_ws = shlex.quote(workspace)
+    host_meta = shlex.quote(meta_dir)
+    host_boot = shlex.quote(f"{bundle.rstrip('/')}/{_BUNDLE_BOOT_RELATIVE}")
     return (
-        f'printf "{_ENDPOINT_MARKER} %s %s\\n" "$(hostname -i | cut -d" " -f1)" '
-        f'"${{{BIND_PORT_ENV}}}" && '
-        f"exec {BUNDLE_RUNTIME_ENTRYPOINT}"
+        f"mkdir -p {quoted_ws} && cd {quoted_ws} || exit 1; "
+        f"if [ -d {_META_MOUNT} ]; then m={_META_MOUNT}; else m={host_meta}; fi; "
+        f'h=$(hostname -i 2>/dev/null | cut -d" " -f1); [ -n "$h" ] || h=$(hostname); '
+        f'printf "{_ENDPOINT_MARKER} %s %s\\n" "$h" "${{{BIND_PORT_ENV}}}" '
+        f'> "$m/{_ENDPOINT_FILE_NAME}" || exit 1; '
+        f'b={BUNDLE_RUNTIME_ENTRYPOINT}; [ -e "$b" ] || b={host_boot}; '
+        f'exec "$b"'
     )
 
 
 def _parse_endpoint(text: str) -> tuple[str, int] | None:
-    """Find the `AGENTIX_ENDPOINT <host> <port>` marker line in workload stdout.
+    """Find the `AGENTIX_ENDPOINT <host> <port>` marker line in `text`.
 
-    The explicit marker prefix keeps unrelated two-token output (banner
-    lines like `GPU 0`) from being misread as an endpoint.
-    """
+    The explicit marker prefix keeps unrelated two-token content from
+    being misread as an endpoint, and a partially written marker file
+    (seen mid-`printf` on a shared FS) simply fails to parse until the
+    next poll."""
     for line in text.splitlines():
         parts = line.split()
         if len(parts) == 3 and parts[0] == _ENDPOINT_MARKER and parts[2].isdigit():
@@ -325,15 +442,52 @@ def _parse_endpoint(text: str) -> tuple[str, int] | None:
     return None
 
 
+def _read_endpoint_file(path: Path) -> str:
+    """Best-effort read of the host-side marker file ('' when absent).
+
+    Synchronous file IO — call via `asyncio.to_thread` (meta_root
+    typically lives on a shared FS that must not block the loop)."""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _stderr_reports_unknown_request(stderr: str) -> bool:
+    """True when `cape` stderr carries the CLI's single-line HTTP-error
+    JSON (`{"status": <code>, "error": ...}`) with status 404 — the
+    controller does not know the request id (e.g. it restarted without
+    a journal), so a cancel can be treated as already done."""
+    for line in stderr.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and payload.get("status") == 404:
+            return True
+    return False
+
+
+async def _remove_meta_dir(meta_dir: Path) -> None:
+    """Best-effort removal of a per-sandbox meta dir (never raises)."""
+    await asyncio.to_thread(shutil.rmtree, meta_dir, ignore_errors=True)
+
+
 class _CapeCli:
-    """The ONE place that knows the assumed `cape` CLI verb surface.
+    """The ONE place that knows the `cape` CLI verb surface.
 
     Every method's contract (verbs, flags, stdout/JSON shapes, terminal
-    states) is an assumption reverse-documented from a sibling
-    project's adapter — it has never been checked against a real
-    `cape` binary.
-    Keep all CLI knowledge in this class so a contract correction after
-    real-CLI verification is a single-class change.
+    states) has been verified item by item against the CAPE source.
+    The CLI also offers `cape wait`, which this provider deliberately
+    does not use: its process exit code is 0 both on timeout (printing
+    a non-terminal status) and on null-exit-code terminal states, so it
+    must never be trusted — polling `cape status` and parsing the JSON
+    `state` field is the only sound approach. Keep all CLI knowledge in
+    this class so any future contract correction is a single-class
+    change.
     """
 
     def __init__(self, config: CapeProviderConfig) -> None:
@@ -391,8 +545,7 @@ class _CapeCli:
         self,
         *,
         session_key: str,
-        workspace: str,
-        cwd: str,
+        task_id: str,
         image: str,
         gpus: int,
         workload: Sequence[str],
@@ -401,28 +554,35 @@ class _CapeCli:
         cpu_cores: int | None = None,
         memory_gb: int | None = None,
     ) -> str:
-        """ASSUMED CLI contract — verify against the real `cape` CLI before production use.
+        """Submit one workload request and return its request id.
 
-        Submits one workload request and returns its request id:
+        Verified against the real parser:
 
-            cape run --controller-url U --token T [--pool P] [--user USR]
-                --workspace WS --image IMG --gpus N [--cpu-cores N]
+            cape run --controller-url U --token T --pool P --user USR
+                --task-id ID --image IMG --gpus N [--cpu-cores N]
                 [--memory-gb N] --gpu-mode whole --isolation-policy X
-                [--runtime-adapter Y] --max-duration-seconds T --cwd CWD
-                --session-key KEY [--bind src:dst[:ro|rw]]... [--env K=V]...
-                -- <workload argv>
+                [--runtime-adapter Y] --max-duration-seconds T
+                --session-key KEY [--bind src:dst[:ro|rw]]...
+                [--env K=V]... -- <workload argv>
 
-        stdout, after stripping blank lines, must be exactly one line
-        matching `req-[A-Za-z0-9][A-Za-z0-9_.-]*`.
+        `--pool` / `--user` / `--task-id` are required (argparse exits 2
+        without them); there is NO `--workspace` flag; `--cwd` is
+        deliberately not passed because no component creates the
+        directory — the boot script `mkdir -p && cd`'s instead. Without
+        `--wait`, stdout (after stripping blank lines) is exactly one
+        line matching `req-\\d{6,}`.
         """
-        token = await asyncio.to_thread(_read_token, self._config)
         cfg = self._config
+        pool, user = cfg.pool, cfg.user
+        if not pool or not user:
+            raise RuntimeError(
+                "`cape run` requires --pool and --user; set CapeProviderConfig.pool "
+                "and CapeProviderConfig.user"
+            )
+        token = await asyncio.to_thread(_read_token, cfg)
         argv: list[str] = ["run", *self._common(token)]
-        if cfg.pool:
-            argv += ["--pool", cfg.pool]
-        if cfg.user:
-            argv += ["--user", cfg.user]
-        argv += ["--workspace", workspace, "--image", image, "--gpus", str(int(gpus))]
+        argv += ["--pool", pool, "--user", user, "--task-id", task_id]
+        argv += ["--image", image, "--gpus", str(int(gpus))]
         if cpu_cores is not None:
             argv += ["--cpu-cores", str(int(cpu_cores))]
         if memory_gb is not None:
@@ -431,7 +591,7 @@ class _CapeCli:
         if cfg.runtime_adapter:
             argv += ["--runtime-adapter", cfg.runtime_adapter]
         argv += ["--max-duration-seconds", str(int(cfg.max_duration_seconds))]
-        argv += ["--cwd", cwd, "--session-key", session_key]
+        argv += ["--session-key", session_key]
         for bind in binds:
             argv += ["--bind", bind]
         for key, value in (env or {}).items():
@@ -449,14 +609,16 @@ class _CapeCli:
         return lines[0]
 
     async def status(self, request_id: str) -> dict[str, object]:
-        """ASSUMED CLI contract — verify against the real `cape` CLI before production use.
+        """`cape status <req> --controller-url U --token T`.
 
-        `cape status <req> --controller-url U --token T` prints one JSON
-        object with at least a `state` field; terminal states are
-        COMPLETED / FAILED / CANCELLED / EXPIRED / LOST / INFEASIBLE. A
-        `request_id` field, when present and non-null, must echo the
-        queried id — a mismatch means the CLI answered for a different
-        request and is treated as an infrastructure error, not trusted.
+        Verified: prints one JSON object on stdout (the human-readable
+        state line goes to stderr, so it never pollutes the parse) with
+        at least `state` and a non-empty `request_id` echo; terminal
+        states are COMPLETED / FAILED / CANCELLED / EXPIRED / LOST /
+        INFEASIBLE; the JSON carries NO stdout/stderr fields (logs only
+        travel through `cape logs`). A `request_id` echo mismatch means
+        the CLI answered for a different request and is treated as an
+        infrastructure error, not trusted.
         """
         token = await asyncio.to_thread(_read_token, self._config)
         rc, stdout, stderr = await self._exec(
@@ -484,11 +646,15 @@ class _CapeCli:
         return payload
 
     async def cancel(self, request_id: str, reason: str) -> bool:
-        """ASSUMED CLI contract — verify against the real `cape` CLI before production use.
+        """`cape cancel <req> --controller-url U --token T --reason R`.
 
-        `cape cancel <req> --controller-url U --token T --reason R`.
-        Returns True only when the CLI confirmed the cancel (rc=0);
-        ordinary failures are swallowed (best-effort) after a redacted
+        Verified: rc=0 confirms the cancel (idempotent no-op on already
+        terminal requests, printing the post-cancel status JSON).
+        Returns True when the CLI confirmed the cancel OR when the
+        controller reported the request as unknown (HTTP 404 in the
+        CLI's stderr JSON) — after a journal-less controller restart the
+        request is gone and bookkeeping must not stick forever.
+        Ordinary failures are swallowed (best-effort) after a redacted
         warning. External cancellation is NOT swallowed: the in-flight
         cancel RPC gets a bounded shielded window to reach the
         controller, then CancelledError is re-raised so callers such as
@@ -523,6 +689,13 @@ class _CapeCli:
             verb="cancel",
         )
         if rc != 0:
+            if _stderr_reports_unknown_request(stderr):
+                logger.info(
+                    "cape cancel %s: controller no longer knows the request (HTTP 404); "
+                    "treating it as already gone",
+                    request_id,
+                )
+                return True
             logger.warning(
                 "cape cancel %s (reason=%s) exited rc=%d: %s",
                 request_id,
@@ -533,21 +706,15 @@ class _CapeCli:
             return False
         return True
 
-    async def logs(self, request_id: str, *, check: bool = False) -> tuple[str, str]:
-        """ASSUMED CLI contract — verify against the real `cape` CLI before production use.
+    async def logs(self, request_id: str) -> tuple[str, str]:
+        """`cape logs <req> --controller-url U --token T`.
 
-        `cape logs <req> --controller-url U --token T` prints the
-        workload's stdout/stderr. ADDITIONAL ASSUMPTION introduced by
-        this provider: `cape logs` can return the stdout of a
-        still-RUNNING request — endpoint discovery depends on it, and
-        the reference adapter only ever called logs on terminal
-        requests. Verify this explicitly against the real CLI.
-
-        With `check=False` (default) this is best-effort — failures
-        collapse to `("", "")` (error-message enrichment only). With
-        `check=True` a failed invocation raises RuntimeError so endpoint
-        discovery can tell a broken verb apart from a marker that simply
-        has not been printed yet.
+        Verified: prints the workload's stdout/stderr, BUT both are
+        empty until the command exits — the node agent reports output
+        once, after reaping the process; there is no streaming channel.
+        This method is therefore only called on terminal requests (whose
+        logs are populated) to enrich error messages. Best-effort:
+        failures collapse to `("", "")`.
         """
         try:
             token = await asyncio.to_thread(_read_token, self._config)
@@ -555,12 +722,8 @@ class _CapeCli:
                 ["logs", request_id, *self._common(token)], token=token, verb="logs"
             )
         except Exception:
-            if check:
-                raise
             return "", ""
         if rc != 0:
-            if check:
-                raise RuntimeError(f"cape logs {request_id} failed (rc={rc}): {stderr}")
             return "", ""
         return stdout, stderr
 
@@ -572,12 +735,13 @@ class _CapeSandboxRecord:
     request_id: str
     session_key: str
     workspace: str
+    meta_dir: str
     runtime_url: str
     runtime_port: int
 
 
 class CapeProvider(SandboxProvider):
-    """Sandbox CRUD via the `cape` CLI (assumed contract; see module docstring)."""
+    """Sandbox CRUD via the `cape` CLI (see module docstring)."""
 
     def __init__(self, config: CapeProviderConfig | None = None) -> None:
         self.config = config or CapeProviderConfig()
@@ -601,15 +765,27 @@ class CapeProvider(SandboxProvider):
         )
 
     async def create(self, config: SandboxConfig) -> Sandbox:
+        _pool, _user, meta_root = _required_settings(self.config)
         sandbox_id = SandboxId(f"cape-{uuid4().hex[:12]}")
         session_key = f"agentix-{sandbox_id}"
         workspace = f"{self.config.workspace_root.rstrip('/')}/{sandbox_id}"
+        meta_dir = Path(meta_root).expanduser() / str(sandbox_id)
         port = self._allocate_port()
+        try:
+            await asyncio.to_thread(meta_dir.mkdir, parents=True, exist_ok=True)
+        except OSError as exc:
+            self._inflight_ports.discard(port)
+            raise RuntimeError(f"cannot create the sandbox meta dir {meta_dir}: {exc}") from exc
 
-        binds = [f"{config.bundle}:{BUNDLE_NIX_ROOT}:ro", *self.config.extra_binds]
+        binds = [
+            f"{config.bundle}:{BUNDLE_NIX_ROOT}:ro",
+            f"{meta_dir}:{_META_MOUNT}:rw",
+            *self.config.extra_binds,
+        ]
         env = {BIND_PORT_ENV: str(port), **(config.env or {})}
         resource = config.resource
         gpus = resource.gpu if resource is not None and resource.gpu is not None else 0
+        boot = _boot_script(workspace=workspace, meta_dir=str(meta_dir), bundle=config.bundle)
 
         # The submit runs shielded: if we are cancelled mid-`cape run`, the
         # CLI still finishes inside its own timeout, the request id is
@@ -621,11 +797,10 @@ class CapeProvider(SandboxProvider):
         run_task = asyncio.ensure_future(
             self._cli.run(
                 session_key=session_key,
-                workspace=workspace,
-                cwd=workspace,
+                task_id=str(sandbox_id),
                 image=config.image,
                 gpus=gpus,
-                workload=["sh", "-c", _boot_script()],
+                workload=["sh", "-c", boot],
                 binds=binds,
                 env=env,
                 cpu_cores=_cpu_cores(resource, self.config),
@@ -645,9 +820,11 @@ class CapeProvider(SandboxProvider):
                 )
             if harvested is not None:
                 await self._cli.cancel(harvested, "agentix_create_cancelled")
+            await _remove_meta_dir(meta_dir)
             raise
         except BaseException:
             self._inflight_ports.discard(port)
+            await _remove_meta_dir(meta_dir)
             raise
         logger.info("CAPE runtime request %s submitted for sandbox %s", server_req, sandbox_id)
 
@@ -657,19 +834,23 @@ class CapeProvider(SandboxProvider):
         try:
             loop = asyncio.get_running_loop()
             deadline = loop.time() + self.config.create_timeout_seconds
-            host, marker_port = await self._discover_endpoint(server_req, deadline=deadline)
+            host, marker_port = await self._discover_endpoint(
+                server_req, endpoint_file=meta_dir / _ENDPOINT_FILE_NAME, deadline=deadline
+            )
             runtime_url = self.config.url_template.format(host=host, port=marker_port)
             await self._wait_healthy(server_req, runtime_url, deadline)
         except BaseException:
             self._sandboxes.pop(sandbox_id, None)
             self._inflight_ports.discard(port)
             await self._cli.cancel(server_req, "agentix_create_failed")
+            await _remove_meta_dir(meta_dir)
             raise
 
         self._sandboxes[sandbox_id] = _CapeSandboxRecord(
             request_id=server_req,
             session_key=session_key,
             workspace=workspace,
+            meta_dir=str(meta_dir),
             runtime_url=runtime_url,
             runtime_port=port,
         )
@@ -678,23 +859,34 @@ class CapeProvider(SandboxProvider):
         # `call_deadline` on the returned handle post-create.
         return Sandbox(sandbox_id=sandbox_id, runtime_url=runtime_url, status="running")
 
-    async def _discover_endpoint(self, server_req: str, *, deadline: float) -> tuple[str, int]:
-        """Find the node/port the runtime bound, from the workload's stdout.
+    async def _discover_endpoint(
+        self, server_req: str, *, endpoint_file: Path, deadline: float
+    ) -> tuple[str, int]:
+        """Wait for the workload to write the endpoint marker file.
 
-        Polls `cape status` (a terminal state means the runtime died —
-        fail fast with its logs) and `cape logs` (looking for the
-        `AGENTIX_ENDPOINT` marker). Transient status/logs failures are
-        tolerated up to `transient_failure_limit` consecutive times so a
-        single controller blip cannot kill a create whose lease already
-        queued onto a GPU. No second request is ever submitted into the
-        session — the assumed session model is serial (RUNNING_COMMAND ↔
-        CACHED_IDLE), so a same-session probe could queue forever behind
-        the never-ending runtime command.
+        CAPE has no streaming logs — `cape logs` returns empty output
+        until the command exits, and the runtime server never exits —
+        so discovery polls the *host side* of the per-sandbox marker
+        file the boot script writes through the rw-bound meta dir,
+        interleaved with `cape status` so a workload that died before
+        publishing fails fast (its logs ARE populated once the request
+        is terminal, and are fetched then for diagnostics). Transient
+        status failures are tolerated up to `transient_failure_limit`
+        consecutive times so a single controller blip cannot kill a
+        create whose lease already queued onto a GPU. No second request
+        is ever submitted into the session — the session model is
+        serial (RUNNING_COMMAND ↔ CACHED_IDLE), so a same-session probe
+        would queue forever behind the never-ending runtime command.
         """
         loop = asyncio.get_running_loop()
         limit = self.config.transient_failure_limit
         failures = 0
         while True:
+            marker = await asyncio.to_thread(_read_endpoint_file, endpoint_file)
+            if marker:
+                endpoint = _parse_endpoint(marker)
+                if endpoint is not None:
+                    return endpoint
             try:
                 status = await self._cli.status(server_req)
             except RuntimeError as exc:
@@ -704,42 +896,17 @@ class CapeProvider(SandboxProvider):
                         f"cape status {server_req} failed {failures} consecutive times "
                         f"during endpoint discovery: {exc}"
                     ) from exc
-                if loop.time() >= deadline:
-                    raise TimeoutError(
-                        f"CAPE runtime request {server_req} did not publish its endpoint "
-                        f"within {self.config.create_timeout_seconds}s"
-                    ) from exc
-                await asyncio.sleep(self.config.poll_interval_seconds)
-                continue
-            state = str(status.get("state", ""))
-            if state in _TERMINAL_STATES:
-                stdout, stderr = await self._cli.logs(server_req)
-                raise RuntimeError(
-                    f"CAPE runtime request {server_req} reached terminal state {state} "
-                    f"before publishing its endpoint.\n"
-                    f"--- workload stdout ---\n{stdout}\n"
-                    f"--- workload stderr ---\n{stderr}"
-                )
-            try:
-                stdout, _stderr = await self._cli.logs(server_req, check=True)
-            except (RuntimeError, OSError) as exc:
-                failures += 1
-                if failures >= limit:
+            else:
+                failures = 0
+                state = str(status.get("state", ""))
+                if state in _TERMINAL_STATES:
+                    stdout, stderr = await self._cli.logs(server_req)
                     raise RuntimeError(
-                        f"cape logs {server_req} failed {failures} consecutive times "
-                        f"during endpoint discovery: {exc}"
-                    ) from exc
-                if loop.time() >= deadline:
-                    raise TimeoutError(
-                        f"CAPE runtime request {server_req} did not publish its endpoint "
-                        f"within {self.config.create_timeout_seconds}s"
-                    ) from exc
-                await asyncio.sleep(self.config.poll_interval_seconds)
-                continue
-            failures = 0
-            endpoint = _parse_endpoint(stdout)
-            if endpoint is not None:
-                return endpoint
+                        f"CAPE runtime request {server_req} reached terminal state {state} "
+                        f"before publishing its endpoint marker.\n"
+                        f"--- workload stdout ---\n{stdout}\n"
+                        f"--- workload stderr ---\n{stderr}"
+                    )
             if loop.time() >= deadline:
                 raise TimeoutError(
                     f"CAPE runtime request {server_req} did not publish its endpoint "
@@ -754,8 +921,9 @@ class CapeProvider(SandboxProvider):
         client library: proxy env vars (`http_proxy`, ...) would leak
         into loopback/tunnel probes on corp-proxy hosts and hang them.
         Every fifth round the server request's state is re-checked so a
-        runtime that printed its marker and then crashed fails fast with
-        its logs instead of probing a dead endpoint for the whole budget.
+        runtime that wrote its marker and then crashed fails fast with
+        its logs (populated once terminal) instead of probing a dead
+        endpoint for the whole budget.
         """
         parts = urlsplit(runtime_url)
         host = parts.hostname or "127.0.0.1"
@@ -818,14 +986,16 @@ class CapeProvider(SandboxProvider):
         )
 
     async def delete(self, sandbox_id: SandboxId) -> None:
-        """Cancel the sandbox's runtime request.
+        """Cancel the sandbox's runtime request and remove its meta dir.
 
         Unknown ids are a silent no-op (`session()` calls this on the
         user's exception path, so a raise here would mask the original
         error). Bookkeeping is dropped only after the controller
-        confirms the cancel — a rejected/failed cancel keeps the record
-        (with a warning) so a later `delete()` can retry instead of
-        silently leaking the GPU lease.
+        confirms the cancel — or reports the request as unknown (HTTP
+        404, e.g. after a journal-less controller restart), which is
+        treated as already-gone. A rejected/failed cancel keeps the
+        record (with a warning) so a later `delete()` can retry instead
+        of silently leaking the GPU lease.
         """
         record = self._sandboxes.get(sandbox_id)
         if record is None:
@@ -841,6 +1011,7 @@ class CapeProvider(SandboxProvider):
             return
         self._sandboxes.pop(sandbox_id, None)
         self._inflight_ports.discard(record.runtime_port)
+        await _remove_meta_dir(Path(record.meta_dir))
         logger.info("Deleted sandbox %s (request %s)", sandbox_id, record.request_id)
 
 

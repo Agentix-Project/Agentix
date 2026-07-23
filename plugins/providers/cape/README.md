@@ -10,55 +10,107 @@ nodes with strong per-request isolation. Requests sharing a
 CACHED_IDLE — a *serial* model, one command at a time per session).
 This backend maps one Agentix sandbox onto exactly one long-lived CAPE
 request inside a per-sandbox session: the request bind-mounts the
-bundle's `/nix` tree read-only, prints an `AGENTIX_ENDPOINT <host>
-<port>` marker line to stdout, and execs `/nix/runtime/bootstrap.sh`.
-The provider discovers the endpoint by polling `cape status` and
-`cape logs` for that marker (it never submits a second command into the
-session, so it does not depend on same-session concurrency or on
-cross-request workspace persistence), then health-checks `GET /health`
-on the discovered endpoint.
+bundle's `/nix` tree read-only and a per-sandbox meta directory
+read-write at `/agentix-meta`, creates its workspace, writes an
+`AGENTIX_ENDPOINT <host> <port>` marker file into the meta dir, and
+execs `/nix/runtime/bootstrap.sh`. The provider discovers the endpoint
+by polling the *host side* of that marker file, interleaved with
+`cape status` (it never submits a second command into the session, so
+it does not depend on same-session concurrency or on cross-request
+workspace persistence), then health-checks `GET /health` on the
+discovered endpoint.
 
-## Contract status — ASSUMED CLI, not verified
+## Contract status — verified against the real CLI
 
-**The CAPE CLI verb surface implemented here
-(`cape run/status/logs/cancel`, their flags, the request-id stdout
-shape, and the `cape status` JSON schema) is an *assumed* contract.**
-It was reverse-documented from a sibling project's adapter of the
-same CLI, whose authors record that the official CAPE CLI was never
-obtained: the contract has only ever been exercised
-against fakes and local emulators. Treat every invocation in
-`agentix/provider/cape.py` (`_CapeCli` is the single class that knows
-the CLI) as a hypothesis to confirm.
+**The CLI surface implemented here (`cape run/status/logs/cancel`) has
+been verified item by item against the CAPE source.** The original
+checklist items now all have source-verified answers; `_CapeCli` in
+`agentix/provider/cape.py` remains the single class that knows the CLI.
 
-Verification checklist for when the real CLI arrives:
+What matched the previously assumed contract:
 
-- [ ] Run `cape --help` (and per-verb `--help`) and diff the verb set
-      against `run` / `status` / `logs` / `cancel`.
-- [ ] Compare the `cape run` argv table (`--controller-url`, `--token`,
-      `--pool`, `--user`, `--workspace`, `--image`, `--gpus`,
-      `--cpu-cores`, `--memory-gb`, `--gpu-mode`, `--isolation-policy`,
-      `--runtime-adapter`, `--max-duration-seconds`, `--cwd`,
-      `--session-key`, `--bind`, `--env`, `-- <workload>`) flag by
-      flag, including the "stdout is exactly one `req-...` line" parse
-      rule.
-- [ ] Compare the `cape status` JSON schema: the `state` field, the
-      terminal-state set (COMPLETED / FAILED / CANCELLED / EXPIRED /
-      LOST / INFEASIBLE), and the `request_id` echo this provider
-      cross-checks.
-- [ ] Confirm `cape logs` can return the stdout of a still-RUNNING
-      request — endpoint discovery depends on it. This assumption is
-      *new in this provider* (the reference adapter only called logs on
-      terminal requests).
-- [ ] Confirm the session model is serial (RUNNING_COMMAND ↔
-      CACHED_IDLE). This provider deliberately submits only one request
-      per session, so it works either way — but tooling built on top
-      must not assume same-session concurrency.
-- [ ] Confirm how the token is passed — `--token` on argv is visible in
-      process listings; prefer an env var or token-file option if the
-      real CLI supports one.
-- [ ] Confirm how a workload's node/port can be discovered — the
-      stdout-marker dance here exists only because the assumed contract
-      has no native endpoint query.
+* Verb set: `run` / `status` / `logs` / `cancel` all exist with
+  `--controller-url` and `--token` on each. (`cape wait` also exists
+  but is deliberately unused: its process exit code is 0 both on
+  timeout and on null-exit-code terminal states, so only the status
+  JSON `state` field can be trusted.)
+* `cape run` flags: `--image`, `--gpus`, `--cpu-cores`, `--memory-gb`,
+  `--gpu-mode whole`, `--isolation-policy`, `--runtime-adapter`,
+  `--max-duration-seconds`, `--session-key`,
+  `--bind src:dst[:ro|rw]`, `--env K=V`, and the `-- <workload>`
+  remainder are all real, with matching semantics.
+* Without `--wait`, `cape run` prints exactly one request id on
+  stdout. Real ids are `req-%06d`; the provider matches
+  `req-\d{6,}`.
+* `cape status` prints one JSON object on stdout (the human-readable
+  state line goes to stderr); the terminal-state set is exactly
+  {COMPLETED, FAILED, CANCELLED, EXPIRED, LOST, INFEASIBLE}; the
+  `request_id` echo the provider cross-checks is always present. The
+  status JSON has **no stdout/stderr fields** — output only travels
+  through `cape logs`.
+* `cape cancel` takes `--reason`, is an idempotent no-op on already
+  terminal requests, and rc=0 confirms the cancel. HTTP errors are a
+  single stderr JSON line (`{"status": <code>, "error": ...}`) with
+  rc=1; argv errors exit 2.
+* The token can **only** be passed as `--token` on argv — the real CLI
+  reads no env var and no token file, and there is no mint endpoint.
+  This provider's token-file/env indirection is client-side
+  convenience feeding that flag; the value is redacted from all error
+  text, but `ps` visibility cannot be avoided from the CLI side
+  (direct HTTP with the `X-CAPE-Token` header is the only
+  alternative).
+* The session model is serial (RUNNING_COMMAND ↔ CACHED_IDLE), as
+  assumed; one sandbox = one request = one unique session key remains
+  the right mapping.
+
+What the verification changed:
+
+* **`--task-id` is required** by the real parser (argparse exits 2
+  without it). The provider now passes the sandbox id.
+* **`--pool` / `--user` are required.** `CapeProviderConfig.pool` and
+  `.user` are checked at first use and fail fast with a clear error
+  instead of an argparse usage dump.
+* **`--workspace` does not exist** — the real parser rejects it with
+  `unrecognized arguments`, rc=2. The flag is gone; the boot script
+  now creates the workspace itself (`mkdir -p <ws> && cd <ws>`). For
+  the same reason `--cwd` is no longer passed: no component creates
+  the directory, and every CAPE runtime adapter fails at process
+  start on a missing cwd.
+* **Endpoint discovery was redesigned.** `cape logs` succeeds for
+  RUNNING requests but returns *empty* output until the command exits:
+  the node agent reports stdout/stderr once, after reaping the
+  process — CAPE has no streaming/incremental log channel and no
+  native endpoint query (the status `ports[]` field is a request-spec
+  echo that never reaches the node). The former stdout-marker +
+  logs-polling design could therefore never see the marker of a
+  never-exiting runtime server. Discovery now uses a **marker file
+  through a rw bind**: each sandbox gets `<meta_root>/<sandbox_id>`
+  (created before submit, removed on delete), bound at
+  `/agentix-meta`; the boot script writes the
+  `AGENTIX_ENDPOINT <host> <port>` line to `/agentix-meta/endpoint`;
+  the provider polls the host side of that file, interleaved with
+  `cape status` terminal-state checks. Logs are fetched only on
+  terminal states — where they *are* populated — to enrich error
+  messages.
+* **Cancel treats a controller 404 as already-gone.** After a
+  journal-less controller restart the request id is unknown; the old
+  behavior kept bookkeeping (and its port) forever. A 404 in the
+  CLI's stderr JSON now confirms deletion.
+
+### Networking: pin a host-network runtime adapter
+
+The client-assigned-port scheme (`AGENTIX_BIND_PORT` plus a direct
+probe of `<host>:<port>`) requires the workload to share the host's
+network stack. CAPE's apptainer and bubblewrap adapters do not unshare
+the network namespace, so they work; **CAPE's podman adapter runs
+without host networking**, so an endpoint bound inside it is
+unreachable and this provider cannot work on podman-only pools. The
+default `runtime_adapter` stays `None` (pool default), but deployments
+must pin `apptainer` or `bubblewrap` (or ensure the pool default is a
+host-network adapter). `local-process` shares everything and suits
+CPU-only local validation; with it, bind specs are no-ops, and the
+boot script falls back to the host-side meta dir and bundle paths
+(valid because that adapter shares the host filesystem).
 
 ## Install
 
@@ -81,7 +133,10 @@ from agentix.provider.cape import CapeProvider, CapeProviderConfig
 provider = CapeProvider(
     CapeProviderConfig(
         controller_url="https://cape-controller.example:8443",
-        pool="coding-agent-gpu",
+        pool="coding-agent-gpu",          # required (`cape run --pool`)
+        user="alice",                     # required (`cape run --user`)
+        meta_root="/mnt/shared/agentix-meta",  # required (endpoint discovery)
+        runtime_adapter="apptainer",      # pin a host-network adapter
         token_file="~/.config/cape/token",
     )
 )
@@ -103,6 +158,11 @@ Backend-specific notes:
   shared filesystem, prior upload, a CAPE-side template — is an **open
   question**; this iteration deliberately ships no `BundleDeployer` /
   `agentix deploy cape` until bundle transport is decided.
+* **`meta_root` must be visible to both the submitter and the pool
+  nodes** — the same shared-filesystem assumption `bundle` already
+  makes, so it adds no new deployment requirement. Each sandbox gets
+  its own `<meta_root>/<sandbox_id>` directory (rw-bound at
+  `/agentix-meta`), which `delete()` removes after a confirmed cancel.
 * **`url_template`** controls how the runtime URL is built from the
   discovered `host`/`port`. The default `http://{host}:{port}` assumes
   the submitter can route to pool nodes directly; behind an SSH tunnel,
@@ -128,10 +188,12 @@ Backend-specific notes:
   after `create()`, a fresh provider cannot see or delete the old
   sandbox (`delete()` of an unknown id is a silent no-op). Recovery is
   server-side cleanup by the `agentix-cape-...` session-key convention,
-  or waiting out `--max-duration-seconds`. The assumed CLI has no
+  or waiting out `--max-duration-seconds`. The real CLI has no
   list/query-by-session verb to rebuild the map from.
 * **Delete retries instead of leaking.** `delete()` drops bookkeeping
-  only after the controller confirms the cancel (`cape cancel` rc=0); a
+  only after the controller confirms the cancel (`cape cancel` rc=0) or
+  reports the request as unknown (HTTP 404 — e.g. after a journal-less
+  controller restart, when the request is gone anyway); any other
   failed cancel logs a warning and keeps the record so calling
   `delete()` again retries it.
 * **Runtime ports.** Each live sandbox of one provider instance gets a
@@ -140,8 +202,7 @@ Backend-specific notes:
   sandboxes of the same provider can never answer each other's health
   probes (same node or same SSH tunnel). Port collisions with *other*
   submitters or users on the same node cannot be reserved from this
-  side — that is a known limitation of the assumed contract (no
-  controller-side port brokering).
+  side — the real contract has no controller-side port brokering.
 
 ## License
 
