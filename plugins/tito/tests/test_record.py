@@ -81,14 +81,23 @@ class _Replica:
         self.message: dict = {"role": "assistant", "content": "ok done"}
         self.hold: asyncio.Event | None = None
         self.hold_marker: str | None = None
+        self.fail_next = False
+        self.delay = 0.0
 
     async def handler(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         self.calls.append(body)
         if self.hold is not None and self.hold_marker in json.dumps(body):
             await self.hold.wait()
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        if self.fail_next:
+            self.fail_next = False
+            return httpx.Response(503, json={"error": "upstream busy"})
         ids = list(self.completion_ids)
-        return httpx.Response(200, json={
+        # Serialize with stdlib json (allows NaN like a lenient real backend
+        # would) and ship verbatim — httpx's own `json=` encoder is strict.
+        blob = json.dumps({
             "id": "c1", "object": "chat.completion", "model": "m",
             "choices": [{
                 "index": 0,
@@ -100,7 +109,8 @@ class _Replica:
                 },
             }],
             "usage": {"prompt_tokens": 3, "completion_tokens": len(ids), "total_tokens": 5},
-        })
+        }).encode()
+        return httpx.Response(200, content=blob, headers={"content-type": "application/json"})
 
 
 def _make_gateway(tok, monkeypatch, **arg_overrides):
@@ -135,7 +145,9 @@ async def test_record_line_shape_and_crash_safety(tok, monkeypatch, tmp_path):
     path = tmp_path / f"{sid}.jsonl"
 
     r = await client.post(
-        f"/sessions/{sid}/v1/chat/completions", json=_CHAT, headers={"x-request-id": "req-001"}
+        f"/sessions/{sid}/v1/chat/completions",
+        json={**_CHAT, "temperature": 0.6, "top_p": 0.95, "max_tokens": 128},
+        headers={"x-request-id": "req-001", "x-thread-id": "thread-7"},
     )
     assert r.status_code == 200
 
@@ -145,10 +157,13 @@ async def test_record_line_shape_and_crash_safety(tok, monkeypatch, tmp_path):
 
     assert rec["schema_version"] == "tito.record.v1"
     assert rec["session_id"] == sid
+    assert rec["thread_id"] == "thread-7"  # x-thread-id passthrough
     assert rec["turn_index"] == 0
     assert rec["request_id"] == "req-001"
     assert rec["model"] == "m"
     assert rec["backend_kind"] == "sglang"
+    # Whitelisted sampling params lifted verbatim from the request body.
+    assert rec["sampling"] == {"temperature": 0.6, "top_p": 0.95, "max_tokens": 128}
     assert rec["prompt_token_ids"] + rec["completion_token_ids"] == accumulated
     assert rec["completion_token_ids"] == [7, 8]
     assert rec["completion_logprobs"] == [-0.25, -0.5]
@@ -157,8 +172,9 @@ async def test_record_line_shape_and_crash_safety(tok, monkeypatch, tmp_path):
     assert rec["finish_reason"] == "stop"
     assert rec["prefix_stable"] is True
     assert rec["render_skew"] is None  # sglang exposes no render ids
-    assert rec["tokenizer_fingerprint"] == {
+    assert rec["tokenizer"] == {
         "checkpoint": "tiny-in-memory",
+        "tokenizer_sha256": hashlib.sha256(tok.backend_tokenizer.to_str().encode()).hexdigest(),
         "chat_template_sha256": hashlib.sha256(tok.chat_template.encode()).hexdigest(),
     }
     # First turn: one from-scratch render segment covering the whole prompt.
@@ -182,6 +198,8 @@ async def test_record_line_shape_and_crash_safety(tok, monkeypatch, tmp_path):
     rec1, rec2 = _records(path)
     assert rec2["turn_index"] == 1
     assert rec2["request_id"] is None  # no x-request-id header sent
+    assert "thread_id" not in rec2  # key omitted when x-thread-id absent
+    assert rec2["sampling"] == {}  # no sampling params in the request
     assert rec2["prefix_stable"] is True
     assert [s["source"] for s in rec2["prompt_segments"]] == ["prefix", "tool", "generation_prompt"]
     # Segment spans tile the prompt exactly, and the prefix span IS the
@@ -371,6 +389,116 @@ async def test_shutdown_finalizes_open_record_files(tok, monkeypatch, tmp_path):
     registry.close()
     (meta,) = _meta(tmp_path / f"{sid}.jsonl")
     assert meta["reason"] == "shutdown"
+
+
+@pytest.mark.asyncio
+async def test_unrecorded_rollback_turn_still_breaks_prefix_stability(tok, monkeypatch, tmp_path):
+    """Adversarial-review regression: a rollback applied in phase 1 whose
+    turn never produced a record line (upstream 503) must NOT vanish from the
+    record stream — the next successful line's prefix_stable is computed
+    against the last RECORDED line, not the in-memory checkpoint, so the
+    discontinuity is flagged."""
+    client, replica, srv, _ = _make_gateway(tok, monkeypatch, record_dir=str(tmp_path))
+    sid = (await client.post("/sessions")).json()["session_id"]
+    path = tmp_path / f"{sid}.jsonl"
+
+    assert (await client.post(f"/sessions/{sid}/v1/chat/completions", json=_CHAT)).status_code == 200
+    base = [*_CHAT["messages"], {"role": "assistant", "content": "ok done"}]
+    assert (await client.post(
+        f"/sessions/{sid}/v1/chat/completions",
+        json={"model": "m", "messages": [*base, {"role": "tool", "content": "done"}]},
+    )).status_code == 200
+
+    # History rewrite (rollback applied in phase 1), upstream 503s -> passed
+    # through, NO record line, but the rollback stays committed in memory.
+    replica.fail_next = True
+    r = await client.post(
+        f"/sessions/{sid}/v1/chat/completions",
+        json={"model": "m", "messages": [*base, {"role": "tool", "content": "You"}]},
+    )
+    assert r.status_code == 503
+
+    # The agent retries the same rewritten history; the in-memory checkpoint
+    # now extends cleanly — but the record stream does not.
+    r = await client.post(
+        f"/sessions/{sid}/v1/chat/completions",
+        json={"model": "m", "messages": [*base, {"role": "tool", "content": "You"}]},
+    )
+    assert r.status_code == 200
+
+    recs = _records(path)
+    assert len(recs) == 3  # the 503 turn left no line (and no index gap: it never committed)
+    prev_stream = recs[1]["prompt_token_ids"] + recs[1]["completion_token_ids"]
+    assert recs[2]["prompt_token_ids"][: len(prev_stream)] != prev_stream
+    assert [rec["prefix_stable"] for rec in recs] == [True, True, False]
+
+
+@pytest.mark.asyncio
+async def test_generation_time_does_not_count_as_idle_for_ttl(tok, monkeypatch, tmp_path):
+    """Adversarial-review regression: the idle clock starts when a turn ENDS.
+    A single generation slower than the TTL must not let the agent's
+    immediately following request sweep its own live session away."""
+    client, replica, srv, _ = _make_gateway(
+        tok, monkeypatch, record_dir=str(tmp_path), session_ttl_seconds=0.5
+    )
+    sid = (await client.post("/sessions")).json()["session_id"]
+
+    replica.delay = 0.8  # one turn's generation exceeds the TTL
+    assert (await client.post(f"/sessions/{sid}/v1/chat/completions", json=_CHAT)).status_code == 200
+    replica.delay = 0.0
+
+    followup = {
+        "model": "m",
+        "messages": [
+            *_CHAT["messages"],
+            {"role": "assistant", "content": "ok done"},
+            {"role": "tool", "content": "done"},
+        ],
+    }
+    r = await client.post(f"/sessions/{sid}/v1/chat/completions", json=followup)
+    assert r.status_code == 200  # the session survived: zero actual idle time
+    assert len(_records(tmp_path / f"{sid}.jsonl")) == 2
+
+
+@pytest.mark.asyncio
+async def test_invalid_token_data_is_rejected_with_detectable_gap(tok, monkeypatch, tmp_path):
+    """Strict-JSON sink contract: a NaN logprob (JSON-parseable upstream, not
+    strict JSON) or a non-int token id must never be coerced into the record
+    file — the line is dropped, the turn still serves, and the next line's
+    turn_index shows a detectable gap."""
+    client, replica, srv, _ = _make_gateway(tok, monkeypatch, record_dir=str(tmp_path))
+    sid = (await client.post("/sessions")).json()["session_id"]
+    path = tmp_path / f"{sid}.jsonl"
+
+    # Turn 0: NaN logprob passed through by the backend (stdlib json accepts it).
+    replica.logprobs = [float("nan"), -0.5]
+    r = await client.post(f"/sessions/{sid}/v1/chat/completions", json=_CHAT)
+    assert r.status_code == 200  # capture failure never fails the served turn
+    assert not path.exists() or _records(path) == []
+
+    # Turn 1: clean — recorded with a turn_index gap exposing the dropped line.
+    replica.logprobs = [-0.25, -0.5]
+    followup = {
+        "model": "m",
+        "messages": [
+            *_CHAT["messages"],
+            {"role": "assistant", "content": "ok done"},
+            {"role": "tool", "content": "done"},
+        ],
+    }
+    assert (await client.post(f"/sessions/{sid}/v1/chat/completions", json=followup)).status_code == 200
+    (rec,) = _records(path)
+    assert rec["turn_index"] == 1  # index 0 is the detectable hole
+    # The dropped line is also the stability baseline hole: turn 1 extends
+    # nothing recorded, so it is the stream's first line and reads stable.
+    assert rec["prefix_stable"] is True
+    # Every persisted line is strict JSON (no NaN/Infinity literals).
+    for line in path.read_text().splitlines():
+        json.loads(line, parse_constant=lambda name: pytest.fail(f"non-strict JSON literal {name}"))
+    # The session meta line still counts every turn slot, recorded or not.
+    assert (await client.delete(f"/sessions/{sid}")).status_code == 204
+    (meta,) = _meta(path)
+    assert meta["turns"] == 2
 
 
 def test_compute_render_skew_contract():

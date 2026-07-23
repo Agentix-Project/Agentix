@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import time
 import uuid
@@ -70,8 +71,13 @@ class PreparedPrompt:
     (``tool``/``user``/``system``), and ``generation_prompt``.
 
     `prefix_stable` is True iff `token_ids` extends the last *committed*
-    checkpoint (previous prompt + completion) — False after a retry rollback
-    or when the checkpoint window was outrun and the prompt was re-rendered.
+    in-memory checkpoint (previous prompt + completion) — False after a retry
+    rollback or when the checkpoint window was outrun and the prompt was
+    re-rendered. NOTE: this is engine-level, advisory metadata. The
+    `prefix_stable` field in a persisted `tito.record.v1` line is computed by
+    the record sink against the last RECORDED line instead — an applied
+    rollback whose turn never produced a line (upstream error) must still
+    surface as a break in the record stream (see `record.TurnRecordSink`).
     """
 
     token_ids: list[int]
@@ -328,8 +334,11 @@ class SessionRegistry:
         self.session_ttl_seconds: float | None = getattr(args, "session_ttl_seconds", None) or None
         self.max_sessions: int | None = getattr(args, "max_sessions", None) or None
         self.on_evict: Callable[[str], None] | None = None
-        self.tokenizer_fingerprint: dict[str, str] = {
+        # The record's `tokenizer` block: pins the checkpoint name, the
+        # tokenizer definition bytes, and the chat template in effect.
+        self.tokenizer_info: dict[str, str] = {
             "checkpoint": str(getattr(args, "hf_checkpoint", "") or ""),
+            "tokenizer_sha256": _tokenizer_sha256(tokenizer),
             "chat_template_sha256": _chat_template_sha256(tokenizer, tito_tokenizer),
         }
 
@@ -423,3 +432,25 @@ def _chat_template_sha256(tokenizer: Any, tito_tokenizer: TITOTokenizer) -> str:
         tokenizer, "chat_template", None
     )
     return hashlib.sha256(str(template or "").encode()).hexdigest()
+
+
+def _tokenizer_sha256(tokenizer: Any) -> str:
+    """SHA-256 over the tokenizer DEFINITION bytes — the identity a record's
+    token ids depend on.
+
+    Method (documented as part of the record contract): for fast tokenizers,
+    hash ``backend_tokenizer.to_str()`` (the complete serialized
+    ``tokenizer.json`` definition: vocab, merges, normalizer, added tokens —
+    deterministic for a given tokenizer); for slow tokenizers, hash the
+    sorted-JSON vocabulary. Two gateways report the same value iff they
+    tokenize identically."""
+    backend = getattr(tokenizer, "backend_tokenizer", None)
+    if backend is not None:
+        try:
+            return hashlib.sha256(backend.to_str().encode()).hexdigest()
+        except Exception:  # pragma: no cover - serialization quirks per version
+            logger.exception("tokenizer_sha256: backend serialization failed; falling back to vocab")
+    get_vocab = getattr(tokenizer, "get_vocab", None)
+    vocab = get_vocab() if callable(get_vocab) else {}
+    blob = json.dumps(vocab, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(blob.encode()).hexdigest()

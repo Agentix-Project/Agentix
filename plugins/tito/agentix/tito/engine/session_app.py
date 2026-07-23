@@ -31,7 +31,7 @@ from .errors import (
 )
 from .pretokenize import get_tito_tokenizer
 from .processing import load_tokenizer
-from .record import build_turn_record
+from .record import build_turn_record, sampling_from_request
 from .trajectory import GetSessionResponse, LinearTrajectory, SessionRecord, SessionRegistry
 from .upstream import Backend, get_upstream
 
@@ -137,6 +137,11 @@ def setup_session_routes(app: FastAPI, backend: Backend, args: Any) -> None:
             return await _chat_turn(request, session_id, session)
         finally:
             session.inflight -= 1
+            # The idle clock starts when the turn ENDS: `get_session` touched
+            # it at request start, so without this a generation that takes
+            # longer than the TTL would count as idle time and the agent's
+            # very next request would sweep its own live session away.
+            session.last_used = time.monotonic()
 
     async def _chat_turn(request: Request, session_id: str, session: LinearTrajectory) -> Response:
         # Read + parse the body BEFORE taking the lock: the read lasts as long
@@ -210,26 +215,32 @@ def setup_session_routes(app: FastAPI, backend: Backend, args: Any) -> None:
                 )
             )
             if registry.record_sink is not None:
-                # Inside the lock so file order == trajectory order. Sink
-                # failures are logged, never fail the served turn.
-                registry.record_sink.append_turn(
-                    session_id,
-                    build_turn_record(
-                        session_id=session_id,
-                        request_id=request.headers.get("x-request-id"),
-                        model=request_body.get("model"),
-                        backend_kind=backend_kind,
-                        prompt_token_ids=prompt_token_ids,
-                        prompt_segments=prepared.segments,
-                        prefix_stable=prepared.prefix_stable,
-                        completion_token_ids=harvest.completion_token_ids,
-                        completion_logprobs=harvest.completion_logprobs,
-                        assistant_message=harvest.assistant_message,
-                        finish_reason=harvest.finish_reason,
-                        tokenizer_fingerprint=registry.tokenizer_fingerprint,
-                        render_token_ids=harvest.render_token_ids,
-                    ),
-                )
+                # Inside the lock so file order == trajectory order. Capture
+                # failures (build OR write) are logged, never fail the served
+                # turn; sink-level failures additionally leave a turn_index
+                # gap so a dropped line is detectable downstream.
+                try:
+                    registry.record_sink.append_turn(
+                        session_id,
+                        build_turn_record(
+                            session_id=session_id,
+                            request_id=request.headers.get("x-request-id"),
+                            thread_id=request.headers.get("x-thread-id"),
+                            model=request_body.get("model"),
+                            backend_kind=backend_kind,
+                            sampling=sampling_from_request(request_body),
+                            prompt_token_ids=prompt_token_ids,
+                            prompt_segments=prepared.segments,
+                            completion_token_ids=harvest.completion_token_ids,
+                            completion_logprobs=harvest.completion_logprobs,
+                            assistant_message=harvest.assistant_message,
+                            finish_reason=harvest.finish_reason,
+                            tokenizer=registry.tokenizer_info,
+                            render_token_ids=harvest.render_token_ids,
+                        ),
+                    )
+                except Exception:
+                    logger.exception("tito record: failed to capture turn for session %s", session_id)
         return backend.build_proxy_response(turn.proxy_result)
 
     @app.api_route("/sessions/{session_id}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
