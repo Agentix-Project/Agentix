@@ -1,15 +1,24 @@
 """Pure Anthropic ↔ OpenAI shape converters.
 
-Used only by `clients.anthropic_from_openai`. The functions here are
-JSON-in, JSON-out — no I/O, no SDK calls, no spans. Anyone writing a
-custom Anthropic-on-OpenAI client can import these directly.
+Used by `clients.anthropic_from_openai` and `clients.anthropic_to_openai`.
+The functions here are JSON-in, JSON-out — no I/O, no SDK calls, no spans.
+Anyone writing a custom Anthropic-on-OpenAI client can import these directly.
+
+This module IS the translation contract for downstream consumers: whatever
+the agent "actually said" to a recording backend is defined by these
+functions, so a change here changes the byte identity of captured
+trajectories. `TRANSLATION_SPEC_SHA` (bottom of the module) hashes this
+file's source so consumers can pin the exact translation their data was
+produced under; abridge-serve surfaces it on `/_health`.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import uuid
+from pathlib import Path
 from typing import Any
 
 
@@ -54,6 +63,10 @@ def anthropic_messages_to_openai(
     tools = _tools_anthropic_to_openai(body.get("tools"))
     if tools:
         out["tools"] = tools
+
+    tool_choice = _tool_choice_anthropic_to_openai(body.get("tool_choice"))
+    if tool_choice is not None:
+        out["tool_choice"] = tool_choice
 
     if extra_body:
         out.update(extra_body)
@@ -275,6 +288,7 @@ def _messages_anthropic_to_openai(messages: list[Any]) -> list[dict[str, Any]]:
             continue
 
         text_parts: list[str] = []
+        thinking_parts: list[str] = []
         tool_calls: list[dict[str, Any]] = []
         tool_results: list[dict[str, Any]] = []
         for block in content:
@@ -286,6 +300,13 @@ def _messages_anthropic_to_openai(messages: list[Any]) -> list[dict[str, Any]]:
             block_type = block.get("type")
             if block_type == "text":
                 text_parts.append(str(block.get("text", "")))
+            elif block_type == "thinking":
+                # Assistant thinking history maps to the reasoning_content
+                # key the vLLM/sglang dialect reads (Anthropic's crypto
+                # `signature` has no OpenAI-side meaning and is dropped).
+                # Keeping the reasoning in the echoed history preserves byte
+                # identity with what a session-recording backend stored.
+                thinking_parts.append(str(block.get("thinking", "")))
             elif block_type == "tool_use":
                 tool_calls.append(
                     {
@@ -309,15 +330,44 @@ def _messages_anthropic_to_openai(messages: list[Any]) -> list[dict[str, Any]]:
         text = "\n".join(part for part in text_parts if part)
         if role == "assistant":
             message: dict[str, Any] = {"role": "assistant", "content": text or None}
+            if thinking_parts:
+                message["reasoning_content"] = "\n".join(part for part in thinking_parts if part)
             if tool_calls:
                 message["tool_calls"] = tool_calls
-            if message["content"] is not None or tool_calls:
+            # A thinking-only assistant turn (legal Anthropic shape — e.g.
+            # extended thinking cut off at max_tokens) maps to reasoning_content
+            # and must survive: dropping the whole message would leave two
+            # adjacent user turns and silently lose the forwarded reasoning.
+            if message["content"] is not None or tool_calls or thinking_parts:
                 out.append(message)
         else:
             out.extend(tool_results)
             if text:
                 out.append({"role": role, "content": text})
     return out
+
+
+def _tool_choice_anthropic_to_openai(tool_choice: Any) -> Any:
+    """Map Anthropic `tool_choice` to the OpenAI field.
+
+    `auto` -> "auto", `any` -> "required", `none` -> "none", and
+    `{type: tool, name}` -> a named function choice.
+    `disable_parallel_tool_use` is intentionally not mapped (matching the
+    reference translator): OpenAI's `parallel_tool_calls` is not honored by
+    every OpenAI-compatible engine, and a silently ignored knob is worse
+    than a documented drop. Unknown shapes are dropped, not guessed."""
+    if not isinstance(tool_choice, dict):
+        return None
+    kind = tool_choice.get("type")
+    if kind == "auto":
+        return "auto"
+    if kind == "any":
+        return "required"
+    if kind == "none":
+        return "none"
+    if kind == "tool" and tool_choice.get("name"):
+        return {"type": "function", "function": {"name": str(tool_choice["name"])}}
+    return None
 
 
 def _tools_anthropic_to_openai(tools: Any) -> list[dict[str, Any]]:
@@ -359,7 +409,40 @@ def _sse(event: str, data: dict[str, Any]) -> bytes:
     return f"event: {event}\ndata: {payload}\n\n".encode()
 
 
+# The translation contract version: SHA-256 over the source of EVERY module
+# that shapes what an upstream/recording backend receives — the pure
+# transforms here, plus the two client modules that rewrite the body around
+# them (assistant-replay memory, forced stream=False, model override,
+# operator upstream_params). Hashing only this file would let those rewrites
+# drift without moving the pin. Any edit — however small — changes the byte
+# identity of the OpenAI bodies a recording backend sees, so downstream data
+# contracts pin this value (abridge-serve reports it on `/_health`).
+# Deliberately file bytes, not a semantic hash: comments changing the sha is
+# a false positive we accept; a behavior change slipping through unhashed is
+# not. Sibling sources are read directly (no import) to avoid a cycle with
+# the client modules, which import this one.
+_TRANSLATION_SPEC_FILES = (
+    "_anthropic_transforms.py",
+    "anthropic_to_openai.py",
+    "anthropic_from_openai.py",
+)
+
+
+def _translation_spec_sha() -> str:
+    digest = hashlib.sha256()
+    for name in _TRANSLATION_SPEC_FILES:
+        digest.update(name.encode())
+        digest.update(b"\x00")
+        digest.update((Path(__file__).parent / name).read_bytes())
+        digest.update(b"\x00")
+    return digest.hexdigest()
+
+
+TRANSLATION_SPEC_SHA: str = _translation_spec_sha()
+
+
 __all__ = [
+    "TRANSLATION_SPEC_SHA",
     "AnthropicCountTokens",
     "anthropic_messages_to_openai",
     "anthropic_sse",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from .config import TITOGatewayConfig
@@ -69,6 +70,30 @@ def _add_serve_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--session-server-port", type=int, default=30000, help="Gateway bind port.")
     parser.add_argument("--router-timeout", type=float, default=600.0, help="Proxy timeout in seconds.")
     parser.add_argument(
+        "--record-dir",
+        default=os.environ.get("TITO_RECORD_DIR") or None,
+        help=(
+            "Persist one tito.record.v1 JSON line per committed turn to "
+            "<record-dir>/<session_id>.jsonl, flushed per turn (env: TITO_RECORD_DIR). "
+            "Unset = in-memory trajectories only."
+        ),
+    )
+    parser.add_argument(
+        "--session-ttl-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Evict sessions idle longer than this many seconds (record files are "
+            "flushed+finalized first; in-flight sessions are never evicted). Unset = no TTL."
+        ),
+    )
+    parser.add_argument(
+        "--max-sessions",
+        type=int,
+        default=None,
+        help="LRU-evict sessions beyond this count (same flush-first, never-in-flight rules). Unset = unbounded.",
+    )
+    parser.add_argument(
         "--backend-probe-candidate",
         action="append",
         default=None,
@@ -100,6 +125,9 @@ def _serve(args: argparse.Namespace) -> int:
         router_timeout=args.router_timeout,
         backend_probe_candidates=args.backend_probe_candidate,
         backend_probe_timeout=args.backend_probe_timeout,
+        record_dir=args.record_dir,
+        session_ttl_seconds=args.session_ttl_seconds,
+        max_sessions=args.max_sessions,
     )
     TITOGateway(config).run()
     return 0

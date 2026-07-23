@@ -48,17 +48,19 @@ REQUEST_GAPS: dict[str, str] = {
     "06_user_image_url": "a user message whose content is only an image block is dropped entirely",
     "11_user_tool_result_multipart": "image parts inside a multipart tool_result are dropped (only text is forwarded)",
     "13_long_tool_name": ">64-char tool names are not sanitized (no truncate+hash rename, no tool_map)",
-    "14_tool_choice_any": "tool_choice {type: any} is dropped (should map to OpenAI tool_choice 'required')",
-    "15_tool_choice_named": "tool_choice {type: tool, name} is dropped (should map to a named function tool_choice)",
     "16_metadata_user_id": "metadata.user_id is dropped (should map to the OpenAI 'user' field)",
     "17_thinking_medium": "thinking {budget_tokens: 5000} is dropped (no reasoning_effort='medium' mapping)",
     "18_top_k_dropped": "top_k is dropped; the oracle passes it through for OpenAI-compatible upstreams",
     "19_stream_include_usage": "stream=true is dropped (the adapter always makes a non-streaming upstream call)",
-    "35_assistant_thinking_history": "assistant thinking blocks are dropped instead of forwarded as thinking_blocks",
+    "35_assistant_thinking_history": (
+        "DELIBERATE dialect divergence, not a drop: assistant thinking history is forwarded as "
+        "`reasoning_content` (the vLLM/sglang key our downstreams read), while the LiteLLM golden "
+        "expects `thinking_blocks` (+ the Anthropic crypto `signature`, meaningless to an "
+        "OpenAI-compatible engine). The reasoning text itself is preserved — see "
+        "test_assistant_thinking_history_maps_to_reasoning_content for the positive contract."
+    ),
     "36_user_mixed_content": "the image part of mixed text+image user content is dropped",
     "37_empty_string_content": "a message with empty-string content is forwarded; the oracle drops it",
-    "39_tool_choice_auto_no_parallel": "tool_choice {type: auto} is dropped (should map to OpenAI tool_choice 'auto')",
-    "40_tool_choice_none": "tool_choice {type: none} is dropped (should map to OpenAI tool_choice 'none')",
     "41_thinking_high": "thinking with a large budget is dropped (no reasoning_effort='high' mapping)",
     "42_thinking_low": "thinking {budget_tokens: 2000} is dropped (no reasoning_effort='low' mapping)",
     "43_stop_sequences": "stop_sequences is dropped (never mapped to an OpenAI stop parameter)",
@@ -180,6 +182,23 @@ def test_request_transform_matches_golden(case: str) -> None:
     actual = anthropic_messages_to_openai(anthropic_body)
 
     assert _normalized_openai_request(actual) == _normalized_openai_request(expected)
+
+
+def test_assistant_thinking_history_maps_to_reasoning_content() -> None:
+    """The positive contract behind the 35_assistant_thinking_history xfail:
+    the reasoning text is NOT dropped — it rides the `reasoning_content` key
+    our OpenAI-compatible downstreams (vLLM/sglang dialect) read, so an
+    echoed assistant turn keeps byte identity with what a session-recording
+    backend stored. Only the layout differs from the LiteLLM golden
+    (`thinking_blocks` + `signature`)."""
+    anthropic_body = _load("requests", "anthropic_35_assistant_thinking_history.json")
+
+    actual = anthropic_messages_to_openai(anthropic_body)
+
+    (assistant,) = [m for m in actual["messages"] if m["role"] == "assistant"]
+    assert assistant["reasoning_content"] == "Let me work this out step by step..."
+    assert assistant["content"] == "The answer is 42."
+    assert "signature" not in json.dumps(actual)  # the crypto signature is dropped
 
 
 # ── responses: OpenAI -> Anthropic ──────────────────────────────────────────

@@ -11,8 +11,13 @@ mismatch report. Mutating methods must be called under `LinearTrajectory.lock`.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
+import time
 import uuid
+from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -22,6 +27,7 @@ from .compare import TokenSeqComparator
 from .errors import MessageValidationError, SessionNotFoundError, TokenizationError
 from .messages import assert_messages_append_only_with_allowed_role, message_matches
 from .pretokenize import TITOTokenizer
+from .record import TurnRecordSink
 
 logger = logging.getLogger(__name__)
 
@@ -54,12 +60,56 @@ class _RollbackPlan:
     discard_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedPrompt:
+    """The pretokenized prompt for one turn, plus the capture metadata the
+    per-turn record needs.
+
+    `segments` are half-open ``{"start", "end", "source"}`` spans over
+    `token_ids`; sources are ``render`` (from-scratch chat-template render),
+    ``prefix`` (the reused accumulated checkpoint), one per appended role
+    (``tool``/``user``/``system``), and ``generation_prompt``.
+
+    `prefix_stable` is True iff `token_ids` extends the last *committed*
+    in-memory checkpoint (previous prompt + completion) — False after a retry
+    rollback or when the checkpoint window was outrun and the prompt was
+    re-rendered. NOTE: this is engine-level, advisory metadata. The
+    `prefix_stable` field in a persisted `tito.record.v1` line is computed by
+    the record sink against the last RECORDED line instead — an applied
+    rollback whose turn never produced a line (upstream error) must still
+    surface as a break in the record stream (see `record.TurnRecordSink`).
+    """
+
+    token_ids: list[int]
+    segments: list[dict[str, Any]]
+    prefix_stable: bool
+
+
+def _spans(parts: list[tuple[str, list[int]]]) -> list[dict[str, Any]]:
+    """Turn ``(source, ids)`` parts into cumulative-offset segment spans,
+    dropping empty parts (a template may render an empty suffix)."""
+    segments: list[dict[str, Any]] = []
+    offset = 0
+    for source, ids in parts:
+        if not ids:
+            continue
+        segments.append({"start": offset, "end": offset + len(ids), "source": source})
+        offset += len(ids)
+    return segments
+
+
 @dataclass
 class LinearTrajectory:
     """Message history + accumulated token-ID checkpoints for one session."""
 
     lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
     closing: bool = field(default=False, repr=False, compare=False)
+    # Requests currently being served on this session (any phase, including
+    # the un-locked upstream exchange). The registry never evicts a session
+    # whose count is non-zero.
+    inflight: int = field(default=0, repr=False, compare=False)
+    # Idle clock for TTL eviction; the registry touches it on every lookup.
+    last_used: float = field(default_factory=time.monotonic, repr=False, compare=False)
     messages: list[dict[str, Any]] = field(default_factory=list)
     records: list[SessionRecord] = field(default_factory=list)
     trajectory_token_ids: list[list[int]] = field(default_factory=list)
@@ -87,10 +137,27 @@ class LinearTrajectory:
         """Build the full prompt token IDs for *request_messages*. First turn renders
         from scratch; later turns reuse the stored token prefix (rolling back at most
         one assistant step on a retry). Must be called under ``self.lock``."""
+        return self.prepare_prompt(request_messages, tools, tito_tokenizer=tito_tokenizer).token_ids
+
+    def prepare_prompt(
+        self,
+        request_messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        *,
+        tito_tokenizer: TITOTokenizer,
+    ) -> PreparedPrompt:
+        """`prepare_pretokenized` plus the capture metadata: segment spans over
+        the prompt ids and the prefix-stability verdict against the last
+        committed checkpoint. Must be called under ``self.lock``."""
+        # The stability baseline is the checkpoint as COMMITTED — captured
+        # before any rollback below mutates it.
+        committed = list(self.token_ids)
+
         if not self.messages:
-            return tito_tokenizer.render_messages(
+            ids = tito_tokenizer.render_messages(
                 request_messages, tools=tools, add_generation_prompt=True, tokenize=True
             )
+            return PreparedPrompt(token_ids=ids, segments=_spans([("render", ids)]), prefix_stable=True)
 
         # Plan first, mutate last: a request that fails validation must be a
         # pure 4xx with NO committed rollback side effects — otherwise a
@@ -113,15 +180,20 @@ class LinearTrajectory:
             # its update. Re-render from scratch: incremental == from-scratch
             # is the engine invariant, so this is lossless (never merge onto
             # an empty prefix, which would drop the whole stored history).
-            return tito_tokenizer.render_messages(
+            ids = tito_tokenizer.render_messages(
                 request_messages, tools=tools, add_generation_prompt=True, tokenize=True
             )
-        return tito_tokenizer.merge_tokens(
-            old_messages=self.messages,
-            new_messages=request_messages,
-            pretokenized_token_ids=self.token_ids,
-            tools=tools,
-        )
+            parts: list[tuple[str, list[int]]] = [("render", ids)]
+        else:
+            # Same construction as `TITOTokenizer.merge_tokens`, decomposed so
+            # the segment boundaries survive into the per-turn record.
+            prefix = tito_tokenizer.fix_prefix(self.token_ids)
+            appended = tito_tokenizer.appended_segments(self.messages, request_messages, tools)
+            ids = prefix + [tid for _, seg_ids in appended for tid in seg_ids]
+            parts = [("prefix", prefix), *appended]
+
+        prefix_stable = not committed or ids[: len(committed)] == committed
+        return PreparedPrompt(token_ids=ids, segments=_spans(parts), prefix_stable=prefix_stable)
 
     def update_pretokenized_state(
         self,
@@ -235,17 +307,43 @@ class LinearTrajectory:
 
 
 class SessionRegistry:
-    """Session ID -> trajectory map + shared tokenizer/comparator. Pure CRUD plus the
-    read-only mismatch computation; never mutates trajectory state itself."""
+    """Session ID -> trajectory map + shared tokenizer/comparator, plus the
+    optional durable capture and lifecycle policy for long-running gateways.
+
+    CRUD plus the read-only mismatch computation; never mutates trajectory
+    *token* state itself. From ``args`` (all optional, default off):
+
+    - ``record_dir``          — per-session JSONL turn records (`TurnRecordSink`).
+    - ``session_ttl_seconds`` — evict sessions idle longer than this.
+    - ``max_sessions``        — LRU-evict beyond this many sessions.
+
+    Eviction always flushes + finalizes the session's record file first and
+    NEVER touches a session with in-flight requests (``inflight`` > 0, a held
+    lock, or a pending close). ``on_evict`` lets the server layer drop
+    per-session routing state (e.g. the pool's sticky pin).
+    """
 
     def __init__(self, args: Any, tokenizer: Any, *, tito_tokenizer: TITOTokenizer) -> None:
-        self.sessions: dict[str, LinearTrajectory] = {}
+        self.sessions: OrderedDict[str, LinearTrajectory] = OrderedDict()
         self.args = args
         self.tokenizer = tokenizer
         self.tito_tokenizer = tito_tokenizer
         self.comparator: TokenSeqComparator = tito_tokenizer.create_comparator()
+        record_dir = getattr(args, "record_dir", None)
+        self.record_sink: TurnRecordSink | None = TurnRecordSink(record_dir) if record_dir else None
+        self.session_ttl_seconds: float | None = getattr(args, "session_ttl_seconds", None) or None
+        self.max_sessions: int | None = getattr(args, "max_sessions", None) or None
+        self.on_evict: Callable[[str], None] | None = None
+        # The record's `tokenizer` block: pins the checkpoint name, the
+        # tokenizer definition bytes, and the chat template in effect.
+        self.tokenizer_info: dict[str, str] = {
+            "checkpoint": str(getattr(args, "hf_checkpoint", "") or ""),
+            "tokenizer_sha256": _tokenizer_sha256(tokenizer),
+            "chat_template_sha256": _chat_template_sha256(tokenizer, tito_tokenizer),
+        }
 
     def create_session(self) -> str:
+        self.sweep()
         session_id = uuid.uuid4().hex
         self.sessions[session_id] = LinearTrajectory()
         return session_id
@@ -254,11 +352,61 @@ class SessionRegistry:
         session = self.sessions.get(session_id)
         if session is None:
             raise SessionNotFoundError(f"session not found: session_id={session_id}")
+        session.last_used = time.monotonic()
+        self.sessions.move_to_end(session_id)
         return session
 
     def remove_session(self, session_id: str) -> None:
         if self.sessions.pop(session_id, None) is None:
             raise SessionNotFoundError(f"session not found: session_id={session_id}")
+        if self.record_sink is not None:
+            self.record_sink.finalize(session_id, reason="deleted")
+
+    def sweep(self) -> list[str]:
+        """Evict expired-idle sessions (TTL) and least-recently-used overflow
+        (max-sessions). Returns the evicted ids. Skips any session that is
+        in-flight, locked, or closing — capacity may transiently overflow
+        rather than ever killing a live rollout."""
+        evicted: list[str] = []
+        ttl = self.session_ttl_seconds
+        if ttl is not None:
+            now = time.monotonic()
+            for session_id, session in list(self.sessions.items()):
+                if now - session.last_used < ttl:
+                    break  # LRU order: everything later was used more recently
+                if self._evict(session_id, session, reason="ttl_evicted"):
+                    evicted.append(session_id)
+        if self.max_sessions is not None:
+            overflow = len(self.sessions) - self.max_sessions
+            if overflow > 0:
+                for session_id, session in list(self.sessions.items()):
+                    if overflow <= 0:
+                        break
+                    if self._evict(session_id, session, reason="capacity_evicted"):
+                        evicted.append(session_id)
+                        overflow -= 1
+        return evicted
+
+    def _evict(self, session_id: str, session: LinearTrajectory, *, reason: str) -> bool:
+        if session.inflight > 0 or session.lock.locked() or session.closing:
+            return False
+        # Flush + finalize the durable record BEFORE the session becomes
+        # unreachable — eviction must never lose committed capture.
+        if self.record_sink is not None:
+            self.record_sink.finalize(session_id, reason=reason)
+        self.sessions.pop(session_id, None)
+        logger.info("evicted session %s (%s)", session_id, reason)
+        if self.on_evict is not None:
+            try:
+                self.on_evict(session_id)
+            except Exception:
+                logger.exception("on_evict callback failed for session %s", session_id)
+        return True
+
+    def close(self) -> None:
+        """Finalize every open record file (process shutdown)."""
+        if self.record_sink is not None:
+            self.record_sink.close_all(reason="shutdown")
 
     def compute_session_mismatch(self, session: LinearTrajectory) -> list[dict] | None:
         """Compare accumulated token IDs against a from-scratch render. Read-only."""
@@ -273,3 +421,36 @@ class SessionRegistry:
             return [m.to_dict() for m in mismatches]
         except Exception as e:
             raise TokenizationError(f"failed to compute tito_session_mismatch: {e}") from e
+
+
+def _chat_template_sha256(tokenizer: Any, tito_tokenizer: TITOTokenizer) -> str:
+    """SHA-256 of the chat template actually in effect for this gateway —
+    the fixed-template override when set (e.g. qwen3_fixed.jinja), otherwise
+    the tokenizer's own template. Pins the exact render rules a record's
+    token ids were produced under."""
+    template = tito_tokenizer.chat_template_kwargs.get("chat_template") or getattr(
+        tokenizer, "chat_template", None
+    )
+    return hashlib.sha256(str(template or "").encode()).hexdigest()
+
+
+def _tokenizer_sha256(tokenizer: Any) -> str:
+    """SHA-256 over the tokenizer DEFINITION bytes — the identity a record's
+    token ids depend on.
+
+    Method (documented as part of the record contract): for fast tokenizers,
+    hash ``backend_tokenizer.to_str()`` (the complete serialized
+    ``tokenizer.json`` definition: vocab, merges, normalizer, added tokens —
+    deterministic for a given tokenizer); for slow tokenizers, hash the
+    sorted-JSON vocabulary. Two gateways report the same value iff they
+    tokenize identically."""
+    backend = getattr(tokenizer, "backend_tokenizer", None)
+    if backend is not None:
+        try:
+            return hashlib.sha256(backend.to_str().encode()).hexdigest()
+        except Exception:  # pragma: no cover - serialization quirks per version
+            logger.exception("tokenizer_sha256: backend serialization failed; falling back to vocab")
+    get_vocab = getattr(tokenizer, "get_vocab", None)
+    vocab = get_vocab() if callable(get_vocab) else {}
+    blob = json.dumps(vocab, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(blob.encode()).hexdigest()

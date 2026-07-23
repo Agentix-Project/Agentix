@@ -78,6 +78,109 @@ tokenizer's own template). `--backend-kind` selects the backend token dialect
 a local backend (see `agentix.tito.discovery`). Run `agentix-tito serve -h`
 for the full list.
 
+## Per-turn record persistence — `tito.record.v1` (normative)
+
+With `--record-dir DIR` (env `TITO_RECORD_DIR`), every committed turn appends
+one `tito.record.v1` JSON line to `DIR/<session_id>.jsonl` and flushes it —
+the file is complete up to the last committed turn even if the process dies
+mid-rollout. **This section is the normative schema document: the gateway is
+the producing side of the contract, and downstream consumers adapt to the
+shape defined here.** The structure is flat (no nested `prompt`/`completion`
+objects).
+
+```jsonc
+{
+  "schema_version": "tito.record.v1",
+  "session_id": "<gateway session id>",
+  "thread_id": "<echo of the x-thread-id request header>",  // OPTIONAL: key omitted when the header is absent
+  "request_id": "<echo of the x-request-id request header, or null>",
+  "turn_index": 0,             // monotonic per session file; see gap semantics below
+  "ts": 1750000000.0,          // unix seconds, request commit time
+  "model": "<chat request model field, or null>",
+  "backend_kind": "sglang" | "vllm",
+  "sampling": { "temperature": 0.6, "top_p": 0.95, "max_tokens": 4096 },
+  "tokenizer": {
+    "checkpoint": "<hf checkpoint name/path the gateway loaded>",
+    "tokenizer_sha256": "<64 hex>",
+    "chat_template_sha256": "<64 hex>"
+  },
+  "prompt_token_ids": [ ... ],           // exactly what generation ran on
+  "prompt_segments": [ {"start": 0, "end": 42, "source": "prefix"}, ... ],
+  "completion_token_ids": [ ... ],       // exactly what was sampled
+  "completion_logprobs": [ ... ],        // finite floats, len == len(completion_token_ids)
+  "assistant_message": { ... },          // the parsed assistant turn as stored
+  "finish_reason": "stop" | "tool_calls" | ... | null,
+  "prefix_stable": true,
+  "render_skew": null | {"equal": false, "first_divergence": 17}
+}
+```
+
+Field semantics:
+
+- `sampling` — the whitelisted sampling parameters lifted verbatim from the
+  chat request body (`temperature`, `top_p`, `top_k`, `min_p`, `max_tokens`,
+  `max_completion_tokens`, `frequency_penalty`, `presence_penalty`,
+  `repetition_penalty`, `seed`, `stop`, `n`); keys absent from the request
+  are absent here, so the empty object means "backend defaults".
+- `tokenizer.tokenizer_sha256` — SHA-256 over the tokenizer **definition**
+  bytes: for fast tokenizers the complete serialized `tokenizer.json`
+  definition (`backend_tokenizer.to_str()` — vocab, merges, normalizer,
+  added tokens); for slow tokenizers the sorted-JSON vocabulary. Two
+  gateways report the same value iff they tokenize identically.
+  `tokenizer.chat_template_sha256` hashes the chat template actually in
+  effect (the fixed-template override when set, else the tokenizer's own).
+- `prompt_segments.source` vocabulary (gateway-native, exhaustive):
+  `render` (a from-scratch chat-template render — the first turn, or the
+  fallback when the prefix window was outrun), `prefix` (the reused
+  accumulated checkpoint = all previous prompt+completion tokens), `system`
+  / `user` / `tool` (one segment per appended role), `generation_prompt`.
+  Segments tile `prompt_token_ids` exactly; this is the loss-mask
+  construction material — no re-tokenization needed downstream.
+- `prefix_stable` — true iff this turn's `prompt_token_ids` extend the
+  previous **recorded** line's `prompt_token_ids + completion_token_ids`.
+  The baseline is the record stream itself, not the in-memory checkpoint: a
+  rollback applied for a turn that never produced a line (upstream error,
+  timeout, 409) surfaces as `false` on the next recorded turn. `false`
+  (retry rollback / history rewrite) means the turn must not be spliced
+  into one linear token stream.
+- `turn_index` — assigned by the sink, monotonic per session, and advances
+  even when a line fails to persist: a write/validation failure is logged
+  and leaves a detectable index gap instead of an undetectable missing turn.
+- `render_skew` (vLLM only) — a cheap per-turn probe comparing the render
+  endpoint's from-scratch ids against the gateway's accumulated prompt ids
+  (recorded, never enforced); `null` on sglang.
+
+Strictness guarantees: every line is strict JSON (`allow_nan=False` — never
+`NaN`/`Infinity` literals); token ids are Python ints and logprobs finite
+floats, validated at the sink — a violating record is dropped with a logged
+error and an index gap, never silently coerced.
+
+Closing a session appends one final `tito.session.v1` metadata line —
+`{"schema_version": "tito.session.v1", "session_id", "turns", "reason":
+"deleted" | "ttl_evicted" | "capacity_evicted" | "shutdown", "ts"}` — and
+closes the file. Without `--record-dir` nothing is written and the in-memory
+behavior is unchanged.
+
+## Session lifecycle
+
+Sessions live in memory until deleted. The intended rollout flow is
+**harvest, then delete**: run the rollout, `GET /sessions/{id}` to read the
+records + accumulated ids (and the mismatch audit), then
+`DELETE /sessions/{id}` — the delete finalizes the record file and frees the
+in-memory trajectory and its pool pin.
+
+For long-running gateways two optional guards bound memory:
+`--session-ttl-seconds` evicts sessions idle beyond the TTL, and
+`--max-sessions` LRU-evicts beyond a count. Eviction always finalizes the
+session's record file first and **never** touches a session with an in-flight
+request; capacity may transiently overflow rather than kill a live rollout.
+
+Interleaved turns on one session (a second request racing the first) are
+rejected with an explicit **409**: the losing turn's completion cannot be
+committed to a trajectory that changed under it, and silently serving an
+unrecorded response would be capture data loss. Callers retry on the current
+session state.
+
 ## HTTP surface
 
 - `POST /sessions` → `{session_id}`

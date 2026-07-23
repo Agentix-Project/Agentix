@@ -528,3 +528,72 @@ def test_unknown_backend_kind_fails_at_startup(tok, monkeypatch):
     args.backend_kind = "tgi"
     with pytest.raises(ValueError, match="backend_kind"):
         SessionServer(args, BackendPool([A]))
+
+
+@pytest.mark.asyncio
+async def test_vllm_turn_record_retains_logprobs_and_render_skew(tok, monkeypatch, tmp_path):
+    """The vLLM path used to validate-then-discard the generate logprobs;
+    with a record dir they must land in the tito.record.v1 line 1:1 with the
+    completion ids, alongside the per-turn render-skew probe (render's
+    from-scratch ids vs the gateway's accumulated prompt ids)."""
+    monkeypatch.setattr("agentix.tito.engine.session_app.load_tokenizer", lambda *a, **k: tok)
+    args = _args()
+    args.record_dir = str(tmp_path)
+    srv = SessionServer(args, BackendPool([A]))
+    replica = _VllmReplica()
+    srv._backend.client = httpx.AsyncClient(transport=httpx.MockTransport(replica.handler), timeout=5.0)
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url="http://gw", timeout=5.0)
+
+    sid = (await client.post("/sessions")).json()["session_id"]
+    r = await client.post(
+        f"/sessions/{sid}/v1/chat/completions", json=_CHAT, headers={"x-request-id": "req-v1"}
+    )
+    assert r.status_code == 200
+
+    lines = [json.loads(line) for line in (tmp_path / f"{sid}.jsonl").read_text().splitlines()]
+    (rec,) = [line for line in lines if line["schema_version"] == "tito.record.v1"]
+    prompt_ids = replica.calls["generate"][0]["token_ids"]
+
+    assert rec["backend_kind"] == "vllm"
+    assert rec["request_id"] == "req-v1"
+    assert rec["prompt_token_ids"] == prompt_ids
+    assert rec["completion_token_ids"] == [7, 8]
+    assert rec["completion_logprobs"] == [-0.1, -0.1]
+    assert len(rec["completion_logprobs"]) == len(rec["completion_token_ids"])
+    assert rec["finish_reason"] == "stop"
+    # render returned [99, 98] (a from-scratch render); the gateway generated
+    # from its own pretokenized ids -> skew observed, recorded, non-blocking.
+    assert rec["render_skew"] == {"equal": False, "first_divergence": 0}
+    assert rec["prefix_stable"] is True
+
+
+@pytest.mark.asyncio
+async def test_vllm_tool_call_record_carries_rewritten_finish_reason(tok, monkeypatch, tmp_path):
+    """The recorded finish_reason is what the agent actually received —
+    i.e. AFTER the gateway's tool_calls rewrite of derender's verbatim
+    "stop"."""
+    monkeypatch.setattr("agentix.tito.engine.session_app.load_tokenizer", lambda *a, **k: tok)
+    args = _args()
+    args.record_dir = str(tmp_path)
+    srv = SessionServer(args, BackendPool([A]))
+    replica = _VllmReplica()
+    replica.message = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [{
+            "id": "call_1", "type": "function",
+            "function": {"name": "compute", "arguments": "{}"},
+        }],
+    }
+    srv._backend.client = httpx.AsyncClient(transport=httpx.MockTransport(replica.handler), timeout=5.0)
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=srv.app), base_url="http://gw", timeout=5.0)
+
+    sid = (await client.post("/sessions")).json()["session_id"]
+    r = await client.post(f"/sessions/{sid}/v1/chat/completions", json={**_CHAT, "tools": _TOOLS})
+    assert r.status_code == 200
+    assert r.json()["choices"][0]["finish_reason"] == "tool_calls"
+
+    lines = [json.loads(line) for line in (tmp_path / f"{sid}.jsonl").read_text().splitlines()]
+    (rec,) = [line for line in lines if line["schema_version"] == "tito.record.v1"]
+    assert rec["finish_reason"] == "tool_calls"
+    assert rec["assistant_message"]["tool_calls"][0]["id"] == "call_1"

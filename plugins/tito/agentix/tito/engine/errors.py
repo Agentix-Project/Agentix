@@ -21,6 +21,15 @@ class MessageValidationError(SessionError):
     status_code: int = 400
 
 
+class ConcurrentSessionUpdateError(SessionError):
+    """The session changed (or was deleted) while the turn was in flight, so
+    the completed turn cannot be committed to the trajectory or recorded.
+    Silent data loss is unacceptable for production capture — the caller gets
+    an explicit 409 and must retry on the current session state."""
+
+    status_code: int = 409
+
+
 class TokenizationError(SessionError):
     """A TITO tokenization invariant was violated (e.g. pretokenized prefix mismatch)."""
 

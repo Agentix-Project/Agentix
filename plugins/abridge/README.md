@@ -132,16 +132,21 @@ Claude-speaking agent in front of an OpenAI-shaped recording gateway.
 ### Record the tunnel traffic
 
 `Recorder` wraps any handler client and appends one JSONL line per served
-call — `{ts, path, request, response}` — flushed as it goes, so the file is
-complete up to the last call even if the host dies mid-rollout. It exposes
-the wrapped client's routes and closes it on teardown, so it drops in
-transparently:
+call — `{ts, path, request_id, session_id?, request, response}` — flushed
+as it goes, so the file is complete up to the last call even if the host
+dies mid-rollout. It exposes the wrapped client's routes and closes it on
+teardown, so it drops in transparently:
 
 ```python
 from agentix.bridge import Proxy, Recorder
 
-proxy = Proxy(Recorder(client, "runs/rollout-42.jsonl"))
+proxy = Proxy(Recorder(client, "runs/rollout-42.jsonl", session_id="rollout-42"))
 ```
+
+The `request_id` in each row is the same id the transport stamps as
+`x-request-id` on the upstream hop (bound through a context var), so a
+message-level row joins a downstream token recorder's per-turn record;
+`session_id`, when given, tags every row with the rollout identity.
 
 ## Writing your own handler
 
@@ -257,6 +262,43 @@ code, so when you expose it to them (`--host`), also set
 `--require-key-prefix <secret>` (or pass `verify_key=` to
 `build_session_app`) so only keys your harness minted are served;
 everything else gets a 401.
+
+More serve options:
+
+* `--tito-url http://tito:30000` (mutually exclusive with
+  `--upstream-base-url`) — put the Anthropic shell in front of a
+  token-recording session gateway instead of a plain engine. The gateway
+  keeps one append-only linear conversation per session, while real
+  Anthropic agents multiplex several conversations over one key (helper
+  calls, subagents, reruns), so each caller session **demuxes by
+  conversation**: requests are keyed by the canonicalized
+  `(system, first user message)` pair, and each distinct key gets its own
+  `AnthropicToOpenAI(SessionForward(tito_url).handler())` — its own
+  gateway session. Known boundaries (by design, fail loudly rather than
+  silently): a mid-conversation history rewrite that keeps the opening
+  (deep compaction) still lands in the same gateway session and rides the
+  gateway's rollback / from-scratch paths (rewrites past its rollback
+  window are its documented 400); two genuinely different conversations
+  with a byte-identical opening collide into one session; and a caller
+  key evicted by the serve LRU (`--max-sessions`) mid-rollout continues
+  in fresh gateway sessions — the gateway-side capture splits there
+  (`turn_index` restarts), so size `--max-sessions` above your concurrent
+  rollout-key count.
+* `--tito-delete-on-evict` — reap a caller session's gateway sessions
+  when it closes (LRU eviction or shutdown). Default off: gateway
+  sessions stay alive for harvest and the harvester deletes them.
+* `--record-dir DIR` (either mode) — wrap each session's client in a
+  `Recorder` writing `DIR/<session_id>.jsonl`; rows carry `session_id`,
+  `request_id`, and (in tito mode) `gateway_session_id` — the gateway's
+  own session id, i.e. the `session_id` in its token records. The same
+  `request_id` reaches the upstream as `x-request-id`, so message rows
+  join the gateway's token records per call as well as per session.
+
+`GET /_health` reports `translation_spec_sha` — one SHA-256 over the
+source of the Anthropic↔OpenAI transform module and both client modules
+that shape the upstream body (assistant replay, forced non-streaming,
+model override, operator params) — so downstream data contracts can pin
+the exact translation their captured trajectories were produced under.
 
 Programmatic surface in `agentix.bridge.serve`: `build_app(*clients)`
 (shared session) and `build_session_app(factory)` (one client per

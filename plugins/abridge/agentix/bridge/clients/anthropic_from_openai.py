@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from agentix.utils import trace
 
+from .._request_id import get_or_mint_request_id
 from ..proxy import (
     AbridgeError,
     ClientResponse,
@@ -104,7 +105,9 @@ class AnthropicFromOpenAIClient:
         openai_body = anthropic_messages_to_openai(request.body, upstream_model=self._model)
         openai_body.update(self._upstream_params)
         openai_body["stream"] = False
-        record_id = uuid.uuid4().hex
+        # Reuses the id a wrapping capture layer (Recorder) bound for this
+        # call, so its JSONL row and the upstream header share one id.
+        record_id = get_or_mint_request_id()
         extra_headers = {
             "x-session-id": self.session_id,
             "x-request-id": record_id,

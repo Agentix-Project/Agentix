@@ -39,11 +39,22 @@ class Backend(Protocol):
 
 @dataclass(frozen=True)
 class TurnHarvest:
-    """The token-exact outcome of a successful chat turn."""
+    """The token-exact outcome of a successful chat turn.
+
+    ``completion_logprobs`` pairs 1:1 with ``completion_token_ids`` — the
+    sampled-token logprobs both backends are forced to return (they are the
+    per-token cross-check AND the recorded rollout logprobs, so they are
+    retained here, never validated-then-discarded). ``render_token_ids`` is
+    vLLM-only: the render endpoint's from-scratch prompt ids, kept for the
+    cheap per-turn skew probe against the gateway's accumulated prompt ids.
+    """
 
     response: dict
     assistant_message: dict
     completion_token_ids: list[int]
+    completion_logprobs: list[float]
+    finish_reason: str | None = None
+    render_token_ids: list[int] | None = None
 
 
 @dataclass(frozen=True)
@@ -146,8 +157,10 @@ class SglangUpstream:
                 f"len(output_token_logprobs)={len(output_token_logprobs)} != completion_tokens={completion_tokens}"
             )
         try:
+            # sglang entries are [logprob, token_id, text].
             completion_token_ids = [t[1] for t in output_token_logprobs]
-        except (TypeError, IndexError, KeyError) as e:
+            completion_logprobs = [float(t[0]) for t in output_token_logprobs]
+        except (TypeError, ValueError, IndexError, KeyError) as e:
             raise UpstreamResponseError(f"malformed output_token_logprobs entry: {e}") from e
 
         return ChatTurn(
@@ -156,6 +169,8 @@ class SglangUpstream:
                 response=response,
                 assistant_message=assistant_message,
                 completion_token_ids=completion_token_ids,
+                completion_logprobs=completion_logprobs,
+                finish_reason=_finish_reason(choice),
             ),
         )
 
@@ -219,6 +234,12 @@ class VllmUpstream:
         if render_result["status_code"] != 200:
             return ChatTurn(proxy_result=render_result)
         generate_request = _parse_response_object(render_result["response_body"])
+        # Keep render's from-scratch ids for the recorded skew probe before
+        # they are discarded from the generate request below.
+        rendered = generate_request.get("token_ids")
+        render_token_ids = (
+            list(rendered) if isinstance(rendered, list) and all(isinstance(t, int) for t in rendered) else None
+        )
         # The whole point: generate from the session's accumulated prompt ids,
         # not render's from-scratch re-render of the message history.
         generate_request["token_ids"] = prompt_token_ids
@@ -232,7 +253,7 @@ class VllmUpstream:
         if generate_result["status_code"] != 200:
             return ChatTurn(proxy_result=generate_result)
         generate_response = _parse_response_object(generate_result["response_body"])
-        completion_token_ids = _harvest_generate_token_ids(generate_response)
+        completion_token_ids, completion_logprobs = _harvest_generate_tokens(generate_response)
 
         derender_request = {
             "model": model,
@@ -267,11 +288,24 @@ class VllmUpstream:
                 response=response,
                 assistant_message=assistant_message,
                 completion_token_ids=completion_token_ids,
+                completion_logprobs=completion_logprobs,
+                # After the tool-call rewrite: the recorded finish_reason is
+                # what the agent actually received.
+                finish_reason=_finish_reason(_first_choice(response)),
+                render_token_ids=render_token_ids,
             ),
         )
 
 
-def _harvest_generate_token_ids(generate_response: dict) -> list[int]:
+def _finish_reason(choice: dict) -> str | None:
+    reason = choice.get("finish_reason")
+    return reason if isinstance(reason, str) else None
+
+
+def _harvest_generate_tokens(generate_response: dict) -> tuple[list[int], list[float]]:
+    """Completion (token_ids, logprobs) from a generate response — logprobs
+    are the sampled-token values from the SAME forward pass, kept for the
+    turn record, not just validated."""
     choice = _first_choice(generate_response)
     token_ids = choice.get("token_ids")
     if not isinstance(token_ids, list) or not token_ids or not all(isinstance(t, int) for t in token_ids):
@@ -287,7 +321,11 @@ def _harvest_generate_token_ids(generate_response: dict) -> list[int]:
         raise UpstreamResponseError(
             f"len(logprobs.content)={len(content)} != len(token_ids)={len(token_ids)}"
         )
-    return list(token_ids)
+    try:
+        completion_logprobs = [float(entry["logprob"]) for entry in content]
+    except (TypeError, ValueError, KeyError) as e:
+        raise UpstreamResponseError(f"malformed logprobs.content entry: {e}") from e
+    return list(token_ids), completion_logprobs
 
 
 def get_upstream(kind: str) -> UpstreamAdapter:
