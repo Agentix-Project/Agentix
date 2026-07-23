@@ -35,6 +35,7 @@ from collections.abc import Mapping
 
 import httpx
 
+from ._request_id import get_or_mint_request_id
 from .proxy import AbridgeError, ClientResponse, Handler, Request
 
 logger = logging.getLogger(__name__)
@@ -132,7 +133,9 @@ class Forward:
         return _OwnedHandler(routes[path], self)
 
     async def _forward(self, path: str, request: Request) -> ClientResponse:
-        record_id = uuid.uuid4().hex
+        # Reuses the id a wrapping capture layer (Recorder) bound for this
+        # call, so its JSONL row and the sidecar's token record share one id.
+        record_id = get_or_mint_request_id()
         headers = {
             **self._headers,
             "x-session-id": self.session_id,

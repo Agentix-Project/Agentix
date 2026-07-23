@@ -27,9 +27,27 @@ when they share a network with the server, pass `verify_key=` (CLI:
 `--require-key-prefix`) so only keys your harness minted are served and
 everything else gets a 401.
 
-Anything beyond grouping (multi-backend routing, token capture) is the
-full gateway's job — this is deliberately just "the tunnel without the
-tunnel", and the tunnel remains the mode for sandboxes with no egress.
+Two upstream modes, mutually exclusive:
+
+* `--upstream-base-url` — plain OpenAI-compatible engine; translation +
+  transport live in `AnthropicFromOpenAIClient` (the openai SDK owns the
+  HTTP). The original mode, unchanged.
+* `--tito-url` — a token-recording session gateway (the TITO gateway):
+  each caller session composes
+  `AnthropicToOpenAI(SessionForward(tito_url).handler(), model=...)`, so
+  the gateway sees the OpenAI chat body, owns render/generate and the
+  token record, and one abridge caller session maps to one gateway
+  session. Token capture stays the gateway's job; this server only adds
+  the Anthropic shell and identity stamping.
+
+`--record-dir` (either mode) wraps each session's client in a `Recorder`
+writing message-level rows to `<record_dir>/<session_id>.jsonl`; rows
+carry `session_id` + `request_id`, and the same `request_id` is stamped
+as `x-request-id` on the upstream hop so message rows join token records.
+
+`GET /_health` reports `translation_spec_sha` — the SHA-256 of the
+Anthropic<->OpenAI transform module — so downstream data contracts can
+pin the exact translation in effect.
 
     OPENAI_API_KEY=EMPTY agentix-bridge-serve \
         --upstream-base-url http://vllm:8000/v1 --upstream-model qwen3-32b \
@@ -47,6 +65,7 @@ from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
@@ -253,7 +272,19 @@ def _session_resolver(table: _SessionTable, path: str) -> Resolver:
 
 
 async def _health() -> dict[str, str]:
-    return {"status": "ok"}
+    body = {"status": "ok"}
+    # The translation contract pin: SHA-256 of the transform module source.
+    # Downstream data contracts compare it against the value their captured
+    # trajectories were produced under. Lazy import: the transforms are
+    # SDK-free, but apps serving only custom handlers shouldn't fail health
+    # over a broken clients package.
+    try:
+        from .clients._anthropic_transforms import TRANSLATION_SPEC_SHA
+
+        body["translation_spec_sha"] = TRANSLATION_SPEC_SHA
+    except ImportError:  # pragma: no cover - clients package always ships
+        pass
+    return body
 
 
 class _UnknownKey(Exception):
@@ -313,9 +344,7 @@ async def _read_json(request: FastAPIRequest) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def main(argv: list[str] | None = None) -> None:
-    """`agentix-bridge-serve` — an Anthropic-speaking front for an
-    OpenAI-compatible engine, one session per caller key."""
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agentix-bridge-serve",
         description=(
@@ -328,6 +357,17 @@ def main(argv: list[str] | None = None) -> None:
         "--upstream-base-url",
         default=os.environ.get("OPENAI_BASE_URL"),
         help="OpenAI-compatible endpoint, e.g. http://vllm:8000/v1 (env: OPENAI_BASE_URL)",
+    )
+    parser.add_argument(
+        "--tito-url",
+        default=os.environ.get("TITO_URL"),
+        help=(
+            "session-scoped token-recording gateway (the TITO gateway), e.g. "
+            "http://tito:30000 — mutually exclusive with --upstream-base-url: the "
+            "gateway becomes the upstream, owns render/generate and the token "
+            "record, and each caller session maps to one gateway session "
+            "(env: TITO_URL)"
+        ),
     )
     parser.add_argument(
         "--upstream-api-key",
@@ -358,22 +398,71 @@ def main(argv: list[str] | None = None) -> None:
         help="openai SDK retries per upstream call; keep total occupancy = timeout x (1+retries) explicit",
     )
     parser.add_argument("--max-sessions", type=int, default=256)
+    parser.add_argument(
+        "--record-dir",
+        default=os.environ.get("ABRIDGE_RECORD_DIR"),
+        help=(
+            "record every served (request, response) pair to "
+            "<record-dir>/<session_id>.jsonl via Recorder — message-level rows with "
+            "session_id + request_id, flushed per line (env: ABRIDGE_RECORD_DIR)"
+        ),
+    )
+    return parser
+
+
+def _client_factory(args: argparse.Namespace) -> Callable[[str], Client]:
+    """The per-caller-session client for the chosen upstream mode, wrapped in
+    a `Recorder` when `--record-dir` is set."""
+    if args.tito_url:
+        # Composition seam (transport-blind): the TITO gateway sees the
+        # OpenAI chat body and owns tokens + recording; abridge adds only the
+        # Anthropic shell. One SessionForward per caller session == one
+        # gateway session per rollout key.
+        from .clients import AnthropicToOpenAI
+        from .forward import SessionForward
+
+        def build(session_id: str) -> Client:
+            forward = SessionForward(args.tito_url, paths=["/v1/chat/completions"], timeout=args.upstream_timeout)
+            return AnthropicToOpenAI(forward.handler(), model=args.upstream_model)
+    else:
+        # Lazy: the translation client needs the `openai` extra.
+        from .clients import AnthropicFromOpenAIClient
+
+        def build(session_id: str) -> Client:
+            return AnthropicFromOpenAIClient(
+                base_url=args.upstream_base_url,
+                api_key=args.upstream_api_key,
+                model=args.upstream_model,
+                timeout=args.upstream_timeout,
+                max_retries=args.upstream_max_retries,
+                session_id=session_id,
+            )
+
+    if not args.record_dir:
+        return build
+
+    from .recorder import Recorder
+
+    record_dir = Path(args.record_dir)
+
+    def build_recorded(session_id: str) -> Client:
+        return Recorder(build(session_id), record_dir / f"{session_id}.jsonl", session_id=session_id)
+
+    return build_recorded
+
+
+def main(argv: list[str] | None = None) -> None:
+    """`agentix-bridge-serve` — an Anthropic-speaking front for an
+    OpenAI-compatible engine or a token-recording session gateway, one
+    session per caller key."""
+    parser = _build_parser()
     args = parser.parse_args(argv)
-    if not args.upstream_base_url:
-        parser.error("--upstream-base-url (or OPENAI_BASE_URL) is required")
+    if args.upstream_base_url and args.tito_url:
+        parser.error("--upstream-base-url and --tito-url are mutually exclusive: the gateway IS the upstream")
+    if not args.upstream_base_url and not args.tito_url:
+        parser.error("one of --upstream-base-url (env OPENAI_BASE_URL) or --tito-url (env TITO_URL) is required")
 
-    # Lazy: the translation client needs the `openai` extra.
-    from .clients import AnthropicFromOpenAIClient
-
-    def factory(session_id: str) -> AnthropicFromOpenAIClient:
-        return AnthropicFromOpenAIClient(
-            base_url=args.upstream_base_url,
-            api_key=args.upstream_api_key,
-            model=args.upstream_model,
-            timeout=args.upstream_timeout,
-            max_retries=args.upstream_max_retries,
-            session_id=session_id,
-        )
+    factory = _client_factory(args)
 
     verify_key: Callable[[str], bool] | None = None
     if args.require_key_prefix:

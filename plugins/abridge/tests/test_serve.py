@@ -40,11 +40,26 @@ class EchoClient:
 
 def test_build_app_serves_handlers_and_health() -> None:
     tc = TestClient(build_app(EchoClient()))
-    assert tc.get("/_health").json() == {"status": "ok"}
+    health = tc.get("/_health").json()
+    assert health["status"] == "ok"
     r = tc.post("/v1/echo", json={"x": 1})
     assert r.status_code == 200
     assert r.json()["echo"] == {"x": 1}
     assert tc.post("/nope", json={}).status_code == 404
+
+
+def test_health_pins_the_translation_spec() -> None:
+    """`/_health` reports the SHA-256 of the Anthropic<->OpenAI transform
+    module, so downstream data contracts can pin the exact translation their
+    captured trajectories were produced under."""
+    import hashlib
+    from pathlib import Path
+
+    import agentix.bridge.clients._anthropic_transforms as transforms
+
+    health = TestClient(build_app(EchoClient())).get("/_health").json()
+    expected = hashlib.sha256(Path(transforms.__file__).read_bytes()).hexdigest()
+    assert health["translation_spec_sha"] == expected == transforms.TRANSLATION_SPEC_SHA
 
 
 def test_handler_errors_become_wire_errors() -> None:
