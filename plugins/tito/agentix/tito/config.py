@@ -34,6 +34,16 @@ class TITOGatewayConfig:
     router_timeout: float = 600.0
     backend_probe_candidates: tuple[str, ...] = field(default_factory=lambda: DEFAULT_BACKEND_PROBE_CANDIDATES)
     backend_probe_timeout: float = 0.25
+    # Durable capture: when set, every committed turn appends one
+    # `tito.record.v1` line to `<record_dir>/<session_id>.jsonl` (flushed per
+    # turn). Unset = in-memory trajectories only (unchanged default).
+    record_dir: str | None = None
+    # Long-running-gateway lifecycle (both optional, default off): evict
+    # sessions idle beyond the TTL, and LRU-evict beyond max_sessions.
+    # Eviction flushes+finalizes the session's record file first and never
+    # touches a session with in-flight requests.
+    session_ttl_seconds: float | None = None
+    max_sessions: int | None = None
 
     def __post_init__(self) -> None:
         if not self.hf_checkpoint:
@@ -53,6 +63,11 @@ class TITOGatewayConfig:
         if self.backend_kind not in ("sglang", "vllm"):
             raise ValueError(f"backend_kind must be 'sglang' or 'vllm'; got {self.backend_kind!r}")
 
+        if self.session_ttl_seconds is not None and self.session_ttl_seconds <= 0:
+            raise ValueError(f"session_ttl_seconds must be > 0; got {self.session_ttl_seconds!r}")
+        if self.max_sessions is not None and self.max_sessions < 1:
+            raise ValueError(f"max_sessions must be >= 1; got {self.max_sessions!r}")
+
     @classmethod
     def from_cli_values(
         cls,
@@ -71,6 +86,9 @@ class TITOGatewayConfig:
         trust_remote_code: bool = False,
         backend_probe_candidates: list[str] | None = None,
         backend_probe_timeout: float = 0.25,
+        record_dir: str | None = None,
+        session_ttl_seconds: float | None = None,
+        max_sessions: int | None = None,
     ) -> TITOGatewayConfig:
         return cls(
             hf_checkpoint=hf_checkpoint,
@@ -87,6 +105,9 @@ class TITOGatewayConfig:
             router_timeout=router_timeout,
             backend_probe_candidates=tuple(backend_probe_candidates or DEFAULT_BACKEND_PROBE_CANDIDATES),
             backend_probe_timeout=backend_probe_timeout,
+            record_dir=record_dir,
+            session_ttl_seconds=session_ttl_seconds,
+            max_sessions=max_sessions,
         )
 
     def as_session_args(self):
@@ -103,4 +124,7 @@ class TITOGatewayConfig:
             session_server_ip=self.session_server_ip,
             session_server_port=self.session_server_port,
             router_timeout=self.router_timeout,
+            record_dir=self.record_dir,
+            session_ttl_seconds=self.session_ttl_seconds,
+            max_sessions=self.max_sessions,
         )

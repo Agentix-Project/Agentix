@@ -104,6 +104,12 @@ class SessionServer:
         self._backend = _PooledBackend(args, pool)
         self.app.router.on_shutdown.append(self._backend.aclose)
         setup_session_routes(self.app, self._backend, args)
+        # Registry eviction (TTL / max-sessions) ends a session exactly like
+        # DELETE does — drop its sticky pool pin too, so a reused id can't
+        # inherit a stale replica assignment.
+        registry = getattr(self.app.state, "tito_registry", None)
+        if registry is not None:
+            registry.on_evict = pool.forget
         self.app.middleware("http")(self._forget_on_delete)
 
     async def _forget_on_delete(self, request: Request, call_next: Any) -> Response:

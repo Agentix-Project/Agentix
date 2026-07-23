@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse
 from starlette.responses import Response
 
 from .errors import (
+    ConcurrentSessionUpdateError,
     MessageValidationError,
     SessionError,
     SessionNotFoundError,
@@ -30,7 +31,8 @@ from .errors import (
 )
 from .pretokenize import get_tito_tokenizer
 from .processing import load_tokenizer
-from .trajectory import GetSessionResponse, SessionRecord, SessionRegistry
+from .record import build_turn_record
+from .trajectory import GetSessionResponse, LinearTrajectory, SessionRecord, SessionRegistry
 from .upstream import Backend, get_upstream
 
 logger = logging.getLogger(__name__)
@@ -64,8 +66,12 @@ def setup_session_routes(app: FastAPI, backend: Backend, args: Any) -> None:
         return
     # Exposed for operational introspection (session counts, tests).
     app.state.tito_registry = registry
+    # Finalize every open per-session record file on shutdown — the durable
+    # capture must be complete and closed however the process exits cleanly.
+    app.router.on_shutdown.append(registry.close)
 
     adapter = get_upstream(getattr(args, "backend_kind", "sglang"))
+    backend_kind = str(getattr(args, "backend_kind", "sglang") or "sglang")
 
     instance_id = getattr(args, "session_server_instance_id", None)
 
@@ -117,10 +123,22 @@ def setup_session_routes(app: FastAPI, backend: Backend, args: Any) -> None:
 
     @app.post("/sessions/{session_id}/v1/chat/completions")
     async def chat_completions(request: Request, session_id: str) -> Response:
+        # Opportunistic lifecycle sweep: a long-running gateway must not need
+        # new sessions to arrive before idle ones expire.
+        registry.sweep()
         session = registry.get_session(session_id)
         if session.closing:
             raise SessionNotFoundError(f"session not found: session_id={session_id}")
 
+        # In-flight guard for the WHOLE turn (including the un-locked
+        # upstream exchange): the registry never evicts while this is held.
+        session.inflight += 1
+        try:
+            return await _chat_turn(request, session_id, session)
+        finally:
+            session.inflight -= 1
+
+    async def _chat_turn(request: Request, session_id: str, session: LinearTrajectory) -> Response:
         # Read + parse the body BEFORE taking the lock: the read lasts as long
         # as the client's upload — under the lock, one dribbling client would
         # wedge DELETE and every other operation on the session.
@@ -140,9 +158,10 @@ def setup_session_routes(app: FastAPI, backend: Backend, args: Any) -> None:
             if session.closing:
                 raise SessionNotFoundError(f"session not found: session_id={session_id}")
             request_messages = request_body.get("messages", [])
-            prompt_token_ids = session.prepare_pretokenized(
+            prepared = session.prepare_prompt(
                 request_messages, tools=request_body.get("tools"), tito_tokenizer=registry.tito_tokenizer
             )
+            prompt_token_ids = prepared.token_ids
             # `version` advances on BOTH update and rollback; `num_assistant`
             # would be ABA-prone (a concurrent rollback+update restores it).
             expected_version = session.version
@@ -156,12 +175,23 @@ def setup_session_routes(app: FastAPI, backend: Backend, args: Any) -> None:
         harvest = turn.harvest
 
         # Phase 3: append the trajectory checkpoint (lock held briefly).
+        # A session that changed (or was deleted) while the turn was in
+        # flight can NOT absorb this completion — the trajectory would lie
+        # and the turn would silently vanish from the capture. Explicit 409:
+        # the tokens the agent would have received are discarded, the caller
+        # retries against the current session state. Interleave turns on one
+        # session was never supported; now it is loudly unsupported.
         async with session.lock:
             if session.closing:
-                return backend.build_proxy_response(turn.proxy_result)
+                raise ConcurrentSessionUpdateError(
+                    f"session was deleted while the turn was in flight: session_id={session_id}; "
+                    "the completed turn was not recorded"
+                )
             if session.version != expected_version:
-                logger.warning("session %s changed during proxy; skipping state update", session_id)
-                return backend.build_proxy_response(turn.proxy_result)
+                raise ConcurrentSessionUpdateError(
+                    f"session changed while the turn was in flight: session_id={session_id}; "
+                    "interleaved turns on one session are rejected — retry on the current state"
+                )
             session.update_pretokenized_state(
                 request_messages,
                 harvest.assistant_message,
@@ -179,6 +209,27 @@ def setup_session_routes(app: FastAPI, backend: Backend, args: Any) -> None:
                     response=harvest.response,
                 )
             )
+            if registry.record_sink is not None:
+                # Inside the lock so file order == trajectory order. Sink
+                # failures are logged, never fail the served turn.
+                registry.record_sink.append_turn(
+                    session_id,
+                    build_turn_record(
+                        session_id=session_id,
+                        request_id=request.headers.get("x-request-id"),
+                        model=request_body.get("model"),
+                        backend_kind=backend_kind,
+                        prompt_token_ids=prompt_token_ids,
+                        prompt_segments=prepared.segments,
+                        prefix_stable=prepared.prefix_stable,
+                        completion_token_ids=harvest.completion_token_ids,
+                        completion_logprobs=harvest.completion_logprobs,
+                        assistant_message=harvest.assistant_message,
+                        finish_reason=harvest.finish_reason,
+                        tokenizer_fingerprint=registry.tokenizer_fingerprint,
+                        render_token_ids=harvest.render_token_ids,
+                    ),
+                )
         return backend.build_proxy_response(turn.proxy_result)
 
     @app.api_route("/sessions/{session_id}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])

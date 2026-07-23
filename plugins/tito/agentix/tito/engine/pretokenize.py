@@ -138,6 +138,37 @@ class TITOTokenizer:
     ) -> list[int]:
         return self._tokenize_rendered_suffix([_DUMMY_SYSTEM], [appended_message], tools=tools)
 
+    def appended_segments(
+        self,
+        old_messages: list[dict[str, Any]],
+        new_messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+    ) -> list[tuple[str, list[int]]]:
+        """Per-segment incremental token IDs for the non-assistant messages
+        appended after the pretokenized prefix, as ``(source, token_ids)``
+        pairs — one per appended role segment plus a final
+        ``("generation_prompt", ...)`` entry. The flat concatenation equals
+        `tokenize_additional_non_assistant`; the segment boundaries feed the
+        per-turn record's ``prompt_segments``."""
+        assert_messages_append_only_with_allowed_role(old_messages, new_messages, self.allowed_append_roles)
+        appended_messages = new_messages[len(old_messages):]
+        segments: list[tuple[str, list[int]]] = []
+        for segment in self._split_appended_segments(appended_messages):
+            role = segment[0]["role"]
+            if role == "tool":
+                segments.append((role, self._tokenize_tool_segment(segment, tools)))
+            elif role in ("user", "system"):
+                segments.append((role, self._tokenize_user_and_system_segment(segment[0], tools)))
+            else:
+                raise ValueError(f"unsupported appended role for TITO tokenization: {role}")
+        segments.append(
+            (
+                "generation_prompt",
+                self._tokenize_rendered_suffix(new_messages, [], tools=tools, add_generation_prompt=True),
+            )
+        )
+        return segments
+
     def tokenize_additional_non_assistant(
         self,
         old_messages: list[dict[str, Any]],
@@ -146,20 +177,13 @@ class TITOTokenizer:
     ) -> list[int]:
         """Incremental token IDs (incl. the next generation prompt) for the
         non-assistant messages appended after the pretokenized prefix."""
-        assert_messages_append_only_with_allowed_role(old_messages, new_messages, self.allowed_append_roles)
-        appended_messages = new_messages[len(old_messages):]
-        incremental: list[int] = []
-        for segment in self._split_appended_segments(appended_messages):
-            role = segment[0]["role"]
-            if role == "tool":
-                incremental.extend(self._tokenize_tool_segment(segment, tools))
-            elif role in ("user", "system"):
-                incremental.extend(self._tokenize_user_and_system_segment(segment[0], tools))
-            else:
-                raise ValueError(f"unsupported appended role for TITO tokenization: {role}")
-        return incremental + self._tokenize_rendered_suffix(
-            new_messages, [], tools=tools, add_generation_prompt=True
-        )
+        return [tid for _, ids in self.appended_segments(old_messages, new_messages, tools) for tid in ids]
+
+    def fix_prefix(self, pretokenized_token_ids: list[int]) -> list[int]:
+        """Canonicalize a stored prefix before merging (returns a new list).
+        The base engine is a no-op; a model subclass re-inserts boundary
+        tokens the model omits when it stops (see `Qwen3TITOTokenizer`)."""
+        return list(pretokenized_token_ids)
 
     def merge_tokens(
         self,
@@ -168,14 +192,15 @@ class TITOTokenizer:
         pretokenized_token_ids: list[int],
         tools: list[dict[str, Any]] | None = None,
     ) -> list[int]:
-        """Default: concatenate the stored prefix with the incremental tokens."""
+        """Default: concatenate the (canonicalized) stored prefix with the
+        incremental tokens."""
         incremental = self.tokenize_additional_non_assistant(old_messages, new_messages, tools)
-        return list(pretokenized_token_ids) + incremental
+        return self.fix_prefix(pretokenized_token_ids) + incremental
 
 
 class Qwen3TITOTokenizer(TITOTokenizer):
     """Qwen3: the model stops at `<|im_end|>` without the trailing `\\n` the template
-    emits, so `merge_tokens` re-inserts it so the stored prefix stays canonical."""
+    emits, so `fix_prefix` re-inserts it so the stored prefix stays canonical."""
 
     reasoning_parser = "qwen3"
     tool_call_parser = "qwen25"
@@ -201,18 +226,11 @@ class Qwen3TITOTokenizer(TITOTokenizer):
         self._im_end_id: int = tokenizer.convert_tokens_to_ids("<|im_end|>")
         self.trailing_token_ids = frozenset({self._newline_id})
 
-    def merge_tokens(
-        self,
-        old_messages: list[dict[str, Any]],
-        new_messages: list[dict[str, Any]],
-        pretokenized_token_ids: list[int],
-        tools: list[dict[str, Any]] | None = None,
-    ) -> list[int]:
-        incremental = self.tokenize_additional_non_assistant(old_messages, new_messages, tools)
+    def fix_prefix(self, pretokenized_token_ids: list[int]) -> list[int]:
         prefix = list(pretokenized_token_ids)
         if prefix and prefix[-1] == self._im_end_id:
             prefix.append(self._newline_id)
-        return prefix + incremental
+        return prefix
 
 
 _QWEN3_FIXED = "qwen3_fixed.jinja"

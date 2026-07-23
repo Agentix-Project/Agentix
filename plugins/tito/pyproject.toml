@@ -67,3 +67,6 @@ namespace = true
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-q"
+markers = [
+    "network: downloads a real tokenizer from the Hugging Face Hub — skips cleanly offline",
+]

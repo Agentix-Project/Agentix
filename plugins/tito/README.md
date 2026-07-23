@@ -78,6 +78,54 @@ tokenizer's own template). `--backend-kind` selects the backend token dialect
 a local backend (see `agentix.tito.discovery`). Run `agentix-tito serve -h`
 for the full list.
 
+## Per-turn record persistence
+
+With `--record-dir DIR` (env `TITO_RECORD_DIR`), every committed turn appends
+one `tito.record.v1` JSON line to `DIR/<session_id>.jsonl` and flushes it —
+the file is complete up to the last committed turn even if the process dies
+mid-rollout. Each line carries the exact token truth of one turn:
+
+- `prompt_token_ids` / `completion_token_ids` / `completion_logprobs`
+  (sampled-token logprobs from the same forward pass, 1:1 with the ids);
+- `prompt_segments` — `{start, end, source}` spans over the prompt ids
+  (`render`, `prefix`, per appended role, `generation_prompt`): the material
+  a trainer needs to build a loss mask without re-tokenizing anything;
+- `prefix_stable` — whether this prompt extends the previous committed
+  checkpoint; `false` (retry rollback / history rewrite) means the turn must
+  not be spliced into one linear token stream;
+- `request_id` (echoed from the caller's `x-request-id` header), `model`,
+  `backend_kind`, `finish_reason`, `assistant_message`, and a
+  `tokenizer_fingerprint` (`checkpoint` + `chat_template_sha256`) pinning the
+  render rules;
+- `render_skew` (vLLM only) — a cheap per-turn probe comparing the render
+  endpoint's from-scratch ids against the gateway's accumulated prompt ids
+  (recorded, never enforced).
+
+Closing a session appends one final `tito.session.v1` metadata line
+(`reason`: `deleted` / `ttl_evicted` / `capacity_evicted` / `shutdown`) and
+closes the file. Without `--record-dir` nothing is written and the in-memory
+behavior is unchanged.
+
+## Session lifecycle
+
+Sessions live in memory until deleted. The intended rollout flow is
+**harvest, then delete**: run the rollout, `GET /sessions/{id}` to read the
+records + accumulated ids (and the mismatch audit), then
+`DELETE /sessions/{id}` — the delete finalizes the record file and frees the
+in-memory trajectory and its pool pin.
+
+For long-running gateways two optional guards bound memory:
+`--session-ttl-seconds` evicts sessions idle beyond the TTL, and
+`--max-sessions` LRU-evicts beyond a count. Eviction always finalizes the
+session's record file first and **never** touches a session with an in-flight
+request; capacity may transiently overflow rather than kill a live rollout.
+
+Interleaved turns on one session (a second request racing the first) are
+rejected with an explicit **409**: the losing turn's completion cannot be
+committed to a trajectory that changed under it, and silently serving an
+unrecorded response would be capture data loss. Callers retry on the current
+session state.
+
 ## HTTP surface
 
 - `POST /sessions` → `{session_id}`

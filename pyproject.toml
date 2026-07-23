@@ -168,7 +168,10 @@ python_files = ["test_*.py"]
 # `e2e` tests build a real bundle image (need docker, take minutes).
 # `addopts` excludes them by default — the `e2e` CI job runs them with
 # `-m e2e`, which overrides this.
-markers = ["e2e: builds a real bundle image — needs docker, slow"]
+markers = [
+    "e2e: builds a real bundle image — needs docker, slow",
+    "network: downloads a real tokenizer from the Hugging Face Hub — skips cleanly offline",
+]
 # Coverage runs against `agentix` and the plugin packages; the
 # subprocess worker (`agentix/runtime/server/worker/process.py`) is
 # tracked separately because it executes in a child process and the
