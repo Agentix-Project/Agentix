@@ -9,9 +9,10 @@ against the CAPE source) — no network beyond 127.0.0.1, no real `cape`.
 Real-contract facts the fake reproduces:
 
   * `run` parses argv with the real flag table: `--pool` / `--user` /
-    `--task-id` are required and there is NO `--workspace` flag —
-    violations exit 2 with an argparse-style usage error, exactly like
-    the real parser.
+    `--task-id` are required and there is NO `--workspace` and NO
+    `--gpu-mode` flag (removed upstream; requests inherit
+    exclusive/shared from the target pool) — violations exit 2 with an
+    argparse-style usage error, exactly like the real parser.
   * Request ids look like the real ones (`req-%06d`).
   * `logs` returns EMPTY stdout/stderr while the request is running
     (CAPE has no streaming logs); output appears only once the request
@@ -34,9 +35,11 @@ Real-contract facts the fake reproduces:
     `FAKE_CAPE_SERVER_STATE` overrides the server request's state.
 
 The fake keeps the status JSON minimal ({state, request_id,
-exit_code}) — the provider only ever reads `state` and the
-`request_id` echo. `cape wait` is deliberately not modeled: the
-provider must never call it (its exit code is untrustworthy).
+exit_code}) plus the new upstream cotenancy fields (`gpu_mode`,
+`gpu_cotenant_count`, `gpu_cotenant_counts`) which the provider must
+tolerate — it only ever reads `state` and the `request_id` echo.
+`cape wait` is deliberately not modeled: the provider must never call
+it (its exit code is untrustworthy).
 """
 
 from __future__ import annotations
@@ -130,7 +133,9 @@ def build_parser():
     run.add_argument("--hard-gpu-enforcement", action="store_true")
     run.add_argument("--port", type=int, action="append", default=[])
     run.add_argument("--locality")
-    run.add_argument("--gpu-mode", default="whole")
+    # NO --gpu-mode: upstream removed the flag (requests inherit
+    # exclusive/shared from the target pool), so sending it makes
+    # argparse exit 2 with a usage error, like any unknown flag.
     run.add_argument("--isolation-policy", default="default")
     run.add_argument("--cwd")
     run.add_argument("--env", action="append", default=[])
@@ -204,6 +209,12 @@ def do_status(args):
         record["exit_code"] = 124
     elif state in TERMINAL:
         record["exit_code"] = 0
+    # New upstream cotenancy fields: gpu_mode is DERIVED from the target
+    # pool (null | "exclusive" | "shared"); the provider must tolerate
+    # (ignore) all three.
+    record["gpu_mode"] = None
+    record["gpu_cotenant_count"] = 0
+    record["gpu_cotenant_counts"] = []
     print(json.dumps(record))
 
 
@@ -397,7 +408,9 @@ async def test_create_returns_sandbox_and_emits_real_run_face(cape_env: dict[str
         assert "--cwd" not in argv
         assert _flag(argv, "--image") == "docker://task-image:1"
         assert _flag(argv, "--gpus") == "2"
-        assert _flag(argv, "--gpu-mode") == "whole"
+        # Upstream removed --gpu-mode (pool-level exclusive/shared);
+        # sending it would make the real CLI exit 2 before submitting.
+        assert "--gpu-mode" not in argv
         assert _flag(argv, "--isolation-policy") == "default"
         assert _flag(argv, "--max-duration-seconds") == "14400"
         assert _flags(argv, "--bind") == [
@@ -504,6 +517,37 @@ def test_fake_cape_rejects_workspace_flag_and_requires_pool_user_task_id(
     assert proc.returncode == 2
     for flag in ("--pool", "--user", "--task-id"):
         assert flag in proc.stderr
+
+
+def test_fake_cape_rejects_dropped_gpu_mode_flag(cape_env: dict[str, Any]) -> None:
+    # Upstream removed `cape run --gpu-mode` entirely (requests now
+    # inherit exclusive/shared from the target pool). Sending the flag
+    # is an unknown-argument error: argparse exits 2 with usage on
+    # stderr, so a provider that still emits it never submits anything.
+    binary = str(cape_env["binary"])
+    legacy = [
+        binary, "run", "--pool", "p", "--user", "u", "--task-id", "t",
+        "--gpu-mode", "whole", "--image", "img", "--", "sh", "-c", "true",
+    ]  # fmt: skip
+    proc = subprocess.run(legacy, capture_output=True, text=True)
+    assert proc.returncode == 2
+    assert "--gpu-mode" in proc.stderr
+
+
+async def test_run_face_never_emits_dropped_gpu_mode_flag(cape_env: dict[str, Any]) -> None:
+    # Regression for the upstream flag removal: the run argv must not
+    # contain --gpu-mode for any GPU count (0 or N). The fake parser
+    # would exit 2 on it, but assert explicitly so the failure reads as
+    # a contract violation rather than a create() error.
+    provider = _provider(cape_env)
+    for resource, gpus in ((None, 0), (SandboxResource(gpu=4), 4)):
+        sandbox = await provider.create(_sandbox_config(resource=resource))
+        try:
+            argv = _log_entries(cape_env, verb="run")[-1]["argv"]
+            assert "--gpu-mode" not in argv
+            assert _flag(argv, "--gpus") == str(gpus)
+        finally:
+            await provider.delete(sandbox.sandbox_id)
 
 
 async def test_fake_cape_logs_empty_while_running_populated_when_terminal(
