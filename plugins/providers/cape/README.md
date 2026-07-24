@@ -35,7 +35,7 @@ What matched the previously assumed contract:
   timeout and on null-exit-code terminal states, so only the status
   JSON `state` field can be trusted.)
 * `cape run` flags: `--image`, `--gpus`, `--cpu-cores`, `--memory-gb`,
-  `--gpu-mode whole`, `--isolation-policy`, `--runtime-adapter`,
+  `--isolation-policy`, `--runtime-adapter`,
   `--max-duration-seconds`, `--session-key`,
   `--bind src:dst[:ro|rw]`, `--env K=V`, and the `-- <workload>`
   remainder are all real, with matching semantics.
@@ -96,6 +96,19 @@ What the verification changed:
   journal-less controller restart the request id is unknown; the old
   behavior kept bookkeeping (and its port) forever. A 404 in the
   CLI's stderr JSON now confirms deletion.
+
+Later upstream CLI changes tracked:
+
+* **`--gpu-mode` was removed from `cape run`.** Requests now inherit
+  exclusive/shared GPU behavior from the target *pool*; there is no
+  per-request override. Sending the old flag is an unknown-argument
+  error (argparse exits 2 with a usage message before anything is
+  submitted), so the provider no longer emits it.
+* **`cape status` gained cotenancy fields**: `gpu_mode` (derived,
+  `null` | `"exclusive"` | `"shared"`), `gpu_cotenant_count`, and
+  `gpu_cotenant_counts`. The provider's status parsing only reads
+  `state` and the `request_id` echo, so the new fields are tolerated
+  (ignored) without changes.
 
 ### Networking: pin a host-network runtime adapter
 

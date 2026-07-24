@@ -560,7 +560,7 @@ class _CapeCli:
 
             cape run --controller-url U --token T --pool P --user USR
                 --task-id ID --image IMG --gpus N [--cpu-cores N]
-                [--memory-gb N] --gpu-mode whole --isolation-policy X
+                [--memory-gb N] --isolation-policy X
                 [--runtime-adapter Y] --max-duration-seconds T
                 --session-key KEY [--bind src:dst[:ro|rw]]...
                 [--env K=V]... -- <workload argv>
@@ -587,7 +587,7 @@ class _CapeCli:
             argv += ["--cpu-cores", str(int(cpu_cores))]
         if memory_gb is not None:
             argv += ["--memory-gb", str(int(memory_gb))]
-        argv += ["--gpu-mode", "whole", "--isolation-policy", cfg.isolation_policy]
+        argv += ["--isolation-policy", cfg.isolation_policy]
         if cfg.runtime_adapter:
             argv += ["--runtime-adapter", cfg.runtime_adapter]
         argv += ["--max-duration-seconds", str(int(cfg.max_duration_seconds))]
